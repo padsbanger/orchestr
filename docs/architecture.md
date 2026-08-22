@@ -23,6 +23,18 @@ The board uses typed frontend service wrappers to request repository data. The
 repository inspector is a non-blocking drawer, so Git activity can be viewed
 without leaving or mutating Kanban workflow state.
 
+## M4 worker boundary
+
+`crates/orchestr-worker` owns cross-platform local capability detection and
+process lifecycle. It accepts a program plus argument array, never a shell
+string, and returns separate stdout/stderr events. The Tauri host owns active
+run IDs and forwards those events to the UI; it also retains cancellation
+handles outside React and the database.
+
+The initial Workers screen exposes one implicit local worker and a predefined
+`git --version` diagnostic. This demonstrates streamed execution without
+opening an arbitrary command console before task/run authorization exists.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

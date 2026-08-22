@@ -3,6 +3,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/orchestr-db",
     "crates/orchestr-git",
+    "crates/orchestr-worker",
 ]
 resolver = "2"
 

@@ -205,6 +205,10 @@ The board can remain open while users inspect current repository state and recen
 
 ## M4 — Local Worker Runtime
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Introduce the Worker abstraction before AI execution.

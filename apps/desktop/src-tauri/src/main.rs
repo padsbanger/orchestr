@@ -1,21 +1,30 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use orchestr_db::{
     Database, NewProject, NewTask, Project, Task, TaskStatus, TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
+use orchestr_worker::{LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile};
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const LOCAL_WORKER_ID: &str = "local";
 
 struct AppState {
     database: Mutex<Database>,
+    local_worker_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+}
+
+struct ActiveLocalRun {
+    handle: WorkerHandle,
+    cancel_requested: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +73,22 @@ struct MoveTaskInput {
 struct RepositoryDiffInput {
     project_id: String,
     file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartedWorkerRun {
+    run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerRunEvent {
+    run_id: String,
+    kind: String,
+    stream: Option<OutputStream>,
+    text: Option<String>,
+    exit_code: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +270,111 @@ fn get_repository_diff(
     let workspace_path = workspace_path_for_project(&state, &input.project_id)?;
     GitService::file_diff(Path::new(&workspace_path), &input.file_path)
         .map_err(|error| format!("Unable to inspect the file diff: {error}"))
+}
+
+#[tauri::command]
+fn get_local_worker_profile(state: State<'_, AppState>) -> Result<WorkerProfile, String> {
+    let mut profile = LocalWorker::profile();
+    if !state
+        .local_worker_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?
+        .is_empty()
+    {
+        profile.status = "busy".into();
+    }
+    Ok(profile)
+}
+
+#[tauri::command]
+fn run_local_diagnostic(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartedWorkerRun, String> {
+    let run = LocalWorker::start(ProcessRequest {
+        program: "git".into(),
+        arguments: vec!["--version".into()],
+        working_directory: None,
+    })
+    .map_err(|error| format!("Unable to start the local worker diagnostic: {error}"))?;
+    let run_id = Uuid::new_v4().to_string();
+    let handle = run.handle;
+    let active_runs = Arc::clone(&state.local_worker_runs);
+    active_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?
+        .insert(
+            run_id.clone(),
+            ActiveLocalRun {
+                handle: handle.clone(),
+                cancel_requested: false,
+            },
+        );
+
+    let event_run_id = run_id.clone();
+    thread::spawn(move || {
+        for output in run.output {
+            let _ = app.emit(
+                "worker://run-event",
+                WorkerRunEvent {
+                    run_id: event_run_id.clone(),
+                    kind: "output".into(),
+                    stream: Some(output.stream),
+                    text: Some(output.text),
+                    exit_code: None,
+                },
+            );
+        }
+
+        let result = handle.wait();
+        let cancelled = active_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(&event_run_id))
+            .is_some_and(|run| run.cancel_requested);
+        let (kind, text, exit_code) = match result {
+            Ok(status) if cancelled => (
+                "cancelled",
+                Some("Command cancelled.".into()),
+                status.code(),
+            ),
+            Ok(status) if status.success() => ("completed", None, status.code()),
+            Ok(status) => (
+                "failed",
+                Some("Command exited with an error.".into()),
+                status.code(),
+            ),
+            Err(error) => ("failed", Some(error.to_string()), None),
+        };
+        let _ = app.emit(
+            "worker://run-event",
+            WorkerRunEvent {
+                run_id: event_run_id,
+                kind: kind.into(),
+                stream: None,
+                text,
+                exit_code,
+            },
+        );
+    });
+
+    Ok(StartedWorkerRun { run_id })
+}
+
+#[tauri::command]
+fn cancel_local_worker_run(run_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut active_runs = state
+        .local_worker_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?;
+    let run = active_runs
+        .get_mut(&run_id)
+        .ok_or_else(|| "The worker command is no longer running.".to_owned())?;
+    run.handle
+        .cancel()
+        .map_err(|error| format!("Unable to cancel the local worker command: {error}"))?;
+    run.cancel_requested = true;
+    Ok(())
 }
 
 #[tauri::command]
@@ -445,6 +575,7 @@ fn main() {
 
             app.manage(AppState {
                 database: Mutex::new(database),
+                local_worker_runs: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })
@@ -458,6 +589,9 @@ fn main() {
             register_project,
             get_repository_details,
             get_repository_diff,
+            get_local_worker_profile,
+            run_local_diagnostic,
+            cancel_local_worker_run,
             list_tasks,
             create_task,
             update_task,

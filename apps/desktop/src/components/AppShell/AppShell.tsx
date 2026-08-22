@@ -1,4 +1,4 @@
-import { FolderKanban, PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
+import { Cpu, FolderKanban, PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
 import type { PropsWithChildren } from "react";
 import { NavLink } from "react-router-dom";
 import "./AppShell.css";
@@ -32,6 +32,10 @@ export function AppShell({
           <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
             <Settings2 size={16} />
             <span>Settings</span>
+          </NavLink>
+          <NavLink to="/workers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+            <Cpu size={16} />
+            <span>Workers</span>
           </NavLink>
         </nav>
         <div className="sidebar-footer">

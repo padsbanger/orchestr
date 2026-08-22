@@ -1,0 +1,9 @@
+[package]
+name = "orchestr-worker"
+version = "0.1.0"
+description = "Cross-platform local execution runtime for Orchestr"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true

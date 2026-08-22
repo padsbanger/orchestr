@@ -4,6 +4,7 @@ import { AppShell } from "./components/AppShell/AppShell";
 import { DashboardPage } from "./pages/DashboardPage/DashboardPage";
 import { BoardPage } from "./pages/BoardPage/BoardPage";
 import { SettingsPage } from "./pages/SettingsPage/SettingsPage";
+import { WorkersPage } from "./pages/WorkersPage/WorkersPage";
 import { getSetting, setSetting } from "./services/settings";
 
 const SIDEBAR_SETTING = "ui.sidebar.collapsed";
@@ -40,6 +41,7 @@ export function App() {
         <Route path="/projects" element={<DashboardPage />} />
         <Route path="/projects/:projectId" element={<BoardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/workers" element={<WorkersPage />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>
     </AppShell>
