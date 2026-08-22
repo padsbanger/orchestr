@@ -46,12 +46,11 @@ jobs:
       - name: Test persistence crate
         run: cargo test -p orchestr-db
 
-      - name: Verify release tag matches the app version
+      - name: Set release version from tag
         if: ${{ github.ref_type == 'tag' }}
         shell: bash
         run: |
-          app_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
-          test "$app_version" = "$GITHUB_REF_NAME"
+          node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('apps/desktop/src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.GITHUB_REF_NAME }));"
 
       - name: Build test installer
         if: ${{ github.ref_type != 'tag' }}
@@ -69,7 +68,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/desktop
-          args: --bundles nsis
+          args: --bundles nsis --config src-tauri/tauri.release.conf.json
           tagName: ${{ github.ref_name }}
           releaseName: Orchestr ${{ github.ref_name }}
           generateReleaseNotes: true

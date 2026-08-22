@@ -3,6 +3,7 @@ dist/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/tauri.release.conf.json
 target/
 *.db
 *.db-shm
