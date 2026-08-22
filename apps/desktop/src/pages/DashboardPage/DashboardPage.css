@@ -1,0 +1,25 @@
+.header-actions { display: flex; align-items: center; gap: 8px; }
+.header-actions .icon-button:disabled { cursor: wait; opacity: .5; }
+.inline-error { margin-top: 20px; padding: 10px 12px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 13px; }
+.empty-state { display: grid; justify-items: center; padding: 64px 20px; border: 1px dashed #394147; background: #141719; text-align: center; }
+.empty-state .primary-button { margin-top: 19px; }
+.empty-index { display: grid; place-items: center; width: 34px; height: 22px; margin-bottom: 17px; border: 1px solid #425059; color: #9aa6ad; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
+.empty-state h2 { font-size: 16px; }
+.empty-state p { margin-bottom: 0; color: #89939a; font-size: 13px; line-height: 1.55; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; padding-top: 24px; }
+.project-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 13px; min-height: 174px; padding: 17px; border: 1px solid #2d353a; background: #171a1d; color: inherit; text-decoration: none; }
+.project-card:hover { border-color: #48545c; background: #191d20; }
+.project-card-icon { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid #3d5968; background: #17242b; color: #8fc8e8; }
+.project-card-heading { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.project-card h2 { overflow: hidden; margin: 5px 0 0; color: #e8ecee; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.project-card > p { grid-column: 1 / -1; margin: 0; color: #929ca3; font-size: 12px; line-height: 1.55; }
+.branch-chip { padding: 4px 6px; border: 1px solid #384d5a; color: #9acde9; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; white-space: nowrap; }
+.project-workspace { display: grid; grid-column: 1 / -1; grid-template-columns: 67px minmax(0, 1fr); gap: 7px; align-items: baseline; padding-top: 11px; border-top: 1px solid #2b3135; }
+.project-workspace > span { color: #77828a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.project-workspace code { overflow: hidden; padding: 0; border: 0; background: none; color: #aab4bb; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 700px) {
+  .project-workspace { grid-template-columns: 1fr; gap: 4px; }
+}

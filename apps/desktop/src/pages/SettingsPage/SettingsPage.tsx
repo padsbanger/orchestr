@@ -1,3 +1,5 @@
+import "./SettingsPage.css";
+
 export function SettingsPage() {
   return (
     <section className="page">
@@ -27,4 +29,3 @@ export function SettingsPage() {
     </section>
   );
 }
-

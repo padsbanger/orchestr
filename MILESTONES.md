@@ -50,7 +50,7 @@ Launch app
 
 ## M1 — Projects + Local Git Repositories
 
-**Status:** Ready for validation
+**Status:** Complete
 
 ### Goal
 
@@ -116,6 +116,8 @@ A user can create a project, close Orchestr, reopen it, and open the same valid 
 ---
 
 ## M2 — Core Kanban
+
+**Status:** Ready for validation
 
 ### Goal
 

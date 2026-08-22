@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { AppShell } from "./components/AppShell";
-import { DashboardPage } from "./pages/DashboardPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { AppShell } from "./components/AppShell/AppShell";
+import { DashboardPage } from "./pages/DashboardPage/DashboardPage";
+import { BoardPage } from "./pages/BoardPage/BoardPage";
+import { SettingsPage } from "./pages/SettingsPage/SettingsPage";
 import { getSetting, setSetting } from "./services/settings";
 
 const SIDEBAR_SETTING = "ui.sidebar.collapsed";
@@ -37,10 +38,10 @@ export function App() {
     >
       <Routes>
         <Route path="/projects" element={<DashboardPage />} />
+        <Route path="/projects/:projectId" element={<BoardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>
     </AppShell>
   );
 }
-

@@ -10,7 +10,7 @@ components never access SQLite or execute operating-system commands.
 directory, opens SQLite, runs migrations, and exposes the small settings API.
 
 `crates/orchestr-db` owns SQLite connection setup, migration execution, and
-persistence repositories for settings, projects, and workspaces.
+persistence repositories for settings, projects, workspaces, and Kanban tasks.
 
 `crates/orchestr-git` owns validated interactions with the installed `git`
 executable. It accepts explicit workspace paths, passes command and argument

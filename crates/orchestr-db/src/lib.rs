@@ -10,6 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_settings.sql")),
     (2, include_str!("../migrations/0002_projects.sql")),
+    (3, include_str!("../migrations/0003_tasks.sql")),
 ];
 
 pub struct Database {
@@ -45,6 +46,72 @@ pub struct NewProject {
     pub workspace_id: String,
     pub worker_id: String,
     pub workspace_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Backlog,
+    Todo,
+    InProgress,
+    Review,
+    Done,
+}
+
+impl TaskStatus {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "backlog" => Some(Self::Backlog),
+            "todo" => Some(Self::Todo),
+            "in_progress" => Some(Self::InProgress),
+            "review" => Some(Self::Review),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::Review => "review",
+            Self::Done => "done",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        Self::parse(&value).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                format!("Unknown task status: {value}").into(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: TaskStatus,
+    pub position: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewTask {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+pub struct TaskUpdate {
+    pub title: String,
+    pub description: Option<String>,
 }
 
 impl Database {
@@ -135,6 +202,105 @@ impl Database {
         self.project_by_id(id)
     }
 
+    pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, description, status, position, created_at, updated_at
+             FROM tasks WHERE project_id = ?1
+             ORDER BY CASE status
+                 WHEN 'backlog' THEN 0
+                 WHEN 'todo' THEN 1
+                 WHEN 'in_progress' THEN 2
+                 WHEN 'review' THEN 3
+                 WHEN 'done' THEN 4
+             END, position ASC",
+        )?;
+        let records = statement
+            .query_map([project_id], task_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn create_task(&mut self, new_task: NewTask) -> Result<Task> {
+        let transaction = self.connection.transaction()?;
+        let position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM tasks
+             WHERE project_id = ?1 AND status = 'backlog'",
+            [&new_task.project_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO tasks (id, project_id, title, description, status, position)
+             VALUES (?1, ?2, ?3, ?4, 'backlog', ?5)",
+            params![
+                new_task.id,
+                new_task.project_id,
+                new_task.title,
+                new_task.description,
+                position
+            ],
+        )?;
+        transaction.commit()?;
+        self.task_by_id(&new_task.id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn update_task(&mut self, id: &str, update: TaskUpdate) -> Result<Option<Task>> {
+        let changed = self.connection.execute(
+            "UPDATE tasks SET title = ?1, description = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3",
+            params![update.title, update.description, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.task_by_id(id)
+    }
+
+    pub fn delete_task(&mut self, id: &str) -> Result<bool> {
+        let Some((project_id, status)) = self.task_location(id)? else {
+            return Ok(false);
+        };
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        normalize_positions(&transaction, &project_id, status)?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn move_task(
+        &mut self,
+        id: &str,
+        target_status: TaskStatus,
+        target_position: usize,
+    ) -> Result<Option<Task>> {
+        let Some((project_id, source_status)) = self.task_location(id)? else {
+            return Ok(None);
+        };
+        let transaction = self.connection.transaction()?;
+        let mut source_ids = task_ids_for_status(&transaction, &project_id, source_status)?;
+
+        if source_status == target_status {
+            source_ids.retain(|task_id| task_id != id);
+            let insert_at = target_position.min(source_ids.len());
+            source_ids.insert(insert_at, id.to_owned());
+            set_positions(&transaction, &source_ids)?;
+        } else {
+            source_ids.retain(|task_id| task_id != id);
+            let mut target_ids = task_ids_for_status(&transaction, &project_id, target_status)?;
+            let insert_at = target_position.min(target_ids.len());
+            target_ids.insert(insert_at, id.to_owned());
+
+            transaction.execute(
+                "UPDATE tasks SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+                params![target_status.as_str(), id],
+            )?;
+            set_positions(&transaction, &source_ids)?;
+            set_positions(&transaction, &target_ids)?;
+        }
+        transaction.commit()?;
+        self.task_by_id(id)
+    }
+
     fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
         let project = self
             .connection
@@ -182,6 +348,73 @@ impl Database {
             .collect::<Result<Vec<_>>>()?;
         Ok(records)
     }
+
+    fn task_by_id(&self, id: &str) -> Result<Option<Task>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, title, description, status, position, created_at, updated_at
+                 FROM tasks WHERE id = ?1",
+                [id],
+                task_from_row,
+            )
+            .optional()
+    }
+
+    fn task_location(&self, id: &str) -> Result<Option<(String, TaskStatus)>> {
+        self.connection
+            .query_row(
+                "SELECT project_id, status FROM tasks WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, TaskStatus::from_database(row.get(1)?)?)),
+            )
+            .optional()
+    }
+}
+
+fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        status: TaskStatus::from_database(row.get(4)?)?,
+        position: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn task_ids_for_status(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    status: TaskStatus,
+) -> Result<Vec<String>> {
+    let mut statement = transaction.prepare(
+        "SELECT id FROM tasks WHERE project_id = ?1 AND status = ?2 ORDER BY position ASC",
+    )?;
+    let records = statement
+        .query_map(params![project_id, status.as_str()], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn normalize_positions(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    status: TaskStatus,
+) -> Result<()> {
+    let ids = task_ids_for_status(transaction, project_id, status)?;
+    set_positions(transaction, &ids)
+}
+
+fn set_positions(transaction: &rusqlite::Transaction<'_>, ids: &[String]) -> Result<()> {
+    for (position, id) in ids.iter().enumerate() {
+        transaction.execute(
+            "UPDATE tasks SET position = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![position as i64, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
@@ -213,7 +446,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, NewProject};
+    use super::{Database, NewProject, NewTask, TaskStatus, TaskUpdate};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -270,6 +503,97 @@ mod tests {
         assert_eq!(projects[0].workspaces[0].worker_id, "local");
         drop(reopened);
 
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn tasks_move_between_columns_and_keep_contiguous_ordering() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Board project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/board-project".into(),
+            })
+            .expect("project saves");
+
+        for (id, title) in [
+            ("task-1", "First"),
+            ("task-2", "Second"),
+            ("task-3", "Third"),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-1".into(),
+                    title: title.into(),
+                    description: None,
+                })
+                .expect("task saves");
+        }
+
+        database
+            .move_task("task-1", TaskStatus::Todo, 0)
+            .expect("task moves")
+            .expect("task exists");
+        database
+            .move_task("task-3", TaskStatus::Backlog, 0)
+            .expect("task reorders")
+            .expect("task exists");
+
+        let tasks = database.list_tasks("project-1").expect("tasks load");
+        let backlog = tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Backlog)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            backlog
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-3", "task-2"]
+        );
+        assert_eq!(
+            backlog.iter().map(|task| task.position).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "task-1")
+                .expect("task exists")
+                .status,
+            TaskStatus::Todo
+        );
+
+        let updated = database
+            .update_task(
+                "task-1",
+                TaskUpdate {
+                    title: "First, revised".into(),
+                    description: Some("Updated description".into()),
+                },
+            )
+            .expect("task updates")
+            .expect("task exists");
+        assert_eq!(updated.title, "First, revised");
+        assert!(database.delete_task("task-3").expect("task deletes"));
+        let tasks = database.list_tasks("project-1").expect("tasks reload");
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "task-2")
+                .expect("remaining backlog task")
+                .position,
+            0
+        );
+
+        drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }

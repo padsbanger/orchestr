@@ -1,7 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, GitFork, HardDriveDownload, X } from "lucide-react";
 import { FormEvent, useState } from "react";
-import { createProject, registerProject } from "../services/projects";
+import { createProject, registerProject } from "../../services/projects";
+import "./NewProjectDialog.css";
 
 type ProjectMode = "new" | "existing";
 

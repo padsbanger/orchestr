@@ -1,0 +1,18 @@
+.modal-backdrop { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(5 7 8 / 72%); }
+.project-dialog { width: min(100%, 560px); max-height: min(720px, 100vh - 40px); overflow: auto; border: 1px solid #3a4349; background: #171a1d; box-shadow: 0 24px 64px rgb(0 0 0 / 46%); }
+.dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 20px 16px; border-bottom: 1px solid #2b3237; }
+.dialog-header h2 { margin: 0; font-size: 18px; }
+.mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 16px 20px 0; }
+.mode-switch button { display: flex; align-items: center; justify-content: center; gap: 8px; height: 36px; border: 1px solid #343c42; background: #131619; color: #929ca2; cursor: pointer; font-size: 12px; }
+.mode-switch button.active { border-color: #477a98; background: #1a2d38; color: #d9eef9; }
+.project-dialog form { display: grid; gap: 15px; padding: 20px; }
+.project-dialog label { display: grid; gap: 7px; color: #c7cdd1; font-size: 12px; font-weight: 600; }
+.project-dialog input, .project-dialog textarea { width: 100%; padding: 9px 10px; border: 1px solid #394147; outline: none; background: #111315; color: #e9edef; font: inherit; font-size: 13px; resize: vertical; }
+.project-dialog input:focus, .project-dialog textarea:focus { border-color: #4d91b7; box-shadow: 0 0 0 2px rgb(56 125 166 / 18%); }
+.field-optional, .field-hint { color: #77828a; font-size: 11px; font-weight: 400; }
+.path-input { display: grid; grid-template-columns: minmax(0, 1fr) 37px; }
+.path-input input { border-right: 0; }
+.path-input button { display: grid; place-items: center; border: 1px solid #394147; background: #20262a; color: #b7c0c5; cursor: pointer; }
+.path-input button:hover { background: #293137; color: #f1f4f5; }
+.form-error { margin: 0; padding: 9px 10px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 12px; line-height: 1.45; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 5px; }

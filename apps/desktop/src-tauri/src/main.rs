@@ -4,7 +4,9 @@ use std::{
     sync::Mutex,
 };
 
-use orchestr_db::{Database, NewProject, Project, Workspace};
+use orchestr_db::{
+    Database, NewProject, NewTask, Project, Task, TaskStatus, TaskUpdate, Workspace,
+};
 use orchestr_git::GitService;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -33,6 +35,30 @@ struct RegisterProjectInput {
     path: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateTaskInput {
+    project_id: String,
+    title: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateTaskInput {
+    id: String,
+    title: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveTaskInput {
+    id: String,
+    status: String,
+    position: usize,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectResponse {
@@ -52,6 +78,19 @@ struct WorkspaceResponse {
     project_id: String,
     worker_id: String,
     path: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskResponse {
+    id: String,
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    position: i64,
     created_at: String,
     updated_at: String,
 }
@@ -76,9 +115,24 @@ impl From<Workspace> for WorkspaceResponse {
             id: workspace.id,
             project_id: workspace.project_id,
             worker_id: workspace.worker_id,
-            path: workspace.path,
+            path: normalize_workspace_path(&workspace.path),
             created_at: workspace.created_at,
             updated_at: workspace.updated_at,
+        }
+    }
+}
+
+impl From<Task> for TaskResponse {
+    fn from(task: Task) -> Self {
+        Self {
+            id: task.id,
+            project_id: task.project_id,
+            title: task.title,
+            description: task.description,
+            status: task.status.as_str().to_owned(),
+            position: task.position,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
         }
     }
 }
@@ -166,6 +220,80 @@ fn register_project(
     )
 }
 
+#[tauri::command]
+fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<TaskResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_tasks(&project_id)
+        .map(|tasks| tasks.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load tasks: {error}"))
+}
+
+#[tauri::command]
+fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
+    let title = validate_task_title(&input.title)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_task(NewTask {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            title,
+            description: normalize_optional_text(input.description),
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to create task: {error}"))
+}
+
+#[tauri::command]
+fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
+    let title = validate_task_title(&input.title)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .update_task(
+            &input.id,
+            TaskUpdate {
+                title,
+                description: normalize_optional_text(input.description),
+            },
+        )
+        .map_err(|error| format!("Unable to update task: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The task no longer exists.".into())
+}
+
+#[tauri::command]
+fn delete_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let deleted = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .delete_task(&id)
+        .map_err(|error| format!("Unable to delete task: {error}"))?;
+    deleted
+        .then_some(())
+        .ok_or_else(|| "The task no longer exists.".into())
+}
+
+#[tauri::command]
+fn move_task(input: MoveTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
+    let status =
+        TaskStatus::parse(&input.status).ok_or_else(|| "Unknown task status.".to_owned())?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .move_task(&input.id, status, input.position)
+        .map_err(|error| format!("Unable to move task: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The task no longer exists.".into())
+}
+
 fn save_project(
     state: &State<'_, AppState>,
     name: String,
@@ -184,7 +312,7 @@ fn save_project(
             default_branch,
             workspace_id: Uuid::new_v4().to_string(),
             worker_id: LOCAL_WORKER_ID.to_owned(),
-            workspace_path,
+            workspace_path: normalize_workspace_path(&workspace_path),
         })
         .map_err(|error| format!("Unable to save the project: {error}"))?;
     Ok(project.into())
@@ -201,11 +329,40 @@ fn validate_project_name(name: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
+fn validate_task_title(title: &str) -> Result<String, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A task title is required.".into());
+    }
+    if title.chars().count() > 200 {
+        return Err("Task titles cannot exceed 200 characters.".into());
+    }
+    Ok(title.to_owned())
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|text| {
         let text = text.trim();
         (!text.is_empty()).then(|| text.to_owned())
     })
+}
+
+/// Converts Windows' internal extended-length paths into the normal paths a
+/// person expects to see and can copy into other tools. `canonicalize` may
+/// return paths such as `\\?\C:\projects\orchestr` on Windows.
+fn normalize_workspace_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc_path}");
+        }
+        return path.strip_prefix(r"\\?\").unwrap_or(path).to_owned();
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
 }
 
 fn create_workspace_directory(parent_path: &str, directory_name: &str) -> Result<PathBuf, String> {
@@ -252,8 +409,31 @@ fn main() {
             list_projects,
             get_project,
             create_project,
-            register_project
+            register_project,
+            list_tasks,
+            create_task,
+            update_task,
+            delete_task,
+            move_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orchestr desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_workspace_path;
+
+    #[cfg(windows)]
+    #[test]
+    fn normalizes_windows_extended_length_paths() {
+        assert_eq!(
+            normalize_workspace_path(r"\\?\C:\Users\konta\Projects\repo-test"),
+            r"C:\Users\konta\Projects\repo-test"
+        );
+        assert_eq!(
+            normalize_workspace_path(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+    }
 }

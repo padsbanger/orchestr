@@ -1,0 +1,29 @@
+.app-shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; background: #101214; transition: grid-template-columns 150ms ease; }
+.app-shell.sidebar-collapsed { grid-template-columns: 58px minmax(0, 1fr); }
+.sidebar { position: relative; display: flex; flex-direction: column; min-height: 100vh; border-right: 1px solid #292d31; background: #15181a; overflow: hidden; }
+.brand { display: flex; align-items: center; gap: 10px; height: 59px; padding: 0 18px; border-bottom: 1px solid #292d31; font-family: "SFMono-Regular", Consolas, monospace; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.brand-mark { display: block; flex: 0 0 22px; width: 22px; height: 22px; object-fit: contain; }
+.brand-name { font-size: 12px; }
+.navigation { display: grid; gap: 4px; padding: 14px 10px; }
+.nav-item { display: flex; align-items: center; gap: 11px; height: 34px; padding: 0 9px; border: 1px solid transparent; color: #8f989f; text-decoration: none; font-size: 13px; white-space: nowrap; }
+.nav-item:hover { color: #d9dde0; background: #1d2124; }
+.nav-item.active { border-color: #343b40; background: #20252a; color: #f1f3f4; }
+.sidebar-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; min-height: 55px; padding: 10px; border-top: 1px solid #292d31; }
+.local-status { display: flex; align-items: center; gap: 7px; overflow: hidden; color: #89939a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; white-space: nowrap; }
+.local-status i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #55aa71; box-shadow: 0 0 0 2px #244a30; }
+.icon-button { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 1px solid #343a3f; background: transparent; color: #9da6ac; cursor: pointer; }
+.icon-button:hover { color: #f0f2f3; background: #252a2e; }
+.sidebar-collapsed .brand, .sidebar-collapsed .nav-item { padding-left: 17px; }
+.sidebar-collapsed .brand-name, .sidebar-collapsed .nav-item span, .sidebar-collapsed .local-status { display: none; }
+.sidebar-collapsed .sidebar-footer { justify-content: center; }
+.content { min-width: 0; }
+.error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 48px 0; padding: 10px 12px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 13px; }
+.error-banner button { border: 0; background: transparent; color: inherit; cursor: pointer; text-decoration: underline; }
+
+@media (max-width: 700px) {
+  .app-shell { grid-template-columns: 58px minmax(0, 1fr); }
+  .brand-name, .nav-item span, .local-status { display: none; }
+  .brand, .nav-item { padding-left: 17px; }
+  .sidebar-footer { justify-content: center; }
+  .error-banner { margin: 12px 20px 0; }
+}

@@ -1,7 +1,9 @@
 import { FolderGit2, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { NewProjectDialog } from "../components/NewProjectDialog";
-import { listProjects, type Project } from "../services/projects";
+import { Link } from "react-router-dom";
+import { NewProjectDialog } from "../../components/NewProjectDialog/NewProjectDialog";
+import { listProjects, type Project } from "../../services/projects";
+import "./DashboardPage.css";
 
 export function DashboardPage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -71,7 +73,7 @@ export function DashboardPage() {
 function ProjectCard({ project }: { project: Project }) {
   const workspace = project.workspaces[0];
   return (
-    <article className="project-card">
+    <Link className="project-card" to={`/projects/${project.id}`}>
       <div className="project-card-icon"><FolderGit2 size={18} /></div>
       <div className="project-card-heading">
         <h2>{project.name}</h2>
@@ -82,6 +84,6 @@ function ProjectCard({ project }: { project: Project }) {
         <span>workspace</span>
         <code>{workspace?.path || "No local workspace"}</code>
       </div>
-    </article>
+    </Link>
   );
 }

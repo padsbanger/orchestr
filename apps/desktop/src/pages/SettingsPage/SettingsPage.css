@@ -1,0 +1,9 @@
+.settings-list { display: grid; margin-top: 24px; border: 1px solid #2a3034; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 17px; background: #171a1d; }
+.setting-row + .setting-row { border-top: 1px solid #2a3034; }
+.setting-row p { margin-bottom: 0; color: #89939a; font-size: 13px; line-height: 1.55; }
+.setting-row code, .status-chip { padding: 4px 7px; border: 1px solid #394147; background: #111315; color: #aeb8bd; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; white-space: nowrap; }
+
+@media (max-width: 700px) {
+  .setting-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+}

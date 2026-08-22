@@ -1,6 +1,7 @@
 import { FolderKanban, PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
 import type { PropsWithChildren } from "react";
 import { NavLink } from "react-router-dom";
+import "./AppShell.css";
 
 type AppShellProps = PropsWithChildren<{
   sidebarCollapsed: boolean;
