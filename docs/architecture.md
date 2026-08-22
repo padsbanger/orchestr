@@ -10,16 +10,18 @@ components never access SQLite or execute operating-system commands.
 directory, opens SQLite, runs migrations, and exposes the small settings API.
 
 `crates/orchestr-db` owns SQLite connection setup, migration execution, and
-persistence repositories. M1 will add project/workspace repositories here;
-Git behavior will live behind a separate service rather than in the UI.
+persistence repositories for settings, projects, and workspaces.
+
+`crates/orchestr-git` owns validated interactions with the installed `git`
+executable. It accepts explicit workspace paths, passes command and argument
+arrays without a shell, and resolves the actual repository root before a
+workspace is persisted.
 
 ## Planned extraction points
 
-The Rust workspace starts with only the database crate because it is required
-by M0. Future crates are introduced only with their milestones:
+The Rust workspace introduces crates only when a milestone needs their
+boundary:
 
-- `orchestr-core`: project/task application behavior (M1/M2)
-- `orchestr-git`: validated Git operations (M1/M3)
+- `orchestr-core`: project/task application behavior (M2+)
 - `orchestr-worker`, `orchestr-protocol`, `orchestr-platform`: worker runtime
   and remote protocol work (M4+)
-

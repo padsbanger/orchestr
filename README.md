@@ -14,7 +14,7 @@ Install frontend dependencies and start the desktop app:
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri -- dev
 ```
 
 Useful checks:
@@ -23,6 +23,7 @@ Useful checks:
 npm run check
 npm run build
 cargo test -p orchestr-db
+cargo test -p orchestr-git
 ```
 
 The first launch creates Orchestr's local SQLite database in the operating

@@ -1,0 +1,10 @@
+[package]
+name = "orchestr-git"
+version = "0.1.0"
+description = "Validated Git operations for Orchestr workspaces"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+

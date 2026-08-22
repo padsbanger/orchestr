@@ -3,6 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the local Orchestr desktop window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }
-

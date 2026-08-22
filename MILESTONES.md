@@ -8,7 +8,9 @@ Each milestone should leave the application in a coherent, usable state.
 
 ---
 
-## M0 — Desktop Foundation
+## M0 — Desktop Foundation — Complete
+
+**Completed:** 2026-08-22
 
 ### Goal
 
@@ -47,6 +49,8 @@ Launch app
 ---
 
 ## M1 — Projects + Local Git Repositories
+
+**Status:** Ready for validation
 
 ### Goal
 
