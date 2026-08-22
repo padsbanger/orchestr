@@ -5,11 +5,12 @@
 
 use std::{
     ffi::OsStr,
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +47,13 @@ pub struct RepositoryDetails {
     pub summary: RepositorySummary,
     pub recent_commits: Vec<CommitSummary>,
     pub changed_files: Vec<ChangedFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FilePreview {
+    Text { content: String, truncated: bool },
+    Image { data: String, mime_type: String },
 }
 
 #[derive(Debug)]
@@ -111,6 +119,68 @@ impl GitService {
             ],
         )?;
         Ok((!diff.is_empty()).then(|| truncate_diff(diff)))
+    }
+
+    pub fn file_preview(path: &Path, file_path: &str) -> Result<Option<FilePreview>> {
+        const MAX_TEXT_PREVIEW_BYTES: usize = 100_000;
+        const MAX_IMAGE_PREVIEW_BYTES: usize = 5 * 1024 * 1024;
+
+        let root_path = repository_root(path)?;
+        validate_repository_relative_path(file_path)?;
+        let file_path = root_path.join(file_path);
+        let metadata = match fs::metadata(&file_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(GitError(format!("Unable to inspect the file: {error}"))),
+        };
+        if !metadata.is_file() {
+            return Ok(None);
+        }
+        let canonical_file = fs::canonicalize(&file_path)
+            .map_err(|error| GitError(format!("Unable to resolve the file path: {error}")))?;
+        if !canonical_file.starts_with(&root_path) {
+            return Err(GitError(
+                "The file path must stay within the repository.".into(),
+            ));
+        }
+
+        let bytes = fs::read(&canonical_file)
+            .map_err(|error| GitError(format!("Unable to read the file: {error}")))?;
+        if let Some(mime_type) = image_mime_type(&bytes) {
+            if bytes.len() > MAX_IMAGE_PREVIEW_BYTES {
+                return Err(GitError(
+                    "Images larger than 5 MB cannot be previewed.".into(),
+                ));
+            }
+            return Ok(Some(FilePreview::Image {
+                data: STANDARD.encode(bytes),
+                mime_type: mime_type.into(),
+            }));
+        }
+        if bytes.contains(&0) {
+            return Err(GitError("Binary files cannot be previewed.".into()));
+        }
+        let truncated = bytes.len() > MAX_TEXT_PREVIEW_BYTES;
+        let preview = &bytes[..bytes.len().min(MAX_TEXT_PREVIEW_BYTES)];
+        let mut content = String::from_utf8_lossy(preview).into_owned();
+        if truncated {
+            content.push_str("\n\n[Preview truncated after 100 KB]");
+        }
+        Ok(Some(FilePreview::Text { content, truncated }))
+    }
+}
+
+fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 
@@ -316,7 +386,7 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::GitService;
+    use super::{FilePreview, GitService};
     use std::{
         fs,
         process::Command,
@@ -403,6 +473,23 @@ mod tests {
             .expect("tracked file has a diff");
         assert!(diff.contains("+changed"));
         assert!(GitService::file_diff(&directory, "../outside.txt").is_err());
+        let preview = GitService::file_preview(&directory, "new-file.txt")
+            .expect("file preview loads")
+            .expect("file exists");
+        assert!(matches!(preview, FilePreview::Text { content, .. } if content == "untracked\n"));
+
+        fs::write(
+            directory.join("diagram.png"),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        )
+        .expect("image writes");
+        let preview = GitService::file_preview(&directory, "diagram.png")
+            .expect("image preview loads")
+            .expect("image exists");
+        assert!(
+            matches!(preview, FilePreview::Image { mime_type, .. } if mime_type == "image/png")
+        );
+        assert!(GitService::file_preview(&directory, "../outside.txt").is_err());
 
         fs::remove_dir_all(directory).expect("temporary directory removes");
     }

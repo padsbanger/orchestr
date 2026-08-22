@@ -453,6 +453,16 @@ fn get_repository_diff(
 }
 
 #[tauri::command]
+fn get_repository_file_preview(
+    input: RepositoryDiffInput,
+    state: State<'_, AppState>,
+) -> Result<Option<orchestr_git::FilePreview>, String> {
+    let workspace_path = workspace_path_for_project(&state, &input.project_id)?;
+    GitService::file_preview(Path::new(&workspace_path), &input.file_path)
+        .map_err(|error| format!("Unable to preview the file: {error}"))
+}
+
+#[tauri::command]
 fn get_local_worker_profile(state: State<'_, AppState>) -> Result<WorkerProfile, String> {
     let mut profile = LocalWorker::profile();
     if !state
@@ -1327,6 +1337,7 @@ fn main() {
             register_project,
             get_repository_details,
             get_repository_diff,
+            get_repository_file_preview,
             get_local_worker_profile,
             run_local_diagnostic,
             get_codex_provider_status,

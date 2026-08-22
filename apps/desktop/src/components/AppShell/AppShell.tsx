@@ -50,13 +50,15 @@ export function AppShell({
         </div>
       </aside>
       <main className="content">
-        {persistenceError && (
-          <div className="error-banner" role="alert">
-            <span>{persistenceError}</span>
-            <button onClick={onDismissError}>Dismiss</button>
-          </div>
-        )}
-        {children}
+        <div className="content-notice">
+          {persistenceError && (
+            <div className="error-banner" role="alert">
+              <span>{persistenceError}</span>
+              <button onClick={onDismissError}>Dismiss</button>
+            </div>
+          )}
+        </div>
+        <div className="route-content">{children}</div>
       </main>
     </div>
   );

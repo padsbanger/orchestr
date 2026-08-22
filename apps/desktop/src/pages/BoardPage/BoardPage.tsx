@@ -207,21 +207,25 @@ export function BoardPage() {
           </div>
         </div>
       </header>
-      {error && <div className="inline-error" role="alert">{error}</div>}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={columnCollisionDetection}
-        onDragStart={({ active }) => setActiveTaskId(String(active.id))}
-        onDragCancel={() => setActiveTaskId(undefined)}
-        onDragEnd={(event) => { setActiveTaskId(undefined); void handleDragEnd(event); }}
-      >
-        <div className="kanban-board">
-          {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} onInspect={setInspectedTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
+      <div className="board-body">
+        <div className="board-notice">
+          {error && <div className="inline-error" role="alert">{error}</div>}
         </div>
-        <DragOverlay dropAnimation={null}>
-          {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
-        </DragOverlay>
-      </DndContext>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={columnCollisionDetection}
+          onDragStart={({ active }) => setActiveTaskId(String(active.id))}
+          onDragCancel={() => setActiveTaskId(undefined)}
+          onDragEnd={(event) => { setActiveTaskId(undefined); void handleDragEnd(event); }}
+        >
+          <div className="kanban-board">
+            {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} onInspect={setInspectedTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
+          </div>
+          <DragOverlay dropAnimation={null}>
+            {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
+          </DragOverlay>
+        </DndContext>
+      </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
       {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}

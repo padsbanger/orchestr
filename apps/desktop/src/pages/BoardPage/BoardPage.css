@@ -1,4 +1,4 @@
-.board-page { display: grid; min-height: 100vh; grid-template-rows: auto minmax(0, 1fr); overflow-x: auto; }
+.board-page { display: grid; height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
 .board-header { padding: 26px 32px 20px; border-bottom: 1px solid #292d31; background: #131618; }
 .back-link { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 19px; color: #98a4aa; font-size: 12px; text-decoration: none; }
 .back-link:hover { color: #dce3e6; }
@@ -12,9 +12,10 @@
 .repository-clean { color: #73bd88; }
 .repository-dirty { color: #dca65c; }
 .repository-pending { color: #8d989e; }
-.board-page > .inline-error { margin: 16px 32px 0; padding: 10px 12px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 13px; }
-.kanban-board { display: grid; grid-template-columns: repeat(5, minmax(235px, 1fr)); gap: 12px; min-width: 1240px; padding: 16px 20px 24px; }
-.kanban-column { display: flex; min-height: calc(100vh - 170px); flex-direction: column; border: 1px solid #2b3237; background: #15181a; transition: border-color 120ms ease, background 120ms ease; }
+.board-body { display: grid; min-height: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.board-notice > .inline-error { margin: 16px 32px 0; padding: 10px 12px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 13px; }
+.kanban-board { display: grid; min-width: 0; min-height: 0; grid-template-columns: repeat(5, minmax(235px, 1fr)); gap: 12px; overflow: auto; overscroll-behavior: contain; padding: 16px 20px 24px; }
+.kanban-column { display: flex; min-height: 100%; flex-direction: column; border: 1px solid #2b3237; background: #15181a; transition: border-color 120ms ease, background 120ms ease; }
 .kanban-column.is-over { border-color: #4c87a8; background: #172027; }
 .column-header { display: flex; align-items: center; justify-content: space-between; min-height: 43px; padding: 0 11px; border-bottom: 1px solid #2b3237; }
 .column-header > div { display: flex; align-items: center; gap: 8px; }
@@ -56,6 +57,6 @@
   .board-header { padding: 22px 20px 18px; }
   .board-title-row { flex-direction: column; }
   .board-header-actions { flex-wrap: wrap; justify-content: flex-start; }
-  .board-page > .inline-error { margin-left: 20px; margin-right: 20px; }
+  .board-notice > .inline-error { margin-left: 20px; margin-right: 20px; }
   .kanban-board { padding-left: 12px; padding-right: 12px; }
 }

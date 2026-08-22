@@ -1,6 +1,6 @@
 import { FileCode2, GitCommitHorizontal, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
-import { getRepositoryDiff, type ChangedFile, type RepositoryDetails } from "../../services/projects";
+import { getRepositoryDiff, getRepositoryFilePreview, type ChangedFile, type FilePreview, type RepositoryDetails } from "../../services/projects";
 import "./RepositoryInspector.css";
 
 type RepositoryInspectorProps = {
@@ -22,21 +22,24 @@ export function RepositoryInspector({
 }: RepositoryInspectorProps) {
   const [selectedFile, setSelectedFile] = useState<ChangedFile>();
   const [diff, setDiff] = useState<string | null>();
+  const [preview, setPreview] = useState<FilePreview | null>();
   const [diffError, setDiffError] = useState<string>();
+  const [previewError, setPreviewError] = useState<string>();
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+  const [fileView, setFileView] = useState<"preview" | "diff">("preview");
 
   const selectFile = async (file: ChangedFile) => {
     setSelectedFile(file);
     setDiff(undefined);
+    setPreview(undefined);
     setDiffError(undefined);
+    setPreviewError(undefined);
+    setFileView("preview");
     setIsLoadingDiff(true);
-    try {
-      setDiff(await getRepositoryDiff(projectId, file.path));
-    } catch (loadError) {
-      setDiffError(loadError instanceof Error ? loadError.message : "Unable to load the file diff.");
-    } finally {
-      setIsLoadingDiff(false);
-    }
+    const [diffResult, previewResult] = await Promise.allSettled([getRepositoryDiff(projectId, file.path), getRepositoryFilePreview(projectId, file.path)]);
+    if (diffResult.status === "fulfilled") setDiff(diffResult.value); else setDiffError(diffResult.reason instanceof Error ? diffResult.reason.message : "Unable to load the file diff.");
+    if (previewResult.status === "fulfilled") setPreview(previewResult.value); else setPreviewError(previewResult.reason instanceof Error ? previewResult.reason.message : "Unable to preview the file.");
+    setIsLoadingDiff(false);
   };
 
   return (
@@ -78,7 +81,8 @@ export function RepositoryInspector({
 
           {selectedFile && <section className="repository-section diff-section">
             <h3><FileCode2 size={14} /> {selectedFile.path}</h3>
-            {isLoadingDiff ? <p className="repository-empty">Loading diffâ€¦</p> : diffError ? <p className="repository-error" role="alert">{diffError}</p> : diff ? <pre className="diff-output">{diff}</pre> : <p className="repository-empty">No Git diff is available for this file yet.</p>}
+            <div className="file-view-tabs"><button type="button" className={fileView === "preview" ? "active" : ""} onClick={() => setFileView("preview")}>Preview</button><button type="button" className={fileView === "diff" ? "active" : ""} onClick={() => setFileView("diff")}>Diff</button></div>
+            {isLoadingDiff ? <p className="repository-empty">Loading file activity...</p> : fileView === "preview" ? previewError ? <p className="repository-error" role="alert">{previewError}</p> : preview ? preview.kind === "image" ? <img className="file-image-preview" src={`data:${preview.mimeType};base64,${preview.data}`} alt={`Preview of ${selectedFile.path}`} /> : <pre className="diff-output file-preview-output">{preview.content}</pre> : <p className="repository-empty">This file is no longer available in the working tree.</p> : diffError ? <p className="repository-error" role="alert">{diffError}</p> : diff ? <pre className="diff-output">{diff}</pre> : <p className="repository-empty">No Git diff is available for this file yet.</p>}
           </section>}
 
           <section className="repository-section">

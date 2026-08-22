@@ -45,6 +45,10 @@ export type RepositoryDetails = {
   changedFiles: ChangedFile[];
 };
 
+export type FilePreview =
+  | { kind: "text"; content: string; truncated: boolean }
+  | { kind: "image"; data: string; mimeType: string };
+
 type CreateProjectInput = {
   name: string;
   description?: string;
@@ -80,4 +84,8 @@ export function getRepositoryDetails(projectId: string): Promise<RepositoryDetai
 
 export function getRepositoryDiff(projectId: string, filePath: string): Promise<string | null> {
   return invoke<string | null>("get_repository_diff", { input: { projectId, filePath } });
+}
+
+export function getRepositoryFilePreview(projectId: string, filePath: string): Promise<FilePreview | null> {
+  return invoke<FilePreview | null>("get_repository_file_preview", { input: { projectId, filePath } });
 }

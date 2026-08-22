@@ -24,7 +24,12 @@
 .changed-file span { color: #7db9dc; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
 .changed-file code { overflow: hidden; color: inherit; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .diff-section { min-height: 0; }
+.file-view-tabs { display: flex; gap: 4px; }
+.file-view-tabs button { height: 26px; padding: 0 8px; border: 1px solid #344047; background: #15191b; color: #89969d; cursor: pointer; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.file-view-tabs button:hover, .file-view-tabs button.active { border-color: #4e6b7b; background: #1d272d; color: #bcd9e7; }
 .diff-output { max-height: 360px; overflow: auto; margin: 0; padding: 12px; border: 1px solid #30383d; background: #101214; color: #bdc9cf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; white-space: pre; }
+.file-preview-output { overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
+.file-image-preview { display: block; width: 100%; max-height: 360px; border: 1px solid #30383d; background: #101214; object-fit: contain; }
 .commit-list { display: grid; gap: 0; margin: 0; padding: 0; border: 1px solid #30383d; list-style: none; }
 .commit-list li { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 9px; padding: 10px; background: #181c1f; }
 .commit-list li + li { border-top: 1px solid #2a3034; }
