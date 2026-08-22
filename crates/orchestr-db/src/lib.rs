@@ -24,7 +24,9 @@ impl SettingsRepository {
 
     pub fn get(&self, key: &str) -> Result<Option<String>> {
         self.connection
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0))
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
             .optional()
     }
 
@@ -60,7 +62,10 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::SettingsRepository;
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temporary_database_path() -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -74,13 +79,18 @@ mod tests {
     fn settings_persist_when_the_database_is_reopened() {
         let database_path = temporary_database_path();
         let repository = SettingsRepository::open(&database_path).expect("database opens");
-        repository.set("ui.sidebar.collapsed", "true").expect("setting saves");
+        repository
+            .set("ui.sidebar.collapsed", "true")
+            .expect("setting saves");
         drop(repository);
 
         let reopened = SettingsRepository::open(&database_path).expect("database reopens");
-        assert_eq!(reopened.get("ui.sidebar.collapsed").expect("setting loads"), Some("true".into()));
+        assert_eq!(
+            reopened.get("ui.sidebar.collapsed").expect("setting loads"),
+            Some("true".into())
+        );
+        drop(reopened);
 
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }
-
