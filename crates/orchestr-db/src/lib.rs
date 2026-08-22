@@ -15,6 +15,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         include_str!("../migrations/0004_task_specifications.sql"),
     ),
+    (5, include_str!("../migrations/0005_agents.sql")),
 ];
 
 pub struct Database {
@@ -104,6 +105,7 @@ pub struct Task {
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
+    pub assigned_agent_id: Option<String>,
     pub status: TaskStatus,
     pub position: i64,
     pub created_at: String,
@@ -119,6 +121,7 @@ pub struct NewTask {
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
+    pub assigned_agent_id: Option<String>,
 }
 
 pub struct TaskUpdate {
@@ -128,6 +131,42 @@ pub struct TaskUpdate {
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
+    pub assigned_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub role: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub skills: Vec<String>,
+    pub max_concurrent_tasks: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewAgent {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub role: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub skills: Vec<String>,
+    pub max_concurrent_tasks: i64,
+}
+
+pub struct AgentUpdate {
+    pub name: String,
+    pub provider: String,
+    pub role: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub skills: Vec<String>,
+    pub max_concurrent_tasks: i64,
 }
 
 impl Database {
@@ -221,7 +260,7 @@ impl Database {
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                    relevant_paths, dependency_ids, status, position, created_at, updated_at
+                    relevant_paths, dependency_ids, assigned_agent_id, status, position, created_at, updated_at
              FROM tasks WHERE project_id = ?1
              ORDER BY CASE status
                  WHEN 'backlog' THEN 0
@@ -250,8 +289,8 @@ impl Database {
         let dependency_ids = encode_string_list(&new_task.dependency_ids)?;
         transaction.execute(
             "INSERT INTO tasks (id, project_id, title, description, acceptance_criteria,
-                                implementation_notes, relevant_paths, dependency_ids, status, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'backlog', ?9)",
+                                implementation_notes, relevant_paths, dependency_ids, assigned_agent_id, status, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'backlog', ?10)",
             params![
                 new_task.id,
                 new_task.project_id,
@@ -261,6 +300,7 @@ impl Database {
                 new_task.implementation_notes,
                 relevant_paths,
                 dependency_ids,
+                new_task.assigned_agent_id,
                 position
             ],
         )?;
@@ -276,7 +316,7 @@ impl Database {
         let changed = self.connection.execute(
             "UPDATE tasks SET title = ?1, description = ?2, acceptance_criteria = ?3,
                               implementation_notes = ?4, relevant_paths = ?5, dependency_ids = ?6,
-                              updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+                              assigned_agent_id = ?7, updated_at = CURRENT_TIMESTAMP WHERE id = ?8",
             params![
                 update.title,
                 update.description,
@@ -284,6 +324,7 @@ impl Database {
                 update.implementation_notes,
                 relevant_paths,
                 dependency_ids,
+                update.assigned_agent_id,
                 id
             ],
         )?;
@@ -302,6 +343,60 @@ impl Database {
         normalize_positions(&transaction, &project_id, status)?;
         transaction.commit()?;
         Ok(true)
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, provider, role, model, system_prompt, skills, max_concurrent_tasks, created_at, updated_at
+             FROM agents ORDER BY name COLLATE NOCASE ASC",
+        )?;
+        let agents = statement
+            .query_map([], agent_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(agents)
+    }
+
+    pub fn create_agent(&mut self, new_agent: NewAgent) -> Result<Agent> {
+        let skills = encode_string_list(&new_agent.skills)?;
+        self.connection.execute(
+            "INSERT INTO agents (id, name, provider, role, model, system_prompt, skills, max_concurrent_tasks)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![new_agent.id, new_agent.name, new_agent.provider, new_agent.role, new_agent.model, new_agent.system_prompt, skills, new_agent.max_concurrent_tasks],
+        )?;
+        self.agent_by_id(&new_agent.id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn update_agent(&mut self, id: &str, update: AgentUpdate) -> Result<Option<Agent>> {
+        let skills = encode_string_list(&update.skills)?;
+        let changed = self.connection.execute(
+            "UPDATE agents SET name = ?1, provider = ?2, role = ?3, model = ?4, system_prompt = ?5,
+                               skills = ?6, max_concurrent_tasks = ?7, updated_at = CURRENT_TIMESTAMP WHERE id = ?8",
+            params![update.name, update.provider, update.role, update.model, update.system_prompt, skills, update.max_concurrent_tasks, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.agent_by_id(id)
+    }
+
+    pub fn delete_agent(&mut self, id: &str) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE tasks SET assigned_agent_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE assigned_agent_id = ?1",
+            [id],
+        )?;
+        let deleted = transaction.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn agent_exists(&self, id: &str) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )
     }
 
     pub fn move_task(
@@ -386,11 +481,22 @@ impl Database {
         Ok(records)
     }
 
+    fn agent_by_id(&self, id: &str) -> Result<Option<Agent>> {
+        self.connection
+            .query_row(
+                "SELECT id, name, provider, role, model, system_prompt, skills, max_concurrent_tasks, created_at, updated_at
+                 FROM agents WHERE id = ?1",
+                [id],
+                agent_from_row,
+            )
+            .optional()
+    }
+
     fn task_by_id(&self, id: &str) -> Result<Option<Task>> {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                        relevant_paths, dependency_ids, status, position, created_at, updated_at
+                        relevant_paths, dependency_ids, assigned_agent_id, status, position, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -419,10 +525,26 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         implementation_notes: row.get(5)?,
         relevant_paths: decode_string_list(row.get(6)?)?,
         dependency_ids: decode_string_list(row.get(7)?)?,
-        status: TaskStatus::from_database(row.get(8)?)?,
-        position: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        assigned_agent_id: row.get(8)?,
+        status: TaskStatus::from_database(row.get(9)?)?,
+        position: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+fn agent_from_row(row: &rusqlite::Row<'_>) -> Result<Agent> {
+    Ok(Agent {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        provider: row.get(2)?,
+        role: row.get(3)?,
+        model: row.get(4)?,
+        system_prompt: row.get(5)?,
+        skills: decode_string_list(row.get(6)?)?,
+        max_concurrent_tasks: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -499,7 +621,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, NewProject, NewTask, TaskStatus, TaskUpdate};
+    use super::{AgentUpdate, Database, NewAgent, NewProject, NewTask, TaskStatus, TaskUpdate};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -590,6 +712,7 @@ mod tests {
                     implementation_notes: None,
                     relevant_paths: Vec::new(),
                     dependency_ids: Vec::new(),
+                    assigned_agent_id: None,
                 })
                 .expect("task saves");
         }
@@ -638,6 +761,7 @@ mod tests {
                     implementation_notes: Some("Keep the ordering intact.".into()),
                     relevant_paths: vec!["src/tasks.rs".into()],
                     dependency_ids: vec!["task-2".into()],
+                    assigned_agent_id: None,
                 },
             )
             .expect("task updates")
@@ -660,6 +784,74 @@ mod tests {
                 .position,
             0
         );
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn agents_persist_and_are_removed_from_assigned_tasks() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Agent project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/agent-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "agent-1".into(),
+                name: "Codex Terra".into(),
+                provider: "codex".into(),
+                role: "Frontend engineer".into(),
+                model: Some("gpt-5.6-terra".into()),
+                system_prompt: None,
+                skills: vec!["react".into()],
+                max_concurrent_tasks: 2,
+            })
+            .expect("agent saves");
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Build dashboard".into(),
+                description: None,
+                acceptance_criteria: Vec::new(),
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-1".into()),
+            })
+            .expect("task saves");
+
+        let updated = database
+            .update_agent(
+                "agent-1",
+                AgentUpdate {
+                    name: "Codex Terra".into(),
+                    provider: "codex".into(),
+                    role: "UI engineer".into(),
+                    model: None,
+                    system_prompt: Some("Use accessible components.".into()),
+                    skills: vec!["react".into(), "typescript".into()],
+                    max_concurrent_tasks: 1,
+                },
+            )
+            .expect("agent updates")
+            .expect("agent exists");
+        assert_eq!(updated.role, "UI engineer");
+        assert_eq!(updated.skills, ["react", "typescript"]);
+        assert!(database.agent_exists("agent-1").expect("agent check"));
+        assert!(database.delete_agent("agent-1").expect("agent deletes"));
+        assert!(database.list_tasks("project-1").expect("tasks load")[0]
+            .assigned_agent_id
+            .is_none());
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");

@@ -13,7 +13,7 @@ h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 7px; font-size: 25px; font-weight: 620; letter-spacing: -.025em; }
 h2 { margin-bottom: 5px; font-size: 14px; font-weight: 600; }
 
-.page { max-width: 1440px; margin: 0 auto; padding: 42px 48px; }
+.page { width: 100%; max-width: none; margin: 0; padding: 42px 48px; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 28px; border-bottom: 1px solid #292d31; }
 .eyebrow { margin: 0 0 8px; color: #77818a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .muted { margin-bottom: 0; color: #89939a; font-size: 13px; line-height: 1.55; }

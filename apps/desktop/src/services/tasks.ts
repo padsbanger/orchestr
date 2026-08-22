@@ -12,6 +12,7 @@ export type Task = {
   implementationNotes: string | null;
   relevantPaths: string[];
   dependencyIds: string[];
+  assignedAgentId: string | null;
   status: TaskStatus;
   position: number;
   createdAt: string;
@@ -25,6 +26,7 @@ export type TaskInput = {
   implementationNotes?: string;
   relevantPaths: string[];
   dependencyIds: string[];
+  assignedAgentId?: string;
 };
 
 export function listTasks(projectId: string): Promise<Task[]> {

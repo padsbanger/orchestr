@@ -1,21 +1,24 @@
 import { X } from "lucide-react";
 import { FormEvent, useState } from "react";
 import type { Task, TaskInput } from "../../services/tasks";
+import type { Agent } from "../../services/agents";
 import "./TaskDialog.css";
 
 type TaskDialogProps = {
   task?: Task;
+  agents: Agent[];
   onClose: () => void;
   onSave: (input: TaskInput) => Promise<void>;
 };
 
-export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
+export function TaskDialog({ task, agents, onClose, onSave }: TaskDialogProps) {
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(task ? task.acceptanceCriteria.join("\n") : "");
   const [implementationNotes, setImplementationNotes] = useState(task?.implementationNotes ?? "");
   const [relevantPaths, setRelevantPaths] = useState(task ? task.relevantPaths.join("\n") : "");
   const [dependencyIds, setDependencyIds] = useState(task ? task.dependencyIds.join("\n") : "");
+  const [assignedAgentId, setAssignedAgentId] = useState(task?.assignedAgentId ?? "");
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
 
@@ -31,6 +34,7 @@ export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
         implementationNotes,
         relevantPaths: lines(relevantPaths),
         dependencyIds: lines(dependencyIds),
+        assignedAgentId,
       });
       onClose();
     } catch (saveError) {
@@ -79,6 +83,14 @@ export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
               <span className="field-hint">Dependencies are recorded now; execution blocking arrives in a later milestone.</span>
             </label>
           </fieldset>
+          <label>
+            Assigned agent <span className="field-optional">optional</span>
+            <select value={assignedAgentId} onChange={(event) => setAssignedAgentId(event.target.value)}>
+              <option value="">No agent assigned</option>
+              {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}
+            </select>
+            {agents.length === 0 && <span className="field-hint">Create an agent from the Agents page before assigning work.</span>}
+          </label>
           {error && <p className="form-error" role="alert">{error}</p>}
           <footer className="dialog-actions">
             <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>

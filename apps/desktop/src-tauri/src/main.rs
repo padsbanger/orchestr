@@ -7,7 +7,8 @@ use std::{
 };
 
 use orchestr_db::{
-    Database, NewProject, NewTask, Project, Task, TaskStatus, TaskUpdate, Workspace,
+    Agent, AgentUpdate, Database, NewAgent, NewProject, NewTask, Project, Task, TaskStatus,
+    TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
 use orchestr_provider::{AgentProvider, CodexProvider, ProviderAction, ProviderStatus};
@@ -58,6 +59,7 @@ struct CreateTaskInput {
     relevant_paths: Vec<String>,
     #[serde(default)]
     dependency_ids: Vec<String>,
+    assigned_agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +75,34 @@ struct UpdateTaskInput {
     relevant_paths: Vec<String>,
     #[serde(default)]
     dependency_ids: Vec<String>,
+    assigned_agent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAgentInput {
+    name: String,
+    provider: String,
+    role: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    max_concurrent_tasks: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAgentInput {
+    id: String,
+    name: String,
+    provider: String,
+    role: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    max_concurrent_tasks: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,8 +170,24 @@ struct TaskResponse {
     implementation_notes: Option<String>,
     relevant_paths: Vec<String>,
     dependency_ids: Vec<String>,
+    assigned_agent_id: Option<String>,
     status: String,
     position: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentResponse {
+    id: String,
+    name: String,
+    provider: String,
+    role: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    skills: Vec<String>,
+    max_concurrent_tasks: i64,
     created_at: String,
     updated_at: String,
 }
@@ -184,10 +230,28 @@ impl From<Task> for TaskResponse {
             implementation_notes: task.implementation_notes,
             relevant_paths: task.relevant_paths,
             dependency_ids: task.dependency_ids,
+            assigned_agent_id: task.assigned_agent_id,
             status: task.status.as_str().to_owned(),
             position: task.position,
             created_at: task.created_at,
             updated_at: task.updated_at,
+        }
+    }
+}
+
+impl From<Agent> for AgentResponse {
+    fn from(agent: Agent) -> Self {
+        Self {
+            id: agent.id,
+            name: agent.name,
+            provider: agent.provider,
+            role: agent.role,
+            model: agent.model,
+            system_prompt: agent.system_prompt,
+            skills: agent.skills,
+            max_concurrent_tasks: agent.max_concurrent_tasks,
+            created_at: agent.created_at,
+            updated_at: agent.updated_at,
         }
     }
 }
@@ -458,6 +522,89 @@ fn cancel_local_worker_run(run_id: String, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
+fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local agent store is unavailable.".to_owned())?
+        .list_agents()
+        .map(|agents| agents.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load agents: {error}"))
+}
+
+#[tauri::command]
+fn create_agent(
+    input: CreateAgentInput,
+    state: State<'_, AppState>,
+) -> Result<AgentResponse, String> {
+    let agent = validate_agent_input(input)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local agent store is unavailable.".to_owned())?
+        .create_agent(NewAgent {
+            id: Uuid::new_v4().to_string(),
+            name: agent.name,
+            provider: agent.provider,
+            role: agent.role,
+            model: agent.model,
+            system_prompt: agent.system_prompt,
+            skills: agent.skills,
+            max_concurrent_tasks: agent.max_concurrent_tasks,
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to create agent: {error}"))
+}
+
+#[tauri::command]
+fn update_agent(
+    input: UpdateAgentInput,
+    state: State<'_, AppState>,
+) -> Result<AgentResponse, String> {
+    let id = input.id.clone();
+    let agent = validate_agent_input(CreateAgentInput {
+        name: input.name,
+        provider: input.provider,
+        role: input.role,
+        model: input.model,
+        system_prompt: input.system_prompt,
+        skills: input.skills,
+        max_concurrent_tasks: input.max_concurrent_tasks,
+    })?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local agent store is unavailable.".to_owned())?
+        .update_agent(
+            &id,
+            AgentUpdate {
+                name: agent.name,
+                provider: agent.provider,
+                role: agent.role,
+                model: agent.model,
+                system_prompt: agent.system_prompt,
+                skills: agent.skills,
+                max_concurrent_tasks: agent.max_concurrent_tasks,
+            },
+        )
+        .map_err(|error| format!("Unable to update agent: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The agent no longer exists.".into())
+}
+
+#[tauri::command]
+fn delete_agent(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local agent store is unavailable.".to_owned())?
+        .delete_agent(&id)
+        .map_err(|error| format!("Unable to delete agent: {error}"))?
+        .then_some(())
+        .ok_or_else(|| "The agent no longer exists.".into())
+}
+
+#[tauri::command]
 fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<TaskResponse>, String> {
     state
         .database
@@ -471,10 +618,13 @@ fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<Task
 #[tauri::command]
 fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
     let title = validate_task_title(&input.title)?;
-    state
+    let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
+    let mut database = state
         .database
         .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    validate_assigned_agent(&database, assigned_agent_id.as_deref())?;
+    database
         .create_task(NewTask {
             id: Uuid::new_v4().to_string(),
             project_id: input.project_id,
@@ -489,6 +639,7 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
             implementation_notes: normalize_optional_text(input.implementation_notes),
             relevant_paths: normalize_task_list(input.relevant_paths, "Relevant paths", 50, 500)?,
             dependency_ids: normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?,
+            assigned_agent_id,
         })
         .map(Into::into)
         .map_err(|error| format!("Unable to create task: {error}"))
@@ -504,10 +655,13 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
     {
         return Err("A task cannot depend on itself.".into());
     }
-    state
+    let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
+    let mut database = state
         .database
         .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    validate_assigned_agent(&database, assigned_agent_id.as_deref())?;
+    database
         .update_task(
             &input.id,
             TaskUpdate {
@@ -527,6 +681,7 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
                     500,
                 )?,
                 dependency_ids,
+                assigned_agent_id,
             },
         )
         .map_err(|error| format!("Unable to update task: {error}"))?
@@ -660,6 +815,66 @@ fn normalize_task_list(
     Ok(normalized)
 }
 
+struct ValidatedAgentInput {
+    name: String,
+    provider: String,
+    role: String,
+    model: Option<String>,
+    system_prompt: Option<String>,
+    skills: Vec<String>,
+    max_concurrent_tasks: i64,
+}
+
+fn validate_agent_input(input: CreateAgentInput) -> Result<ValidatedAgentInput, String> {
+    let name = validate_required_field(input.name, "Agent name", 120)?;
+    let role = validate_required_field(input.role, "Agent role", 120)?;
+    let provider = input.provider.trim().to_ascii_lowercase();
+    if !matches!(provider.as_str(), "codex" | "claude" | "gemini" | "custom") {
+        return Err("Choose a supported agent provider.".into());
+    }
+    if !(1..=32).contains(&input.max_concurrent_tasks) {
+        return Err("Agent concurrency must be between 1 and 32.".into());
+    }
+    Ok(ValidatedAgentInput {
+        name,
+        provider,
+        role,
+        model: normalize_optional_text(input.model),
+        system_prompt: normalize_optional_text(input.system_prompt),
+        skills: normalize_task_list(input.skills, "Skills", 50, 120)?,
+        max_concurrent_tasks: input.max_concurrent_tasks,
+    })
+}
+
+fn validate_required_field(
+    value: String,
+    field_name: &str,
+    max_length: usize,
+) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{field_name} is required."));
+    }
+    if value.chars().count() > max_length {
+        return Err(format!(
+            "{field_name} cannot exceed {max_length} characters."
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_assigned_agent(database: &Database, agent_id: Option<&str>) -> Result<(), String> {
+    if let Some(agent_id) = agent_id {
+        if !database
+            .agent_exists(agent_id)
+            .map_err(|error| format!("Unable to validate the selected agent: {error}"))?
+        {
+            return Err("The selected agent no longer exists.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Converts Windows' internal extended-length paths into the normal paths a
 /// person expects to see and can copy into other tools. `canonicalize` may
 /// return paths such as `\\?\C:\projects\orchestr` on Windows.
@@ -733,6 +948,10 @@ fn main() {
             logout_codex,
             test_codex_connection,
             cancel_local_worker_run,
+            list_agents,
+            create_agent,
+            update_agent,
+            delete_agent,
             list_tasks,
             create_task,
             update_task,

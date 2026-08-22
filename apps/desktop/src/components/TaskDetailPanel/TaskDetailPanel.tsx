@@ -1,15 +1,17 @@
-import { CheckSquare, Code2, FileCode2, GitBranch, Pencil, X } from "lucide-react";
+import { Bot, CheckSquare, Code2, FileCode2, GitBranch, Pencil, X } from "lucide-react";
 import type { ReactNode } from "react";
+import type { Agent } from "../../services/agents";
 import type { Task } from "../../services/tasks";
 import "./TaskDetailPanel.css";
 
 type TaskDetailPanelProps = {
   task: Task;
+  assignedAgent?: Agent;
   onClose: () => void;
   onEdit: (task: Task) => void;
 };
 
-export function TaskDetailPanel({ task, onClose, onEdit }: TaskDetailPanelProps) {
+export function TaskDetailPanel({ task, assignedAgent, onClose, onEdit }: TaskDetailPanelProps) {
   return (
     <aside className="task-detail-panel" aria-label={`Task details for ${task.title}`}>
       <header className="task-detail-header">
@@ -34,6 +36,9 @@ export function TaskDetailPanel({ task, onClose, onEdit }: TaskDetailPanelProps)
         </TaskSection>
         <TaskSection title="Dependencies" icon={<GitBranch size={14} />} count={task.dependencyIds.length}>
           {task.dependencyIds.length === 0 ? <p className="task-detail-empty">No task dependencies recorded.</p> : <><ul className="token-list">{task.dependencyIds.map((dependency) => <li key={dependency}><code>{dependency}</code></li>)}</ul><p className="task-detail-hint">Dependency blocking will be activated in a later workflow milestone.</p></>}
+        </TaskSection>
+        <TaskSection title="Assigned agent" icon={<Bot size={14} />}>
+          {assignedAgent ? <p className="task-detail-copy"><strong>{assignedAgent.name}</strong><br />{assignedAgent.role}{assignedAgent.model ? ` / ${assignedAgent.model}` : ""}</p> : <p className="task-detail-empty">No agent assigned.</p>}
         </TaskSection>
       </div>
     </aside>

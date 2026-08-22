@@ -353,6 +353,10 @@ A user can install/detect Codex, authenticate through the supported official flo
 
 ## M7 — Agents
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Introduce configurable AI workers as application entities.

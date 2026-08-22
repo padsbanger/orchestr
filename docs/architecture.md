@@ -52,6 +52,14 @@ status command through the worker runtime. Login, logout, and status actions
 are executed by the Codex CLI on the worker; Orchestr stores no OAuth or API
 credentials and never returns command output as credential data.
 
+## M7 agent configuration
+
+Agents are persisted configuration records: provider, role, optional model and
+system instructions, skills, and a concurrency limit. They contain no provider
+credentials. Tasks hold an optional agent ID; the application layer validates
+that assignment against the registry, and deleting an agent clears its task
+assignments safely.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

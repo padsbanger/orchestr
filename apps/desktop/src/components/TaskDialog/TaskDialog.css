@@ -4,8 +4,8 @@
 .dialog-header h2 { margin: 0; font-size: 18px; }
 .task-dialog form { display: grid; gap: 15px; padding: 20px; }
 .task-dialog label { display: grid; gap: 7px; color: #c7cdd1; font-size: 12px; font-weight: 600; }
-.task-dialog input, .task-dialog textarea { width: 100%; padding: 9px 10px; border: 1px solid #394147; outline: none; background: #111315; color: #e9edef; font: inherit; font-size: 13px; resize: vertical; }
-.task-dialog input:focus, .task-dialog textarea:focus { border-color: #4d91b7; box-shadow: 0 0 0 2px rgb(56 125 166 / 18%); }
+.task-dialog input, .task-dialog textarea, .task-dialog select { width: 100%; padding: 9px 10px; border: 1px solid #394147; outline: none; background: #111315; color: #e9edef; font: inherit; font-size: 13px; resize: vertical; }
+.task-dialog input:focus, .task-dialog textarea:focus, .task-dialog select:focus { border-color: #4d91b7; box-shadow: 0 0 0 2px rgb(56 125 166 / 18%); }
 .field-optional { color: #77828a; font-size: 11px; font-weight: 400; }
 .field-hint { color: #77828a; font-size: 11px; font-weight: 400; line-height: 1.45; }
 .task-specification-fields { display: grid; gap: 15px; margin: 0; padding: 16px; border: 1px solid #30383d; }

@@ -7,6 +7,7 @@ import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
+import { listAgents, type Agent } from "../../services/agents";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
 import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import "./BoardPage.css";
@@ -23,6 +24,7 @@ export function BoardPage() {
   const { projectId } = useParams();
   const [project, setProject] = useState<Project | null>();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
   const [editingTask, setEditingTask] = useState<Task | null>();
@@ -56,9 +58,10 @@ export function BoardPage() {
     setIsLoading(true);
     setError(undefined);
     try {
-      const [loadedProject, loadedTasks] = await Promise.all([getProject(projectId), listTasks(projectId)]);
+      const [loadedProject, loadedTasks, loadedAgents] = await Promise.all([getProject(projectId), listTasks(projectId), listAgents()]);
       setProject(loadedProject);
       setTasks(loadedTasks);
+      setAgents(loadedAgents);
       void loadRepository();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
@@ -148,8 +151,8 @@ export function BoardPage() {
           {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
         </DragOverlay>
       </DndContext>
-      {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {inspectedTask && <TaskDetailPanel task={inspectedTask} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} />}
+      {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
     </section>
   );
