@@ -2185,6 +2185,7 @@ version = "0.1.0"
 dependencies = [
  "orchestr-worker",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

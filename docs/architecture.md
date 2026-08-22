@@ -26,8 +26,8 @@ without leaving or mutating Kanban workflow state.
 ## M4 worker boundary
 
 `crates/orchestr-worker` owns cross-platform local capability detection and
-process lifecycle. It accepts a program plus argument array, never a shell
-string, and returns separate stdout/stderr events. The Tauri host owns active
+process lifecycle. It accepts a program plus argument array and optional
+standard input, never a shell string, and returns separate stdout/stderr events. The Tauri host owns active
 run IDs and forwards those events to the UI; it also retains cancellation
 handles outside React and the database.
 
@@ -59,6 +59,21 @@ system instructions, skills, and a concurrency limit. They contain no provider
 credentials. Tasks hold an optional agent ID; the application layer validates
 that assignment against the registry, and deleting an agent clears its task
 assignments safely.
+
+## M8 task execution
+
+Runs are persisted by `orchestr-db` with their task, agent, worker, lifecycle
+timestamps, terminal status, exit code, and streamed stdout/stderr records.
+Starting a run is an atomic application-layer transition: the assigned Todo
+task moves to In Progress as its running record is created. A successfully
+completed run moves that task to Review; failed and cancelled runs deliberately
+remain In Progress for human follow-up.
+
+The Tauri host builds a structured task prompt, asks the Codex provider for a
+structured `codex exec` request, and delegates process execution to the local
+worker. It persists and emits each output record, while the React task inspector
+uses typed run services to display live and historical output and offer
+cancellation. No React component constructs or runs a command directly.
 
 ## Planned extraction points
 

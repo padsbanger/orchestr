@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 orchestr-worker = { path = "../orchestr-worker" }
 serde.workspace = true
+serde_json.workspace = true

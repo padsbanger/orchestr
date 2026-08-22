@@ -16,6 +16,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0004_task_specifications.sql"),
     ),
     (5, include_str!("../migrations/0005_agents.sql")),
+    (6, include_str!("../migrations/0006_runs.sql")),
 ];
 
 pub struct Database {
@@ -169,6 +170,70 @@ pub struct AgentUpdate {
     pub max_concurrent_tasks: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Queued,
+    Running,
+    Failed,
+    Completed,
+    Cancelled,
+}
+
+impl RunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "failed" => Ok(Self::Failed),
+            "completed" => Ok(Self::Completed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                format!("Unknown run status: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOutput {
+    pub stream: String,
+    pub text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub worker_id: String,
+    pub status: RunStatus,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+    pub output: Vec<RunOutput>,
+}
+
+pub struct NewRun {
+    pub id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub worker_id: String,
+}
+
 impl Database {
     pub fn open(database_path: &Path) -> Result<Self> {
         let connection = Connection::open(database_path)?;
@@ -255,6 +320,14 @@ impl Database {
 
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
         self.project_by_id(id)
+    }
+
+    pub fn get_task(&self, id: &str) -> Result<Option<Task>> {
+        self.task_by_id(id)
+    }
+
+    pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
+        self.agent_by_id(id)
     }
 
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
@@ -399,6 +472,122 @@ impl Database {
         )
     }
 
+    pub fn list_runs_for_task(&self, task_id: &str) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, task_id, agent_id, worker_id, status, started_at, completed_at, exit_code, error
+             FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, id DESC",
+        )?;
+        let runs = statement
+            .query_map([task_id], run_from_row)?
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|mut run| {
+                run.output = self.list_run_output(&run.id)?;
+                Ok(run)
+            })
+            .collect();
+        runs
+    }
+
+    pub fn start_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
+        let transaction = self.connection.transaction()?;
+        let (project_id, task_status, assigned_agent_id): (String, String, Option<String>) =
+            transaction.query_row(
+                "SELECT project_id, status, assigned_agent_id FROM tasks WHERE id = ?1",
+                [&new_run.task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        if task_status != TaskStatus::Todo.as_str()
+            || assigned_agent_id.as_deref() != Some(new_run.agent_id.as_str())
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+
+        transaction.execute(
+            "INSERT INTO runs (id, task_id, agent_id, worker_id, status) VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![new_run.id, new_run.task_id, new_run.agent_id, new_run.worker_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &new_run.task_id,
+            &project_id,
+            TaskStatus::Todo,
+            TaskStatus::InProgress,
+            usize::MAX,
+        )?;
+        transaction.commit()?;
+
+        let run = self
+            .run_by_id(&new_run.id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+        let task = self
+            .task_by_id(&new_run.task_id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+        Ok((run, task))
+    }
+
+    pub fn append_run_output(&mut self, run_id: &str, stream: &str, text: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO run_output (run_id, stream, text) VALUES (?1, ?2, ?3)",
+            params![run_id, stream, text],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_run(
+        &mut self,
+        run_id: &str,
+        status: RunStatus,
+        exit_code: Option<i32>,
+        error: Option<&str>,
+    ) -> Result<Option<(Run, Task)>> {
+        let transaction = self.connection.transaction()?;
+        let run = transaction
+            .query_row(
+                "SELECT task_id, status FROM runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((task_id, current_status)) = run else {
+            return Ok(None);
+        };
+        if current_status != RunStatus::Running.as_str() {
+            return Ok(None);
+        }
+
+        transaction.execute(
+            "UPDATE runs SET status = ?1, completed_at = CURRENT_TIMESTAMP, exit_code = ?2, error = ?3 WHERE id = ?4",
+            params![status.as_str(), exit_code, error, run_id],
+        )?;
+        if status == RunStatus::Completed {
+            let (project_id, task_status): (String, String) = transaction.query_row(
+                "SELECT project_id, status FROM tasks WHERE id = ?1",
+                [&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if task_status == TaskStatus::InProgress.as_str() {
+                move_task_in_transaction(
+                    &transaction,
+                    &task_id,
+                    &project_id,
+                    TaskStatus::InProgress,
+                    TaskStatus::Review,
+                    usize::MAX,
+                )?;
+            }
+        }
+        transaction.commit()?;
+
+        let run = self
+            .run_by_id(run_id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+        let task = self
+            .task_by_id(&task_id)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+        Ok(Some((run, task)))
+    }
+
     pub fn move_task(
         &mut self,
         id: &str,
@@ -409,26 +598,14 @@ impl Database {
             return Ok(None);
         };
         let transaction = self.connection.transaction()?;
-        let mut source_ids = task_ids_for_status(&transaction, &project_id, source_status)?;
-
-        if source_status == target_status {
-            source_ids.retain(|task_id| task_id != id);
-            let insert_at = target_position.min(source_ids.len());
-            source_ids.insert(insert_at, id.to_owned());
-            set_positions(&transaction, &source_ids)?;
-        } else {
-            source_ids.retain(|task_id| task_id != id);
-            let mut target_ids = task_ids_for_status(&transaction, &project_id, target_status)?;
-            let insert_at = target_position.min(target_ids.len());
-            target_ids.insert(insert_at, id.to_owned());
-
-            transaction.execute(
-                "UPDATE tasks SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
-                params![target_status.as_str(), id],
-            )?;
-            set_positions(&transaction, &source_ids)?;
-            set_positions(&transaction, &target_ids)?;
-        }
+        move_task_in_transaction(
+            &transaction,
+            id,
+            &project_id,
+            source_status,
+            target_status,
+            target_position,
+        )?;
         transaction.commit()?;
         self.task_by_id(id)
     }
@@ -504,6 +681,38 @@ impl Database {
             .optional()
     }
 
+    fn run_by_id(&self, id: &str) -> Result<Option<Run>> {
+        let mut run = self
+            .connection
+            .query_row(
+                "SELECT id, task_id, agent_id, worker_id, status, started_at, completed_at, exit_code, error
+                 FROM runs WHERE id = ?1",
+                [id],
+                run_from_row,
+            )
+            .optional()?;
+        if let Some(record) = &mut run {
+            record.output = self.list_run_output(&record.id)?;
+        }
+        Ok(run)
+    }
+
+    fn list_run_output(&self, run_id: &str) -> Result<Vec<RunOutput>> {
+        let mut statement = self.connection.prepare(
+            "SELECT stream, text, created_at FROM run_output WHERE run_id = ?1 ORDER BY id ASC",
+        )?;
+        let output = statement
+            .query_map([run_id], |row| {
+                Ok(RunOutput {
+                    stream: row.get(0)?,
+                    text: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            })?
+            .collect();
+        output
+    }
+
     fn task_location(&self, id: &str) -> Result<Option<(String, TaskStatus)>> {
         self.connection
             .query_row(
@@ -548,6 +757,21 @@ fn agent_from_row(row: &rusqlite::Row<'_>) -> Result<Agent> {
     })
 }
 
+fn run_from_row(row: &rusqlite::Row<'_>) -> Result<Run> {
+    Ok(Run {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        worker_id: row.get(3)?,
+        status: RunStatus::from_database(row.get(4)?)?,
+        started_at: row.get(5)?,
+        completed_at: row.get(6)?,
+        exit_code: row.get(7)?,
+        error: row.get(8)?,
+        output: Vec::new(),
+    })
+}
+
 fn encode_string_list(values: &[String]) -> Result<String> {
     serde_json::to_string(values)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
@@ -571,6 +795,34 @@ fn task_ids_for_status(
         .query_map(params![project_id, status.as_str()], |row| row.get(0))?
         .collect::<Result<Vec<_>>>()?;
     Ok(records)
+}
+
+fn move_task_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &str,
+    project_id: &str,
+    source_status: TaskStatus,
+    target_status: TaskStatus,
+    target_position: usize,
+) -> Result<()> {
+    let mut source_ids = task_ids_for_status(transaction, project_id, source_status)?;
+    if source_status == target_status {
+        source_ids.retain(|task_id| task_id != id);
+        let insert_at = target_position.min(source_ids.len());
+        source_ids.insert(insert_at, id.to_owned());
+        return set_positions(transaction, &source_ids);
+    }
+
+    source_ids.retain(|task_id| task_id != id);
+    let mut target_ids = task_ids_for_status(transaction, project_id, target_status)?;
+    let insert_at = target_position.min(target_ids.len());
+    target_ids.insert(insert_at, id.to_owned());
+    transaction.execute(
+        "UPDATE tasks SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        params![target_status.as_str(), id],
+    )?;
+    set_positions(transaction, &source_ids)?;
+    set_positions(transaction, &target_ids)
 }
 
 fn normalize_positions(
@@ -621,7 +873,10 @@ fn migrate(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentUpdate, Database, NewAgent, NewProject, NewTask, TaskStatus, TaskUpdate};
+    use super::{
+        AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, RunStatus, TaskStatus,
+        TaskUpdate,
+    };
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -854,6 +1109,79 @@ mod tests {
             .is_none());
 
         drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn completed_run_persists_output_and_moves_its_task_to_review() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Run project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/run-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "agent-1".into(),
+                name: "Codex Terra".into(),
+                provider: "codex".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+            })
+            .expect("agent saves");
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Implement run".into(),
+                description: None,
+                acceptance_criteria: Vec::new(),
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-1".into()),
+            })
+            .expect("task saves");
+        database
+            .move_task("task-1", TaskStatus::Todo, 0)
+            .expect("task moves");
+
+        let (run, started_task) = database
+            .start_run(NewRun {
+                id: "run-1".into(),
+                task_id: "task-1".into(),
+                agent_id: "agent-1".into(),
+                worker_id: "local".into(),
+            })
+            .expect("run starts");
+        assert_eq!(run.status, RunStatus::Running);
+        assert_eq!(started_task.status, TaskStatus::InProgress);
+        database
+            .append_run_output("run-1", "stdout", "Task complete")
+            .expect("run output saves");
+        let (_, completed_task) = database
+            .finish_run("run-1", RunStatus::Completed, Some(0), None)
+            .expect("run completes")
+            .expect("run exists");
+        assert_eq!(completed_task.status, TaskStatus::Review);
+        drop(database);
+
+        let reopened = Database::open(&database_path).expect("database reopens");
+        let runs = reopened.list_runs_for_task("task-1").expect("runs load");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Completed);
+        assert_eq!(runs[0].output[0].text, "Task complete");
+        drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }

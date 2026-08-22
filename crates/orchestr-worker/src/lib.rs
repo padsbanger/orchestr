@@ -6,7 +6,7 @@
 
 use std::{
     fmt,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -56,6 +56,7 @@ pub struct ProcessRequest {
     pub program: String,
     pub arguments: Vec<String>,
     pub working_directory: Option<PathBuf>,
+    pub standard_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,7 +109,11 @@ impl LocalWorker {
         let mut command = Command::new(&executable);
         command
             .args(&request.arguments)
-            .stdin(Stdio::null())
+            .stdin(if request.standard_input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(working_directory) = &request.working_directory {
@@ -118,6 +123,15 @@ impl LocalWorker {
         let mut child = command.spawn().map_err(|error| {
             WorkerError(format!("Unable to start {}: {error}", executable.display()))
         })?;
+        if let Some(input) = request.standard_input.clone() {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| WorkerError("Worker standard input was not captured.".into()))?;
+            thread::spawn(move || {
+                let _ = stdin.write_all(input.as_bytes());
+            });
+        }
         let stdout = child
             .stdout
             .take()
@@ -369,6 +383,7 @@ mod tests {
             program: "git".into(),
             arguments: vec!["--version".into()],
             working_directory: None,
+            standard_input: None,
         })
         .expect("git starts");
         let output = run
@@ -383,11 +398,32 @@ mod tests {
     }
 
     #[test]
+    fn writes_optional_standard_input_without_using_a_shell() {
+        let run = LocalWorker::start(ProcessRequest {
+            program: "git".into(),
+            arguments: vec!["hash-object".into(), "--stdin".into()],
+            working_directory: None,
+            standard_input: Some("orchestr\n".into()),
+        })
+        .expect("git starts");
+        let output = run
+            .output
+            .into_iter()
+            .map(|event| event.text)
+            .collect::<Vec<_>>();
+        let exit_status = run.handle.wait().expect("git completes");
+
+        assert!(exit_status.success());
+        assert!(output.iter().any(|line| !line.is_empty()));
+    }
+
+    #[test]
     fn rejects_an_empty_program() {
         let result = LocalWorker::start(ProcessRequest {
             program: " ".into(),
             arguments: Vec::new(),
             working_directory: None,
+            standard_input: None,
         });
 
         assert!(result.is_err());

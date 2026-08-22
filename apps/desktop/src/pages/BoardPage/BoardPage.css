@@ -30,6 +30,7 @@
 .empty-column { display: grid; min-height: 68px; margin: 0; place-items: center; border: 1px dashed #333c42; color: #6d7880; font-size: 11px; pointer-events: none; }
 .task-card { position: relative; display: grid; grid-template-columns: 19px minmax(0, 1fr) auto; gap: 5px; padding: 10px 7px; border: 1px solid #343c41; background: #1a1e21; box-shadow: 0 1px 0 rgb(0 0 0 / 22%); cursor: grab; touch-action: none; }
 .task-card:hover { border-color: #4a575f; background: #1c2124; }
+.task-card.is-running { animation: task-running-pulse 4.8s ease-in-out infinite; }
 .task-card.is-dragging { border-color: #4c6f80; opacity: .28; }
 .task-drag-overlay { width: 235px; border-color: #65a4c8; box-shadow: 0 10px 26px rgb(0 0 0 / 44%); cursor: grabbing; }
 .task-card:active { cursor: grabbing; }
@@ -41,6 +42,15 @@
 .task-card:hover .task-card-actions { opacity: 1; }
 .task-card-actions button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: #8c989f; cursor: pointer; }
 .task-card-actions button:hover { background: #2b3338; color: #e9edef; }
+
+@keyframes task-running-pulse {
+  0%, 100% { border-color: #3f4240; box-shadow: 0 1px 0 rgb(0 0 0 / 22%); }
+  50% { border-color: #6b5636; box-shadow: 0 0 0 1px rgb(193 145 71 / 10%), 0 3px 10px rgb(193 145 71 / 8%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-card.is-running { animation: none; border-color: #5b4c36; }
+}
 
 @media (max-width: 700px) {
   .board-header { padding: 22px 20px 18px; }

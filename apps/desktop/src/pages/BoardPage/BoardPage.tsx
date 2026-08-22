@@ -2,14 +2,16 @@ import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, 
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { ArrowLeft, GitBranch, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
+import { cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
 import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
+import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
 
 const columns: Record<TaskStatus, { label: string; tone: string }> = {
@@ -31,6 +33,9 @@ export function BoardPage() {
   const [inspectedTask, setInspectedTask] = useState<Task | null>();
   const [isCreating, setIsCreating] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
+  const [runs, setRuns] = useState<TaskRun[]>([]);
+  const [isStartingRun, setIsStartingRun] = useState(false);
+  const runIds = useRef(new Set<string>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
   const [isRepositoryLoading, setIsRepositoryLoading] = useState(false);
@@ -74,6 +79,45 @@ export function BoardPage() {
     void loadBoard();
   }, [loadBoard]);
 
+  useEffect(() => {
+    if (!inspectedTask) {
+      setRuns([]);
+      return;
+    }
+    void listTaskRuns(inspectedTask.id).then(setRuns).catch((loadError: unknown) => {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load task runs.");
+    });
+  }, [inspectedTask?.id]);
+
+  useEffect(() => {
+    runIds.current = new Set(runs.map((run) => run.id));
+  }, [runs]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenToWorkerRunEvents((event) => {
+      if (!runIds.current.has(event.runId)) return;
+      if (event.kind === "output" && event.stream && event.text !== null) {
+        const output = { stream: event.stream, text: event.text, createdAt: new Date().toISOString() };
+        setRuns((current) => current.map((run) => run.id === event.runId ? {
+          ...run,
+          output: [...run.output, output],
+        } : run));
+        return;
+      }
+      if (event.kind !== "output" && inspectedTask) {
+        void Promise.all([listTaskRuns(inspectedTask.id), loadBoard()]).then(([loadedRuns]) => setRuns(loadedRuns));
+      }
+    }).then((stopListening) => { unlisten = stopListening; });
+    return () => unlisten?.();
+  }, [inspectedTask?.id, loadBoard]);
+
+  useEffect(() => {
+    if (!inspectedTask) return;
+    const current = tasks.find((task) => task.id === inspectedTask.id);
+    if (current && current !== inspectedTask) setInspectedTask(current);
+  }, [inspectedTask, tasks]);
+
   const tasksByStatus = useMemo(() => Object.fromEntries(
     TASK_STATUSES.map((status) => [status, tasks.filter((task) => task.status === status).sort((a, b) => a.position - b.position)]),
   ) as Record<TaskStatus, Task[]>, [tasks]);
@@ -116,6 +160,31 @@ export function BoardPage() {
     }
   };
 
+  const startRun = async () => {
+    if (!inspectedTask) return;
+    setError(undefined);
+    setIsStartingRun(true);
+    try {
+      const started = await startTaskRun(inspectedTask.id);
+      setRuns((current) => [started.run, ...current]);
+      setInspectedTask(started.task);
+      await loadBoard();
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to start the Codex task.");
+    } finally {
+      setIsStartingRun(false);
+    }
+  };
+
+  const cancelRun = async (runId: string) => {
+    setError(undefined);
+    try {
+      await cancelTaskRun(runId);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Unable to cancel the Codex task.");
+    }
+  };
+
   if (isLoading) return <section className="page"><div className="empty-state"><span className="empty-index">SYNC</span><h2>Loading board</h2></div></section>;
   if (!project) return <section className="page"><div className="empty-state"><h2>Project not found</h2><Link className="secondary-button" to="/projects">Return to projects</Link></div></section>;
 
@@ -152,7 +221,7 @@ export function BoardPage() {
         </DragOverlay>
       </DndContext>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
     </section>
   );
@@ -176,7 +245,7 @@ function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: Ta
 function TaskCard({ task, onInspect, onEdit, onDelete }: { task: Task; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   return (
-    <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
+    <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${task.status === "in_progress" ? "is-running" : ""} ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
       <span className="drag-handle" aria-hidden="true"><GripVertical size={15} /></span>
       <div className="task-card-copy" onClick={() => onInspect(task)}>
         <h3>{task.title}</h3>

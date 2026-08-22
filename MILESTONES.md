@@ -397,6 +397,10 @@ Users can create/edit/delete agent configurations and select an agent for a task
 
 ## M8 — First Agent Task Execution
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Run a task with Codex on the local worker.

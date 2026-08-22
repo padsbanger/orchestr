@@ -7,11 +7,13 @@ use std::{
 };
 
 use orchestr_db::{
-    Agent, AgentUpdate, Database, NewAgent, NewProject, NewTask, Project, Task, TaskStatus,
-    TaskUpdate, Workspace,
+    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, Project, Run, RunOutput,
+    RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
-use orchestr_provider::{AgentProvider, CodexProvider, ProviderAction, ProviderStatus};
+use orchestr_provider::{
+    AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
+};
 use orchestr_worker::{LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -20,7 +22,7 @@ use uuid::Uuid;
 const LOCAL_WORKER_ID: &str = "local";
 
 struct AppState {
-    database: Mutex<Database>,
+    database: Arc<Mutex<Database>>,
     local_worker_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
 }
 
@@ -134,6 +136,36 @@ struct WorkerRunEvent {
     stream: Option<OutputStream>,
     text: Option<String>,
     exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunOutputResponse {
+    stream: String,
+    text: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunResponse {
+    id: String,
+    task_id: String,
+    agent_id: String,
+    worker_id: String,
+    status: String,
+    started_at: String,
+    completed_at: Option<String>,
+    exit_code: Option<i32>,
+    error: Option<String>,
+    output: Vec<RunOutputResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartedTaskRunResponse {
+    run: RunResponse,
+    task: TaskResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,6 +284,33 @@ impl From<Agent> for AgentResponse {
             max_concurrent_tasks: agent.max_concurrent_tasks,
             created_at: agent.created_at,
             updated_at: agent.updated_at,
+        }
+    }
+}
+
+impl From<RunOutput> for RunOutputResponse {
+    fn from(output: RunOutput) -> Self {
+        Self {
+            stream: output.stream,
+            text: output.text,
+            created_at: output.created_at,
+        }
+    }
+}
+
+impl From<Run> for RunResponse {
+    fn from(run: Run) -> Self {
+        Self {
+            id: run.id,
+            task_id: run.task_id,
+            agent_id: run.agent_id,
+            worker_id: run.worker_id,
+            status: run.status.as_str().to_owned(),
+            started_at: run.started_at,
+            completed_at: run.completed_at,
+            exit_code: run.exit_code,
+            error: run.error,
+            output: run.output.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -385,6 +444,7 @@ fn run_local_diagnostic(
             program: "git".into(),
             arguments: vec!["--version".into()],
             working_directory: None,
+            standard_input: None,
         },
         "the local worker diagnostic",
     )
@@ -519,6 +579,186 @@ fn cancel_local_worker_run(run_id: String, state: State<'_, AppState>) -> Result
         .map_err(|error| format!("Unable to cancel the local worker command: {error}"))?;
     run.cancel_requested = true;
     Ok(())
+}
+
+#[tauri::command]
+fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<RunResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .list_runs_for_task(&task_id)
+        .map(|runs| runs.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load task runs: {error}"))
+}
+
+#[tauri::command]
+fn start_task_run(
+    task_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartedTaskRunResponse, String> {
+    let (task, agent, workspace_path) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local run store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&task_id)
+            .map_err(|error| format!("Unable to load task for execution: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        if task.status != TaskStatus::Todo {
+            return Err(
+                "Only Todo tasks can be started. Move the task back to Todo to run it again."
+                    .into(),
+            );
+        }
+        let agent_id = task
+            .assigned_agent_id
+            .as_deref()
+            .ok_or_else(|| "Assign a Codex agent before starting this task.".to_owned())?;
+        let agent = database
+            .get_agent(agent_id)
+            .map_err(|error| format!("Unable to load the assigned agent: {error}"))?
+            .ok_or_else(|| "The assigned agent no longer exists.".to_owned())?;
+        if agent.provider != "codex" {
+            return Err("Only Codex agents can run locally at this stage.".into());
+        }
+        let workspace_path = database
+            .get_project(&task.project_id)
+            .map_err(|error| format!("Unable to load the task workspace: {error}"))?
+            .and_then(|project| {
+                project
+                    .workspaces
+                    .into_iter()
+                    .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+                    .map(|workspace| workspace.path)
+            })
+            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
+        (task, agent, workspace_path)
+    };
+
+    let provider_status = CodexProvider
+        .inspect()
+        .map_err(|error| format!("Unable to inspect Codex before starting the task: {error}"))?;
+    if !matches!(provider_status.readiness, ProviderReadiness::Ready) {
+        return Err(format!(
+            "Codex is not ready to run this task. {}",
+            provider_status.detail
+        ));
+    }
+
+    let request = CodexProvider
+        .execution_request(AgentRunInput {
+            model: agent.model.clone(),
+            prompt: build_task_prompt(&task, &agent),
+            working_directory: PathBuf::from(&workspace_path),
+        })
+        .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
+    let run_id = Uuid::new_v4().to_string();
+    let (persisted_run, updated_task) = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .start_run(NewRun {
+            id: run_id.clone(),
+            task_id: task.id.clone(),
+            agent_id: agent.id,
+            worker_id: LOCAL_WORKER_ID.to_owned(),
+        })
+        .map_err(|error| format!("Unable to start the task run: {error}"))?;
+
+    let run = match LocalWorker::start(request) {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = state.database.lock().ok().and_then(|mut database| {
+                database
+                    .finish_run(&run_id, RunStatus::Failed, None, Some(&error.to_string()))
+                    .ok()
+            });
+            return Err(format!("Unable to start Codex for this task: {error}"));
+        }
+    };
+
+    let handle = run.handle;
+    let active_runs = Arc::clone(&state.local_worker_runs);
+    active_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?
+        .insert(
+            run_id.clone(),
+            ActiveLocalRun {
+                handle: handle.clone(),
+                cancel_requested: false,
+            },
+        );
+    let database = Arc::clone(&state.database);
+    let event_run_id = run_id.clone();
+    thread::spawn(move || {
+        for output in run.output {
+            let text = CodexProvider::format_execution_output(&output.text);
+            let stream = match output.stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            };
+            if let Ok(mut database) = database.lock() {
+                let _ = database.append_run_output(&event_run_id, stream, &text);
+            }
+            let _ = app.emit(
+                "worker://run-event",
+                WorkerRunEvent {
+                    run_id: event_run_id.clone(),
+                    kind: "output".into(),
+                    stream: Some(output.stream),
+                    text: Some(text),
+                    exit_code: None,
+                },
+            );
+        }
+
+        let result = handle.wait();
+        let cancelled = active_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(&event_run_id))
+            .is_some_and(|run| run.cancel_requested);
+        let (status, kind, text, exit_code) = match result {
+            Ok(exit_status) if cancelled => (
+                RunStatus::Cancelled,
+                "cancelled",
+                Some("Codex task cancelled.".into()),
+                exit_status.code(),
+            ),
+            Ok(exit_status) if exit_status.success() => {
+                (RunStatus::Completed, "completed", None, exit_status.code())
+            }
+            Ok(exit_status) => (
+                RunStatus::Failed,
+                "failed",
+                Some("Codex exited with an error.".into()),
+                exit_status.code(),
+            ),
+            Err(error) => (RunStatus::Failed, "failed", Some(error.to_string()), None),
+        };
+        if let Ok(mut database) = database.lock() {
+            let _ = database.finish_run(&event_run_id, status, exit_code, text.as_deref());
+        }
+        let _ = app.emit(
+            "worker://run-event",
+            WorkerRunEvent {
+                run_id: event_run_id,
+                kind: kind.into(),
+                stream: None,
+                text,
+                exit_code,
+            },
+        );
+    });
+
+    Ok(StartedTaskRunResponse {
+        run: persisted_run.into(),
+        task: updated_task.into(),
+    })
 }
 
 #[tauri::command]
@@ -875,6 +1115,52 @@ fn validate_assigned_agent(database: &Database, agent_id: Option<&str>) -> Resul
     Ok(())
 }
 
+fn build_task_prompt(task: &Task, agent: &Agent) -> String {
+    let mut prompt = format!(
+        "You are {name}, acting as {role} in this repository. Implement the task below. \
+         Inspect the existing project instructions and conventions before making changes. \
+         Work only within this workspace. Do not mark the task complete in Orchestr; a human will review the result.\n\n# Task\n{title}",
+        name = agent.name,
+        role = agent.role,
+        title = task.title,
+    );
+    if let Some(description) = &task.description {
+        prompt.push_str(&format!("\n\n## Context\n{description}"));
+    }
+    if !task.acceptance_criteria.is_empty() {
+        prompt.push_str("\n\n## Acceptance criteria");
+        for criterion in &task.acceptance_criteria {
+            prompt.push_str(&format!("\n- {criterion}"));
+        }
+    }
+    if let Some(notes) = &task.implementation_notes {
+        prompt.push_str(&format!("\n\n## Implementation notes\n{notes}"));
+    }
+    if !task.relevant_paths.is_empty() {
+        prompt.push_str("\n\n## Relevant paths");
+        for path in &task.relevant_paths {
+            prompt.push_str(&format!("\n- {path}"));
+        }
+    }
+    if !task.dependency_ids.is_empty() {
+        prompt.push_str("\n\n## Related task dependencies");
+        for dependency_id in &task.dependency_ids {
+            prompt.push_str(&format!("\n- {dependency_id}"));
+        }
+    }
+    if let Some(system_prompt) = &agent.system_prompt {
+        prompt.push_str(&format!("\n\n## Agent instructions\n{system_prompt}"));
+    }
+    if !agent.skills.is_empty() {
+        prompt.push_str("\n\n## Declared skills");
+        for skill in &agent.skills {
+            prompt.push_str(&format!("\n- {skill}"));
+        }
+    }
+    prompt.push_str("\n\nWhen finished, summarize the changes and validation performed.");
+    prompt
+}
+
 /// Converts Windows' internal extended-length paths into the normal paths a
 /// person expects to see and can copy into other tools. `canonicalize` may
 /// return paths such as `\\?\C:\projects\orchestr` on Windows.
@@ -926,7 +1212,7 @@ fn main() {
             let database = Database::open(&database_path)?;
 
             app.manage(AppState {
-                database: Mutex::new(database),
+                database: Arc::new(Mutex::new(database)),
                 local_worker_runs: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
@@ -948,6 +1234,8 @@ fn main() {
             logout_codex,
             test_codex_connection,
             cancel_local_worker_run,
+            list_task_runs,
+            start_task_run,
             list_agents,
             create_agent,
             update_agent,
