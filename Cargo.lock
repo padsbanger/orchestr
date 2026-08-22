@@ -2163,6 +2163,7 @@ version = "0.2.0"
 dependencies = [
  "orchestr-db",
  "orchestr-git",
+ "orchestr-provider",
  "orchestr-worker",
  "serde",
  "tauri",
@@ -2175,6 +2176,14 @@ dependencies = [
 name = "orchestr-git"
 version = "0.1.0"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "orchestr-provider"
+version = "0.1.0"
+dependencies = [
+ "orchestr-worker",
  "serde",
 ]
 

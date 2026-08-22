@@ -1,0 +1,10 @@
+[package]
+name = "orchestr-provider"
+version = "0.1.0"
+description = "Provider abstractions and local Codex integration for Orchestr"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestr-worker = { path = "../orchestr-worker" }
+serde.workspace = true

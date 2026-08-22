@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 orchestr-db = { path = "../../../crates/orchestr-db" }
 orchestr-git = { path = "../../../crates/orchestr-git" }
 orchestr-worker = { path = "../../../crates/orchestr-worker" }
+orchestr-provider = { path = "../../../crates/orchestr-provider" }
 serde.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

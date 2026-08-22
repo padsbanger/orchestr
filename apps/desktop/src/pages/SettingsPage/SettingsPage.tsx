@@ -1,3 +1,4 @@
+import { CodexProviderSettings } from "../../components/CodexProviderSettings/CodexProviderSettings";
 import "./SettingsPage.css";
 
 export function SettingsPage() {
@@ -18,14 +19,8 @@ export function SettingsPage() {
           </div>
           <code>sqlite / orchestr.db</code>
         </div>
-        <div className="setting-row">
-          <div>
-            <h2>Providers and workers</h2>
-            <p>These will be introduced after the local Kanban and Git foundation.</p>
-          </div>
-          <span className="status-chip">Not configured</span>
-        </div>
       </div>
+      <CodexProviderSettings />
     </section>
   );
 }

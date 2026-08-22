@@ -1,0 +1,30 @@
+.provider-settings { display: grid; gap: 16px; margin-top: 24px; padding: 20px; border: 1px solid #2d353a; background: #171a1d; }
+.provider-settings-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.provider-settings-header h2 { margin-bottom: 5px; font-size: 17px; }
+.provider-settings-header p:not(.eyebrow) { margin: 0; color: #89939a; font-size: 13px; line-height: 1.5; }
+.provider-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #30383d; }
+.provider-status-item { display: grid; gap: 7px; min-width: 0; padding: 11px; background: #181c1f; }
+.provider-status-item + .provider-status-item { border-left: 1px solid #30383d; }
+.provider-status-item span { color: #77828a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.provider-status-item strong { overflow: hidden; color: #c9d0d4; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.provider-tone.ready { color: #73bd88; }.provider-tone.warning { color: #dca65c; }.provider-tone.unavailable { color: #e18572; }
+.provider-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-privacy { display: flex; align-items: flex-start; gap: 7px; margin: 0; color: #77828a; font-size: 11px; line-height: 1.5; }
+.provider-privacy svg { flex: 0 0 auto; margin-top: 1px; color: #8ec9ee; }
+.provider-error { margin: 0; padding: 9px 10px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 12px; line-height: 1.45; }
+.provider-run { display: grid; gap: 10px; padding: 14px; border: 1px solid #30383d; background: #15191b; }
+.provider-run header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.provider-run header > div { display: flex; align-items: center; gap: 8px; color: #c9d0d4; }
+.provider-run h3 { margin: 0; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.provider-run-status { padding: 4px 6px; border: 1px solid #4b5155; color: #aeb8bd; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.provider-run-status.running { border-color: #685337; color: #dca65c; }.provider-run-status.completed { border-color: #3c4b42; color: #73bd88; }.provider-run-status.failed { border-color: #764638; color: #e18572; }
+.provider-run-actions { display: flex; justify-content: flex-end; }
+.provider-run pre { max-height: 260px; overflow: auto; margin: 0; padding: 12px; border: 1px solid #2b3237; background: #101214; color: #bdc9cf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 700px) {
+  .provider-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-status-item:nth-child(3) { border-top: 1px solid #30383d; border-left: 0; }
+  .provider-status-item:nth-child(4) { border-top: 1px solid #30383d; }
+}

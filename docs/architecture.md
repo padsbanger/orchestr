@@ -44,6 +44,14 @@ workflow or execution eligibility; that behavior belongs to M14. The board's
 task inspector is read-focused, while the task dialog is the sole editing
 surface for the specification.
 
+## M6 provider boundary
+
+`crates/orchestr-provider` defines provider status and structured provider
+actions. The Codex provider detects the local CLI and checks its official login
+status command through the worker runtime. Login, logout, and status actions
+are executed by the Codex CLI on the worker; Orchestr stores no OAuth or API
+credentials and never returns command output as credential data.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

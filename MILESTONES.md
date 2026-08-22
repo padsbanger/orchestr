@@ -305,6 +305,10 @@ A task contains enough structured information that a developer or AI agent can d
 
 ## M6 — AI Provider Integration
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Make AI providers first-class integrations without yet implementing complex scheduling.

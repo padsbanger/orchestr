@@ -10,6 +10,7 @@ use orchestr_db::{
     Database, NewProject, NewTask, Project, Task, TaskStatus, TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
+use orchestr_provider::{AgentProvider, CodexProvider, ProviderAction, ProviderStatus};
 use orchestr_worker::{LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -313,12 +314,69 @@ fn run_local_diagnostic(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartedWorkerRun, String> {
-    let run = LocalWorker::start(ProcessRequest {
-        program: "git".into(),
-        arguments: vec!["--version".into()],
-        working_directory: None,
-    })
-    .map_err(|error| format!("Unable to start the local worker diagnostic: {error}"))?;
+    start_local_worker_run(
+        app,
+        &state,
+        ProcessRequest {
+            program: "git".into(),
+            arguments: vec!["--version".into()],
+            working_directory: None,
+        },
+        "the local worker diagnostic",
+    )
+}
+
+#[tauri::command]
+fn get_codex_provider_status() -> Result<ProviderStatus, String> {
+    CodexProvider
+        .inspect()
+        .map_err(|error| format!("Unable to inspect Codex: {error}"))
+}
+
+#[tauri::command]
+fn start_codex_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartedWorkerRun, String> {
+    start_local_worker_run(
+        app,
+        &state,
+        CodexProvider.action_request(ProviderAction::Login),
+        "the Codex sign-in flow",
+    )
+}
+
+#[tauri::command]
+fn logout_codex(app: AppHandle, state: State<'_, AppState>) -> Result<StartedWorkerRun, String> {
+    start_local_worker_run(
+        app,
+        &state,
+        CodexProvider.action_request(ProviderAction::Logout),
+        "Codex sign-out",
+    )
+}
+
+#[tauri::command]
+fn test_codex_connection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartedWorkerRun, String> {
+    start_local_worker_run(
+        app,
+        &state,
+        CodexProvider.action_request(ProviderAction::CheckConnection),
+        "the Codex status check",
+    )
+}
+
+fn start_local_worker_run(
+    app: AppHandle,
+    state: &State<'_, AppState>,
+    request: ProcessRequest,
+    operation: &str,
+) -> Result<StartedWorkerRun, String> {
+    let run = LocalWorker::start(request)
+        .map_err(|error| format!("Unable to start {operation}: {error}"))?;
     let run_id = Uuid::new_v4().to_string();
     let handle = run.handle;
     let active_runs = Arc::clone(&state.local_worker_runs);
@@ -670,6 +728,10 @@ fn main() {
             get_repository_diff,
             get_local_worker_profile,
             run_local_diagnostic,
+            get_codex_provider_status,
+            start_codex_login,
+            logout_codex,
+            test_codex_connection,
             cancel_local_worker_run,
             list_tasks,
             create_task,

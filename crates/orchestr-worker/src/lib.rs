@@ -137,6 +137,10 @@ impl LocalWorker {
             output: receiver,
         })
     }
+
+    pub fn inspect_tool(name: &str, arguments: &[&str]) -> ToolCapability {
+        detect_tool(name, arguments)
+    }
 }
 
 pub struct WorkerRun {
@@ -208,7 +212,10 @@ where
     thread::spawn(move || {
         for result in BufReader::new(reader).lines() {
             let (text, failed) = match result {
-                Ok(line) => (truncate_output_line(line), false),
+                Ok(line) => (
+                    truncate_output_line(strip_terminal_control_sequences(&line)),
+                    false,
+                ),
                 Err(error) => (format!("Unable to read worker output: {error}"), true),
             };
             if sender
@@ -297,6 +304,44 @@ fn truncate_output_line(mut line: String) -> String {
     line
 }
 
+/// Removes ANSI color, cursor, and hyperlink control sequences before output
+/// reaches the desktop UI. Terminal decoration is not meaningful in a GUI and
+/// can otherwise leak raw escape characters into logs.
+fn strip_terminal_control_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+
+        match characters.next() {
+            Some('[') => {
+                while let Some(next) = characters.next() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(next) = characters.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && characters.peek() == Some(&'\\') {
+                        characters.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    output
+}
+
 fn platform_os() -> &'static str {
     match std::env::consts::OS {
         "windows" => "windows",
@@ -346,6 +391,20 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn strips_terminal_color_and_hyperlink_control_sequences() {
+        assert_eq!(
+            super::strip_terminal_control_sequences("\u{1b}[94mDevice code\u{1b}[0m"),
+            "Device code"
+        );
+        assert_eq!(
+            super::strip_terminal_control_sequences(
+                "\u{1b}]8;;https://auth.openai.com\u{7}Open link\u{1b}]8;;\u{7}"
+            ),
+            "Open link"
+        );
     }
 
     #[cfg(windows)]

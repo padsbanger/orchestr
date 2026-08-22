@@ -4,6 +4,7 @@ members = [
     "crates/orchestr-db",
     "crates/orchestr-git",
     "crates/orchestr-worker",
+    "crates/orchestr-provider",
 ]
 resolver = "2"
 
