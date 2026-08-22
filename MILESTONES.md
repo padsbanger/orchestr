@@ -266,6 +266,10 @@ Orchestr can run a harmless command through the Worker abstraction and stream it
 
 ## M5 — Task Specification
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Make tasks precise enough to be handed to AI workers.

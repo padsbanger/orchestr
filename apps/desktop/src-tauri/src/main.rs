@@ -50,6 +50,13 @@ struct CreateTaskInput {
     project_id: String,
     title: String,
     description: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    implementation_notes: Option<String>,
+    #[serde(default)]
+    relevant_paths: Vec<String>,
+    #[serde(default)]
+    dependency_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +65,13 @@ struct UpdateTaskInput {
     id: String,
     title: String,
     description: Option<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    implementation_notes: Option<String>,
+    #[serde(default)]
+    relevant_paths: Vec<String>,
+    #[serde(default)]
+    dependency_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +135,10 @@ struct TaskResponse {
     project_id: String,
     title: String,
     description: Option<String>,
+    acceptance_criteria: Vec<String>,
+    implementation_notes: Option<String>,
+    relevant_paths: Vec<String>,
+    dependency_ids: Vec<String>,
     status: String,
     position: i64,
     created_at: String,
@@ -161,6 +179,10 @@ impl From<Task> for TaskResponse {
             project_id: task.project_id,
             title: task.title,
             description: task.description,
+            acceptance_criteria: task.acceptance_criteria,
+            implementation_notes: task.implementation_notes,
+            relevant_paths: task.relevant_paths,
+            dependency_ids: task.dependency_ids,
             status: task.status.as_str().to_owned(),
             position: task.position,
             created_at: task.created_at,
@@ -400,6 +422,15 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
             project_id: input.project_id,
             title,
             description: normalize_optional_text(input.description),
+            acceptance_criteria: normalize_task_list(
+                input.acceptance_criteria,
+                "Acceptance criteria",
+                50,
+                500,
+            )?,
+            implementation_notes: normalize_optional_text(input.implementation_notes),
+            relevant_paths: normalize_task_list(input.relevant_paths, "Relevant paths", 50, 500)?,
+            dependency_ids: normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?,
         })
         .map(Into::into)
         .map_err(|error| format!("Unable to create task: {error}"))
@@ -408,6 +439,13 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
 #[tauri::command]
 fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
     let title = validate_task_title(&input.title)?;
+    let dependency_ids = normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?;
+    if dependency_ids
+        .iter()
+        .any(|dependency_id| dependency_id == &input.id)
+    {
+        return Err("A task cannot depend on itself.".into());
+    }
     state
         .database
         .lock()
@@ -417,6 +455,20 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
             TaskUpdate {
                 title,
                 description: normalize_optional_text(input.description),
+                acceptance_criteria: normalize_task_list(
+                    input.acceptance_criteria,
+                    "Acceptance criteria",
+                    50,
+                    500,
+                )?,
+                implementation_notes: normalize_optional_text(input.implementation_notes),
+                relevant_paths: normalize_task_list(
+                    input.relevant_paths,
+                    "Relevant paths",
+                    50,
+                    500,
+                )?,
+                dependency_ids,
             },
         )
         .map_err(|error| format!("Unable to update task: {error}"))?
@@ -521,6 +573,33 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
         let text = text.trim();
         (!text.is_empty()).then(|| text.to_owned())
     })
+}
+
+fn normalize_task_list(
+    values: Vec<String>,
+    field_name: &str,
+    max_items: usize,
+    max_item_length: usize,
+) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
+            continue;
+        }
+        if value.chars().count() > max_item_length {
+            return Err(format!(
+                "{field_name} entries cannot exceed {max_item_length} characters."
+            ));
+        }
+        normalized.push(value.to_owned());
+        if normalized.len() > max_items {
+            return Err(format!(
+                "{field_name} cannot contain more than {max_items} entries."
+            ));
+        }
+    }
+    Ok(normalized)
 }
 
 /// Converts Windows' internal extended-length paths into the normal paths a

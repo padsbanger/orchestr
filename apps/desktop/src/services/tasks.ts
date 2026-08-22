@@ -8,13 +8,24 @@ export type Task = {
   projectId: string;
   title: string;
   description: string | null;
+  acceptanceCriteria: string[];
+  implementationNotes: string | null;
+  relevantPaths: string[];
+  dependencyIds: string[];
   status: TaskStatus;
   position: number;
   createdAt: string;
   updatedAt: string;
 };
 
-type TaskInput = { title: string; description?: string };
+export type TaskInput = {
+  title: string;
+  description?: string;
+  acceptanceCriteria: string[];
+  implementationNotes?: string;
+  relevantPaths: string[];
+  dependencyIds: string[];
+};
 
 export function listTasks(projectId: string): Promise<Task[]> {
   return invoke<Task[]>("list_tasks", { projectId });

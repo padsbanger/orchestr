@@ -11,6 +11,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_settings.sql")),
     (2, include_str!("../migrations/0002_projects.sql")),
     (3, include_str!("../migrations/0003_tasks.sql")),
+    (
+        4,
+        include_str!("../migrations/0004_task_specifications.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -96,6 +100,10 @@ pub struct Task {
     pub project_id: String,
     pub title: String,
     pub description: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub implementation_notes: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub dependency_ids: Vec<String>,
     pub status: TaskStatus,
     pub position: i64,
     pub created_at: String,
@@ -107,11 +115,19 @@ pub struct NewTask {
     pub project_id: String,
     pub title: String,
     pub description: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub implementation_notes: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub dependency_ids: Vec<String>,
 }
 
 pub struct TaskUpdate {
     pub title: String,
     pub description: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub implementation_notes: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub dependency_ids: Vec<String>,
 }
 
 impl Database {
@@ -204,7 +220,8 @@ impl Database {
 
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, project_id, title, description, status, position, created_at, updated_at
+            "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
+                    relevant_paths, dependency_ids, status, position, created_at, updated_at
              FROM tasks WHERE project_id = ?1
              ORDER BY CASE status
                  WHEN 'backlog' THEN 0
@@ -228,14 +245,22 @@ impl Database {
             [&new_task.project_id],
             |row| row.get(0),
         )?;
+        let acceptance_criteria = encode_string_list(&new_task.acceptance_criteria)?;
+        let relevant_paths = encode_string_list(&new_task.relevant_paths)?;
+        let dependency_ids = encode_string_list(&new_task.dependency_ids)?;
         transaction.execute(
-            "INSERT INTO tasks (id, project_id, title, description, status, position)
-             VALUES (?1, ?2, ?3, ?4, 'backlog', ?5)",
+            "INSERT INTO tasks (id, project_id, title, description, acceptance_criteria,
+                                implementation_notes, relevant_paths, dependency_ids, status, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'backlog', ?9)",
             params![
                 new_task.id,
                 new_task.project_id,
                 new_task.title,
                 new_task.description,
+                acceptance_criteria,
+                new_task.implementation_notes,
+                relevant_paths,
+                dependency_ids,
                 position
             ],
         )?;
@@ -245,10 +270,22 @@ impl Database {
     }
 
     pub fn update_task(&mut self, id: &str, update: TaskUpdate) -> Result<Option<Task>> {
+        let acceptance_criteria = encode_string_list(&update.acceptance_criteria)?;
+        let relevant_paths = encode_string_list(&update.relevant_paths)?;
+        let dependency_ids = encode_string_list(&update.dependency_ids)?;
         let changed = self.connection.execute(
-            "UPDATE tasks SET title = ?1, description = ?2, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?3",
-            params![update.title, update.description, id],
+            "UPDATE tasks SET title = ?1, description = ?2, acceptance_criteria = ?3,
+                              implementation_notes = ?4, relevant_paths = ?5, dependency_ids = ?6,
+                              updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+            params![
+                update.title,
+                update.description,
+                acceptance_criteria,
+                update.implementation_notes,
+                relevant_paths,
+                dependency_ids,
+                id
+            ],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -352,7 +389,8 @@ impl Database {
     fn task_by_id(&self, id: &str) -> Result<Option<Task>> {
         self.connection
             .query_row(
-                "SELECT id, project_id, title, description, status, position, created_at, updated_at
+                "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
+                        relevant_paths, dependency_ids, status, position, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -377,10 +415,25 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         project_id: row.get(1)?,
         title: row.get(2)?,
         description: row.get(3)?,
-        status: TaskStatus::from_database(row.get(4)?)?,
-        position: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        acceptance_criteria: decode_string_list(row.get(4)?)?,
+        implementation_notes: row.get(5)?,
+        relevant_paths: decode_string_list(row.get(6)?)?,
+        dependency_ids: decode_string_list(row.get(7)?)?,
+        status: TaskStatus::from_database(row.get(8)?)?,
+        position: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn encode_string_list(values: &[String]) -> Result<String> {
+    serde_json::to_string(values)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+}
+
+fn decode_string_list(value: String) -> Result<Vec<String>> {
+    serde_json::from_str(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error.into())
     })
 }
 
@@ -533,6 +586,10 @@ mod tests {
                     project_id: "project-1".into(),
                     title: title.into(),
                     description: None,
+                    acceptance_criteria: Vec::new(),
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    dependency_ids: Vec::new(),
                 })
                 .expect("task saves");
         }
@@ -577,11 +634,22 @@ mod tests {
                 TaskUpdate {
                     title: "First, revised".into(),
                     description: Some("Updated description".into()),
+                    acceptance_criteria: vec!["Task can be revised".into()],
+                    implementation_notes: Some("Keep the ordering intact.".into()),
+                    relevant_paths: vec!["src/tasks.rs".into()],
+                    dependency_ids: vec!["task-2".into()],
                 },
             )
             .expect("task updates")
             .expect("task exists");
         assert_eq!(updated.title, "First, revised");
+        assert_eq!(updated.acceptance_criteria, ["Task can be revised"]);
+        assert_eq!(
+            updated.implementation_notes.as_deref(),
+            Some("Keep the ordering intact.")
+        );
+        assert_eq!(updated.relevant_paths, ["src/tasks.rs"]);
+        assert_eq!(updated.dependency_ids, ["task-2"]);
         assert!(database.delete_task("task-3").expect("task deletes"));
         let tasks = database.list_tasks("project-1").expect("tasks reload");
         assert_eq!(

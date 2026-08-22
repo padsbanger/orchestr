@@ -5,9 +5,10 @@ import { ArrowLeft, GitBranch, GripVertical, Pencil, Plus, SearchCode, Trash2 } 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
+import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
-import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskStatus, updateTask } from "../../services/tasks";
+import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import "./BoardPage.css";
 
 const columns: Record<TaskStatus, { label: string; tone: string }> = {
@@ -25,6 +26,7 @@ export function BoardPage() {
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
   const [editingTask, setEditingTask] = useState<Task | null>();
+  const [inspectedTask, setInspectedTask] = useState<Task | null>();
   const [isCreating, setIsCreating] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
   const [repository, setRepository] = useState<RepositoryDetails>();
@@ -94,7 +96,7 @@ export function BoardPage() {
     }
   };
 
-  const saveTask = async (input: { title: string; description: string }) => {
+  const saveTask = async (input: TaskInput) => {
     if (!projectId) return;
     if (editingTask) await updateTask(editingTask.id, input);
     else await createTask(projectId, input);
@@ -140,26 +142,27 @@ export function BoardPage() {
         onDragEnd={(event) => { setActiveTaskId(undefined); void handleDragEnd(event); }}
       >
         <div className="kanban-board">
-          {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
+          {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} onInspect={setInspectedTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
         </div>
         <DragOverlay dropAnimation={null}>
           {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
         </DragOverlay>
       </DndContext>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
     </section>
   );
 }
 
-function TaskColumn({ status, tasks, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: columnDropId(status) });
   return (
     <section ref={setNodeRef} className={`kanban-column ${isOver ? "is-over" : ""}`}>
       <header className="column-header"><div><span className={`status-dot ${columns[status].tone}`} /><h2>{columns[status].label}</h2></div><span>{tasks.length}</span></header>
       <div className="task-list">
         <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
-          {tasks.map((task) => <TaskCard key={task.id} task={task} onEdit={onEdit} onDelete={onDelete} />)}
+          {tasks.map((task) => <TaskCard key={task.id} task={task} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
         </SortableContext>
         {tasks.length === 0 && <p className="empty-column">Drop task here</p>}
       </div>
@@ -167,12 +170,12 @@ function TaskColumn({ status, tasks, onEdit, onDelete }: { status: TaskStatus; t
   );
 }
 
-function TaskCard({ task, onEdit, onDelete }: { task: Task; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskCard({ task, onInspect, onEdit, onDelete }: { task: Task; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   return (
     <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
       <span className="drag-handle" aria-hidden="true"><GripVertical size={15} /></span>
-      <div className="task-card-copy" onClick={() => onEdit(task)}>
+      <div className="task-card-copy" onClick={() => onInspect(task)}>
         <h3>{task.title}</h3>
         {task.description && <p>{task.description}</p>}
       </div>

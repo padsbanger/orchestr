@@ -1,17 +1,21 @@
 import { X } from "lucide-react";
 import { FormEvent, useState } from "react";
-import type { Task } from "../../services/tasks";
+import type { Task, TaskInput } from "../../services/tasks";
 import "./TaskDialog.css";
 
 type TaskDialogProps = {
   task?: Task;
   onClose: () => void;
-  onSave: (input: { title: string; description: string }) => Promise<void>;
+  onSave: (input: TaskInput) => Promise<void>;
 };
 
 export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState(task ? task.acceptanceCriteria.join("\n") : "");
+  const [implementationNotes, setImplementationNotes] = useState(task?.implementationNotes ?? "");
+  const [relevantPaths, setRelevantPaths] = useState(task ? task.relevantPaths.join("\n") : "");
+  const [dependencyIds, setDependencyIds] = useState(task ? task.dependencyIds.join("\n") : "");
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
 
@@ -20,7 +24,14 @@ export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
     setError(undefined);
     setIsSaving(true);
     try {
-      await onSave({ title, description });
+      await onSave({
+        title,
+        description,
+        acceptanceCriteria: lines(acceptanceCriteria),
+        implementationNotes,
+        relevantPaths: lines(relevantPaths),
+        dependencyIds: lines(dependencyIds),
+      });
       onClose();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save task.");
@@ -46,8 +57,28 @@ export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
           </label>
           <label>
             Description <span className="field-optional">optional</span>
-            <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={6} placeholder="Implementation notes, context, or expected outcome" />
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} placeholder="Problem, context, or intended outcome" />
           </label>
+          <fieldset className="task-specification-fields">
+            <legend>Task specification</legend>
+            <label>
+              Acceptance criteria <span className="field-optional">one item per line</span>
+              <textarea value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={4} placeholder={"Successful callback creates a session\nInvalid callback shows an error\nTests pass"} />
+            </label>
+            <label>
+              Implementation notes <span className="field-optional">optional</span>
+              <textarea value={implementationNotes} onChange={(event) => setImplementationNotes(event.target.value)} rows={3} placeholder="Technical approach, constraints, or review notes" />
+            </label>
+            <label>
+              Relevant paths / context <span className="field-optional">one per line</span>
+              <textarea value={relevantPaths} onChange={(event) => setRelevantPaths(event.target.value)} rows={3} placeholder={"src/auth\ndocs/architecture.md"} />
+            </label>
+            <label>
+              Dependencies <span className="field-optional">task IDs, one per line</span>
+              <textarea value={dependencyIds} onChange={(event) => setDependencyIds(event.target.value)} rows={2} placeholder="TASK-12 or task UUID" />
+              <span className="field-hint">Dependencies are recorded now; execution blocking arrives in a later milestone.</span>
+            </label>
+          </fieldset>
           {error && <p className="form-error" role="alert">{error}</p>}
           <footer className="dialog-actions">
             <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
@@ -57,4 +88,8 @@ export function TaskDialog({ task, onClose, onSave }: TaskDialogProps) {
       </section>
     </div>
   );
+}
+
+function lines(value: string) {
+  return value.split("\n").map((line) => line.trim()).filter(Boolean);
 }

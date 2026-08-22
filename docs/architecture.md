@@ -35,6 +35,15 @@ The initial Workers screen exposes one implicit local worker and a predefined
 `git --version` diagnostic. This demonstrates streamed execution without
 opening an arbitrary command console before task/run authorization exists.
 
+## M5 task specifications
+
+Task specifications are persisted with the task in SQLite: acceptance criteria,
+implementation notes, relevant paths, and dependency IDs. Dependency IDs are
+validated and retained as structured references, but do not yet alter task
+workflow or execution eligibility; that behavior belongs to M14. The board's
+task inspector is read-focused, while the task dialog is the sole editing
+surface for the specification.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their
