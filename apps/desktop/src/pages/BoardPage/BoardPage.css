@@ -4,6 +4,14 @@
 .back-link:hover { color: #dce3e6; }
 .board-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .board-title-row h1 { margin-bottom: 6px; }
+.board-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.repository-status { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 34px; padding: 0 9px; border: 1px solid #354047; background: #171c1f; color: #aeb8bd; cursor: pointer; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
+.repository-status:hover { border-color: #4c5b64; background: #1c2327; }
+.repository-status > span { overflow: hidden; max-width: 130px; text-overflow: ellipsis; white-space: nowrap; }
+.repository-status strong { padding-left: 7px; border-left: 1px solid #39444a; font-family: inherit; font-size: inherit; font-weight: 500; white-space: nowrap; }
+.repository-clean { color: #73bd88; }
+.repository-dirty { color: #dca65c; }
+.repository-pending { color: #8d989e; }
 .board-page > .inline-error { margin: 16px 32px 0; padding: 10px 12px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 13px; }
 .kanban-board { display: grid; grid-template-columns: repeat(5, minmax(235px, 1fr)); gap: 12px; min-width: 1240px; padding: 16px 20px 24px; }
 .kanban-column { display: flex; min-height: calc(100vh - 170px); flex-direction: column; border: 1px solid #2b3237; background: #15181a; transition: border-color 120ms ease, background 120ms ease; }
@@ -37,6 +45,7 @@
 @media (max-width: 700px) {
   .board-header { padding: 22px 20px 18px; }
   .board-title-row { flex-direction: column; }
+  .board-header-actions { flex-wrap: wrap; justify-content: flex-start; }
   .board-page > .inline-error { margin-left: 20px; margin-right: 20px; }
   .kanban-board { padding-left: 12px; padding-right: 12px; }
 }

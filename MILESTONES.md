@@ -117,7 +117,9 @@ A user can create a project, close Orchestr, reopen it, and open the same valid 
 
 ## M2 — Core Kanban
 
-**Status:** Ready for validation
+**Status:** Complete
+
+**Completed:** 2026-08-22
 
 ### Goal
 
@@ -165,6 +167,10 @@ Create project
 ---
 
 ## M3 — Repository Awareness
+
+**Status:** Complete
+
+**Completed:** 2026-08-22
 
 ### Goal
 

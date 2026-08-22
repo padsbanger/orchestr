@@ -7,7 +7,7 @@ use std::{
 use orchestr_db::{
     Database, NewProject, NewTask, Project, Task, TaskStatus, TaskUpdate, Workspace,
 };
-use orchestr_git::GitService;
+use orchestr_git::{GitService, RepositoryDetails};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use uuid::Uuid;
@@ -57,6 +57,13 @@ struct MoveTaskInput {
     id: String,
     status: String,
     position: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryDiffInput {
+    project_id: String,
+    file_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,6 +228,26 @@ fn register_project(
 }
 
 #[tauri::command]
+fn get_repository_details(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<RepositoryDetails, String> {
+    let workspace_path = workspace_path_for_project(&state, &project_id)?;
+    GitService::repository_details(Path::new(&workspace_path))
+        .map_err(|error| format!("Unable to inspect the repository: {error}"))
+}
+
+#[tauri::command]
+fn get_repository_diff(
+    input: RepositoryDiffInput,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let workspace_path = workspace_path_for_project(&state, &input.project_id)?;
+    GitService::file_diff(Path::new(&workspace_path), &input.file_path)
+        .map_err(|error| format!("Unable to inspect the file diff: {error}"))
+}
+
+#[tauri::command]
 fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<TaskResponse>, String> {
     state
         .database
@@ -318,6 +345,25 @@ fn save_project(
     Ok(project.into())
 }
 
+fn workspace_path_for_project(
+    state: &State<'_, AppState>,
+    project_id: &str,
+) -> Result<String, String> {
+    let project = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load the project workspace: {error}"))?
+        .ok_or_else(|| "The project no longer exists.".to_owned())?;
+    project
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+        .map(|workspace| workspace.path)
+        .ok_or_else(|| "This project has no local workspace.".to_owned())
+}
+
 fn validate_project_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -410,6 +456,8 @@ fn main() {
             get_project,
             create_project,
             register_project,
+            get_repository_details,
+            get_repository_diff,
             list_tasks,
             create_task,
             update_task,

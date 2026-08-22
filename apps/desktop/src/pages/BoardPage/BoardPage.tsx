@@ -1,11 +1,12 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowLeft, GripVertical, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, GitBranch, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
-import { getProject, type Project } from "../../services/projects";
+import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
 import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskStatus, updateTask } from "../../services/tasks";
 import "./BoardPage.css";
 
@@ -26,10 +27,27 @@ export function BoardPage() {
   const [editingTask, setEditingTask] = useState<Task | null>();
   const [isCreating, setIsCreating] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
+  const [repository, setRepository] = useState<RepositoryDetails>();
+  const [repositoryError, setRepositoryError] = useState<string>();
+  const [isRepositoryLoading, setIsRepositoryLoading] = useState(false);
+  const [isRepositoryInspectorOpen, setIsRepositoryInspectorOpen] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+
+  const loadRepository = useCallback(async () => {
+    if (!projectId) return;
+    setIsRepositoryLoading(true);
+    setRepositoryError(undefined);
+    try {
+      setRepository(await getRepositoryDetails(projectId));
+    } catch (loadError) {
+      setRepositoryError(loadError instanceof Error ? loadError.message : "Unable to inspect the repository.");
+    } finally {
+      setIsRepositoryLoading(false);
+    }
+  }, [projectId]);
 
   const loadBoard = useCallback(async () => {
     if (!projectId) return;
@@ -39,12 +57,13 @@ export function BoardPage() {
       const [loadedProject, loadedTasks] = await Promise.all([getProject(projectId), listTasks(projectId)]);
       setProject(loadedProject);
       setTasks(loadedTasks);
+      void loadRepository();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       setIsLoading(false);
     }
-  }, [projectId]);
+  }, [loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard();
@@ -101,7 +120,15 @@ export function BoardPage() {
         <Link className="back-link" to="/projects"><ArrowLeft size={15} /> Projects</Link>
         <div className="board-title-row">
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
-          <button className="primary-button" type="button" onClick={() => { setEditingTask(null); setIsCreating(true); }}><Plus size={16} /> New task</button>
+          <div className="board-header-actions">
+            <button className="repository-status" type="button" onClick={() => setIsRepositoryInspectorOpen(true)} title="Inspect repository activity">
+              <GitBranch size={15} />
+              <span>{repository?.summary.currentBranch ?? project.defaultBranch}</span>
+              <strong className={repository?.summary.isClean === false ? "repository-dirty" : repository ? "repository-clean" : "repository-pending"}>{repository?.summary.isClean === false ? `${repository.summary.changedFileCount} changed` : repository ? "Clean" : isRepositoryLoading ? "Checking" : "Unavailable"}</strong>
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setIsRepositoryInspectorOpen(true)}><SearchCode size={16} /> Inspect</button>
+            <button className="primary-button" type="button" onClick={() => { setEditingTask(null); setIsCreating(true); }}><Plus size={16} /> New task</button>
+          </div>
         </div>
       </header>
       {error && <div className="inline-error" role="alert">{error}</div>}
@@ -120,6 +147,7 @@ export function BoardPage() {
         </DragOverlay>
       </DndContext>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
+      {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
     </section>
   );
 }

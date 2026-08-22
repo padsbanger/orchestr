@@ -15,7 +15,13 @@ persistence repositories for settings, projects, workspaces, and Kanban tasks.
 `crates/orchestr-git` owns validated interactions with the installed `git`
 executable. It accepts explicit workspace paths, passes command and argument
 arrays without a shell, and resolves the actual repository root before a
-workspace is persisted.
+workspace is persisted. Its repository-inspection API returns typed summaries,
+recent commits, changed files, and bounded diffs; the Tauri host resolves a
+project's local workspace before invoking it.
+
+The board uses typed frontend service wrappers to request repository data. The
+repository inspector is a non-blocking drawer, so Git activity can be viewed
+without leaving or mutating Kanban workflow state.
 
 ## Planned extraction points
 

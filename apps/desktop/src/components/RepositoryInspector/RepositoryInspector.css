@@ -1,0 +1,40 @@
+.repository-inspector { position: fixed; z-index: 5; top: 0; right: 0; bottom: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(100%, 480px); border-left: 1px solid #3a4349; background: #15181a; box-shadow: -18px 0 42px rgb(0 0 0 / 32%); }
+.repository-inspector-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid #2b3237; }
+.repository-inspector-header h2 { margin: 0; font-size: 18px; }
+.repository-inspector-actions { display: flex; gap: 6px; }
+.repository-inspector-content { display: grid; align-content: start; gap: 20px; overflow: auto; padding: 20px; }
+.repository-loading, .repository-empty { margin: 0; color: #89939a; font-size: 12px; line-height: 1.5; }
+.repository-error { margin: 16px 20px 0; padding: 9px 10px; border: 1px solid #a6583f; background: #3a211d; color: #f6c2b6; font-size: 12px; line-height: 1.45; }
+.repository-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid #30383d; }
+.repository-overview > div { display: grid; gap: 7px; min-width: 0; padding: 11px; background: #181c1f; }
+.repository-overview > div + div { border-left: 1px solid #30383d; }
+.repository-overview span { color: #77828a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.repository-overview code { overflow: hidden; color: #c8d4da; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.repository-overview strong { font-size: 12px; }
+.repository-clean { color: #73bd88; }
+.repository-dirty { color: #dca65c; }
+.repository-section { display: grid; gap: 9px; }
+.repository-section h3 { display: flex; align-items: center; gap: 7px; margin: 0; color: #c9d0d4; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 600; letter-spacing: .035em; text-transform: uppercase; }
+.repository-section h3 span { color: #778289; }
+.changed-file-list { display: grid; border: 1px solid #30383d; }
+.changed-file { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; width: 100%; padding: 9px 10px; border: 0; border-bottom: 1px solid #2a3034; background: #181c1f; color: #bbc4c9; cursor: pointer; text-align: left; }
+.changed-file:last-child { border-bottom: 0; }
+.changed-file:hover, .changed-file.active { background: #20272b; }
+.changed-file.active { box-shadow: inset 2px 0 #5b9fc5; }
+.changed-file span { color: #7db9dc; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
+.changed-file code { overflow: hidden; color: inherit; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.diff-section { min-height: 0; }
+.diff-output { max-height: 360px; overflow: auto; margin: 0; padding: 12px; border: 1px solid #30383d; background: #101214; color: #bdc9cf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.5; white-space: pre; }
+.commit-list { display: grid; gap: 0; margin: 0; padding: 0; border: 1px solid #30383d; list-style: none; }
+.commit-list li { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 9px; padding: 10px; background: #181c1f; }
+.commit-list li + li { border-top: 1px solid #2a3034; }
+.commit-list code { color: #80bad9; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
+.commit-list div { display: grid; gap: 4px; min-width: 0; }
+.commit-list strong { overflow: hidden; color: #dce2e5; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.commit-list span { color: #77828a; font-size: 11px; }
+
+@media (max-width: 600px) {
+  .repository-inspector { width: 100%; }
+  .repository-overview { grid-template-columns: 1fr; }
+  .repository-overview > div + div { border-top: 1px solid #30383d; border-left: 0; }
+}

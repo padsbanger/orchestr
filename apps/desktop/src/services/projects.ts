@@ -19,6 +19,32 @@ export type Project = {
   workspaces: Workspace[];
 };
 
+export type CommitSummary = {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  authoredAt: string;
+};
+
+export type ChangedFile = {
+  path: string;
+  status: string;
+};
+
+export type RepositoryDetails = {
+  summary: {
+    rootPath: string;
+    defaultBranch: string;
+    currentBranch: string | null;
+    isClean: boolean;
+    changedFileCount: number;
+    latestCommit: CommitSummary | null;
+  };
+  recentCommits: CommitSummary[];
+  changedFiles: ChangedFile[];
+};
+
 type CreateProjectInput = {
   name: string;
   description?: string;
@@ -46,4 +72,12 @@ export function createProject(input: CreateProjectInput): Promise<Project> {
 
 export function registerProject(input: RegisterProjectInput): Promise<Project> {
   return invoke<Project>("register_project", { input });
+}
+
+export function getRepositoryDetails(projectId: string): Promise<RepositoryDetails> {
+  return invoke<RepositoryDetails>("get_repository_details", { projectId });
+}
+
+export function getRepositoryDiff(projectId: string, filePath: string): Promise<string | null> {
+  return invoke<string | null>("get_repository_diff", { input: { projectId, filePath } });
 }
