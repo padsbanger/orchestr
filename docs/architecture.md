@@ -75,6 +75,15 @@ worker. It persists and emits each output record, while the React task inspector
 uses typed run services to display live and historical output and offer
 cancellation. No React component constructs or runs a command directly.
 
+## M9 execution timeline
+
+Each run owns an ordered, persisted event stream. Provider JSONL records are
+classified into lifecycle, command, validation, and agent-message events;
+the host additionally snapshots Git state before and after execution to record
+changed files and newly created commits. The event stream is migrated from the
+earlier raw output records, survives restart, and is rendered as a chronological
+timeline in the task inspector.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

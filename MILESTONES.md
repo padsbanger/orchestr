@@ -451,6 +451,10 @@ A user can assign Codex to a task, watch its output, and receive the resulting t
 
 ## M9 — Execution Timeline + Observability
 
+**Status:** Complete
+
+**Completed:** 2026-08-22
+
 ### Goal
 
 Make AI work inspectable.

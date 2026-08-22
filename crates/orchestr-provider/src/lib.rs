@@ -73,66 +73,131 @@ pub struct AgentRunInput {
     pub working_directory: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionEvent {
+    pub kind: String,
+    pub message: String,
+    pub command: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
 pub struct CodexProvider;
 
 impl CodexProvider {
     /// Converts Codex's `exec --json` protocol records into concise terminal
     /// entries. The raw JSON protocol remains a provider concern, not UI data.
     pub fn format_execution_output(line: &str) -> String {
+        Self::execution_event(line).message
+    }
+
+    pub fn execution_event(line: &str) -> ExecutionEvent {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
-            return line.to_owned();
+            return ExecutionEvent {
+                kind: "command.output".into(),
+                message: line.to_owned(),
+                command: None,
+                exit_code: None,
+            };
         };
         match event.get("type").and_then(Value::as_str) {
-            Some("thread.started") => "Codex session started.".into(),
-            Some("turn.started") => "Codex started working.".into(),
-            Some("turn.completed") => "Codex finished working.".into(),
-            Some("error") => event
-                .get("message")
-                .and_then(Value::as_str)
-                .map(|message| format!("Error: {message}"))
-                .unwrap_or_else(|| "Codex reported an error.".into()),
-            Some("item.completed") | Some("item.started") => event
-                .get("item")
-                .map(format_codex_item)
-                .unwrap_or_else(|| "Codex updated its execution state.".into()),
-            Some(event_type) => format!("Codex event: {event_type}"),
-            None => line.to_owned(),
+            Some("thread.started") => {
+                event_record("agent.session_started", "Codex session started.")
+            }
+            Some("turn.started") => event_record("agent.started", "Codex started working."),
+            Some("turn.completed") => event_record("agent.completed", "Codex finished working."),
+            Some("error") => ExecutionEvent {
+                kind: "provider.error".into(),
+                message: event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(|message| format!("Error: {message}"))
+                    .unwrap_or_else(|| "Codex reported an error.".into()),
+                command: None,
+                exit_code: None,
+            },
+            Some("item.completed") | Some("item.started") => {
+                event.get("item").map(codex_item_event).unwrap_or_else(|| {
+                    event_record("agent.updated", "Codex updated its execution state.")
+                })
+            }
+            Some(event_type) => {
+                event_record("provider.event", &format!("Codex event: {event_type}"))
+            }
+            None => event_record("command.output", line),
         }
     }
 }
 
-fn format_codex_item(item: &Value) -> String {
+fn event_record(kind: &str, message: &str) -> ExecutionEvent {
+    ExecutionEvent {
+        kind: kind.into(),
+        message: message.into(),
+        command: None,
+        exit_code: None,
+    }
+}
+
+fn codex_item_event(item: &Value) -> ExecutionEvent {
     match item.get("type").and_then(Value::as_str) {
         Some("command_execution") => {
             let command = item
                 .get("command")
                 .and_then(Value::as_str)
                 .unwrap_or("command");
-            let mut output = format!("$ {command}");
-            if let Some(status) = item.get("status").and_then(Value::as_str) {
-                output.push_str(&format!("\n[{status}]"));
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("completed");
+            let exit_code = item
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .map(|code| code as i32);
+            let is_validation = is_validation_command(command);
+            let kind = match (is_validation, status) {
+                (true, "in_progress") => "validation.started",
+                (true, _) => "validation.completed",
+                (false, "in_progress") => "command.started",
+                (false, _) => "command.completed",
+            };
+            let message = item
+                .get("aggregated_output")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{status}: {command}"));
+            ExecutionEvent {
+                kind: kind.into(),
+                message,
+                command: Some(command.to_owned()),
+                exit_code,
             }
-            if let Some(text) = item.get("aggregated_output").and_then(Value::as_str) {
-                let text = text.trim();
-                if !text.is_empty() {
-                    output.push_str(&format!("\n{text}"));
-                }
-            }
-            if let Some(exit_code) = item.get("exit_code").and_then(Value::as_i64) {
-                output.push_str(&format!("\nexit {exit_code}"));
-            }
-            output
         }
         Some("agent_message") => item
             .get("text")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| "Codex sent a message.".into()),
-        Some("reasoning") => "Codex is reasoning...".into(),
-        Some("file_change") => "Codex updated files.".into(),
-        Some(item_type) => format!("Codex event: {item_type}"),
-        None => "Codex updated its execution state.".into(),
+            .map(|message| event_record("agent.message", message))
+            .unwrap_or_else(|| event_record("agent.message", "Codex sent a message.")),
+        Some("reasoning") => event_record("agent.reasoning", "Codex is reasoning..."),
+        Some("file_change") => event_record("file.modified", "Codex updated files."),
+        Some(item_type) => event_record("provider.event", &format!("Codex event: {item_type}")),
+        None => event_record("agent.updated", "Codex updated its execution state."),
     }
+}
+
+fn is_validation_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    [
+        " test",
+        " lint",
+        " typecheck",
+        " check",
+        " build",
+        " cargo test",
+        " cargo check",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle))
 }
 
 impl AgentProvider for CodexProvider {
@@ -329,10 +394,13 @@ mod tests {
 
     #[test]
     fn formats_codex_json_events_for_human_readable_logs() {
-        let command = CodexProvider::format_execution_output(
+        let command = CodexProvider::execution_event(
             r#"{"type":"item.completed","item":{"type":"command_execution","command":"git status","aggregated_output":"On branch main","exit_code":0,"status":"completed"}}"#,
         );
-        assert_eq!(command, "$ git status\n[completed]\nOn branch main\nexit 0");
+        assert_eq!(command.kind, "command.completed");
+        assert_eq!(command.command.as_deref(), Some("git status"));
+        assert_eq!(command.message, "On branch main");
+        assert_eq!(command.exit_code, Some(0));
         assert_eq!(
             CodexProvider::format_execution_output(
                 r#"{"type":"item.completed","item":{"type":"agent_message","text":"Implemented the task."}}"#,

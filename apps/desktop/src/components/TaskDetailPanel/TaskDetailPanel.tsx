@@ -1,7 +1,7 @@
 import { Bot, CheckSquare, Code2, FileCode2, GitBranch, Pencil, Play, Square, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
-import type { TaskRun } from "../../services/runs";
+import type { RunEvent, TaskRun } from "../../services/runs";
 import type { Task } from "../../services/tasks";
 import "./TaskDetailPanel.css";
 
@@ -76,20 +76,28 @@ function TaskSection({ title, icon, count, children }: { title: string; icon?: R
 function RunSummary({ run, now }: { run: TaskRun; now: number }) {
   const runtimeEnd = run.completedAt ? timestamp(run.completedAt) : now;
   const runtime = Math.max(0, runtimeEnd - timestamp(run.startedAt));
-  const outputRef = useRef<HTMLPreElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
-  }, [run.id, run.output.length]);
+    timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight });
+  }, [run.id, run.events.length]);
 
   return <div className="task-run-summary">
     <div className="task-run-meta"><span className={`run-status ${run.status}`}>{run.status}</span><span>{formatDuration(runtime)}</span>{run.exitCode !== null && <span>exit {run.exitCode}</span>}</div>
     {run.error && <p className="task-run-error">{run.error}</p>}
-    <pre ref={outputRef} className="task-run-output" aria-live="polite">{run.output.length === 0 ? "Waiting for Codex output..." : run.output.map((line) => `[${line.stream}] ${line.text}`).join("\n\n")}</pre>
+    <div ref={timelineRef} className="task-run-timeline" aria-live="polite">{run.events.length === 0 ? <p>Waiting for Codex events...</p> : run.events.map((event) => <TimelineEvent event={event} key={event.id} />)}</div>
+  </div>;
+}
+
+function TimelineEvent({ event }: { event: RunEvent }) {
+  return <div className={`timeline-event ${event.kind.replaceAll(".", "-")}`}>
+    <time>{time(event.createdAt)}</time><span className="timeline-marker" /><div><strong>{event.kind.replaceAll(".", " · ")}</strong>{event.command && <code>$ {event.command}</code>}<p>{event.message}</p>{event.filePath && <code>{event.filePath}</code>}{event.exitCode !== null && <span className="timeline-exit">exit {event.exitCode}</span>}</div>
   </div>;
 }
 
 function timestamp(value: string) { return Date.parse(value.endsWith("Z") ? value : `${value}Z`); }
+
+function time(value: string) { return new Date(timestamp(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 
 function formatDuration(milliseconds: number) {
   const seconds = Math.floor(milliseconds / 1_000);

@@ -7,8 +7,8 @@ use std::{
 };
 
 use orchestr_db::{
-    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, Project, Run, RunOutput,
-    RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
+    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewRunEvent, NewTask, Project, Run,
+    RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
 use orchestr_provider::{
@@ -29,6 +29,12 @@ struct AppState {
 struct ActiveLocalRun {
     handle: WorkerHandle,
     cancel_requested: bool,
+}
+
+#[derive(Clone)]
+struct RepositoryObservation {
+    changed_files: HashMap<String, String>,
+    latest_commit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +154,18 @@ struct RunOutputResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RunEventResponse {
+    id: i64,
+    kind: String,
+    message: String,
+    command: Option<String>,
+    file_path: Option<String>,
+    exit_code: Option<i32>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RunResponse {
     id: String,
     task_id: String,
@@ -159,6 +177,7 @@ struct RunResponse {
     exit_code: Option<i32>,
     error: Option<String>,
     output: Vec<RunOutputResponse>,
+    events: Vec<RunEventResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -298,6 +317,20 @@ impl From<RunOutput> for RunOutputResponse {
     }
 }
 
+impl From<RunEvent> for RunEventResponse {
+    fn from(event: RunEvent) -> Self {
+        Self {
+            id: event.id,
+            kind: event.kind,
+            message: event.message,
+            command: event.command,
+            file_path: event.file_path,
+            exit_code: event.exit_code,
+            created_at: event.created_at,
+        }
+    }
+}
+
 impl From<Run> for RunResponse {
     fn from(run: Run) -> Self {
         Self {
@@ -311,6 +344,7 @@ impl From<Run> for RunResponse {
             exit_code: run.exit_code,
             error: run.error,
             output: run.output.into_iter().map(Into::into).collect(),
+            events: run.events.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -655,6 +689,7 @@ fn start_task_run(
             working_directory: PathBuf::from(&workspace_path),
         })
         .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
+    let repository_before = repository_observation(Path::new(&workspace_path));
     let run_id = Uuid::new_v4().to_string();
     let (persisted_run, updated_task) = state
         .database
@@ -696,13 +731,19 @@ fn start_task_run(
     let event_run_id = run_id.clone();
     thread::spawn(move || {
         for output in run.output {
-            let text = CodexProvider::format_execution_output(&output.text);
-            let stream = match output.stream {
-                OutputStream::Stdout => "stdout",
-                OutputStream::Stderr => "stderr",
-            };
+            let event = CodexProvider::execution_event(&output.text);
+            let text = event.message.clone();
             if let Ok(mut database) = database.lock() {
-                let _ = database.append_run_output(&event_run_id, stream, &text);
+                let _ = database.append_run_event(
+                    &event_run_id,
+                    NewRunEvent {
+                        kind: event.kind,
+                        message: event.message,
+                        command: event.command,
+                        file_path: None,
+                        exit_code: event.exit_code,
+                    },
+                );
             }
             let _ = app.emit(
                 "worker://run-event",
@@ -741,6 +782,12 @@ fn start_task_run(
             Err(error) => (RunStatus::Failed, "failed", Some(error.to_string()), None),
         };
         if let Ok(mut database) = database.lock() {
+            record_repository_events(
+                &mut database,
+                &event_run_id,
+                Path::new(&workspace_path),
+                repository_before.as_ref(),
+            );
             let _ = database.finish_run(&event_run_id, status, exit_code, text.as_deref());
         }
         let _ = app.emit(
@@ -1159,6 +1206,59 @@ fn build_task_prompt(task: &Task, agent: &Agent) -> String {
     }
     prompt.push_str("\n\nWhen finished, summarize the changes and validation performed.");
     prompt
+}
+
+fn repository_observation(path: &Path) -> Option<RepositoryObservation> {
+    GitService::repository_details(path)
+        .ok()
+        .map(|details| RepositoryObservation {
+            changed_files: details
+                .changed_files
+                .into_iter()
+                .map(|file| (file.path, file.status))
+                .collect(),
+            latest_commit: details.summary.latest_commit.map(|commit| commit.hash),
+        })
+}
+
+fn record_repository_events(
+    database: &mut Database,
+    run_id: &str,
+    workspace_path: &Path,
+    before: Option<&RepositoryObservation>,
+) {
+    let Some(after) = repository_observation(workspace_path) else {
+        return;
+    };
+    let before_files = before.map(|observation| &observation.changed_files);
+    for (path, status) in &after.changed_files {
+        if before_files.and_then(|files| files.get(path)) != Some(status) {
+            let _ = database.append_run_event(
+                run_id,
+                NewRunEvent {
+                    kind: "file.modified".into(),
+                    message: format!("{status} {path}"),
+                    command: None,
+                    file_path: Some(path.clone()),
+                    exit_code: None,
+                },
+            );
+        }
+    }
+    if after.latest_commit != before.and_then(|observation| observation.latest_commit.clone()) {
+        if let Some(commit) = after.latest_commit {
+            let _ = database.append_run_event(
+                run_id,
+                NewRunEvent {
+                    kind: "commit.created".into(),
+                    message: format!("Created commit {}", &commit[..commit.len().min(12)]),
+                    command: None,
+                    file_path: None,
+                    exit_code: None,
+                },
+            );
+        }
+    }
 }
 
 /// Converts Windows' internal extended-length paths into the normal paths a

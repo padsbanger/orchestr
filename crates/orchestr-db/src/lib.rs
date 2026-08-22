@@ -17,6 +17,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (5, include_str!("../migrations/0005_agents.sql")),
     (6, include_str!("../migrations/0006_runs.sql")),
+    (7, include_str!("../migrations/0007_run_events.sql")),
 ];
 
 pub struct Database {
@@ -225,6 +226,26 @@ pub struct Run {
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub output: Vec<RunOutput>,
+    pub events: Vec<RunEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEvent {
+    pub id: i64,
+    pub kind: String,
+    pub message: String,
+    pub command: Option<String>,
+    pub file_path: Option<String>,
+    pub exit_code: Option<i32>,
+    pub created_at: String,
+}
+
+pub struct NewRunEvent {
+    pub kind: String,
+    pub message: String,
+    pub command: Option<String>,
+    pub file_path: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub struct NewRun {
@@ -483,6 +504,7 @@ impl Database {
             .into_iter()
             .map(|mut run| {
                 run.output = self.list_run_output(&run.id)?;
+                run.events = self.list_run_events(&run.id)?;
                 Ok(run)
             })
             .collect();
@@ -507,6 +529,10 @@ impl Database {
             "INSERT INTO runs (id, task_id, agent_id, worker_id, status) VALUES (?1, ?2, ?3, ?4, 'running')",
             params![new_run.id, new_run.task_id, new_run.agent_id, new_run.worker_id],
         )?;
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.started', 'Agent run started.')",
+            [&new_run.id],
+        )?;
         move_task_in_transaction(
             &transaction,
             &new_run.task_id,
@@ -530,6 +556,22 @@ impl Database {
         self.connection.execute(
             "INSERT INTO run_output (run_id, stream, text) VALUES (?1, ?2, ?3)",
             params![run_id, stream, text],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_run_event(&mut self, run_id: &str, event: NewRunEvent) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO run_events (run_id, kind, message, command, file_path, exit_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                run_id,
+                event.kind,
+                event.message,
+                event.command,
+                event.file_path,
+                event.exit_code,
+            ],
         )?;
         Ok(())
     }
@@ -559,6 +601,16 @@ impl Database {
         transaction.execute(
             "UPDATE runs SET status = ?1, completed_at = CURRENT_TIMESTAMP, exit_code = ?2, error = ?3 WHERE id = ?4",
             params![status.as_str(), exit_code, error, run_id],
+        )?;
+        let (kind, message) = match status {
+            RunStatus::Completed => ("run.completed", "Agent run completed."),
+            RunStatus::Cancelled => ("run.cancelled", "Agent run cancelled."),
+            RunStatus::Failed => ("run.failed", "Agent run failed."),
+            RunStatus::Queued | RunStatus::Running => ("run.updated", "Agent run updated."),
+        };
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message, exit_code) VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, kind, message, exit_code],
         )?;
         if status == RunStatus::Completed {
             let (project_id, task_status): (String, String) = transaction.query_row(
@@ -693,6 +745,7 @@ impl Database {
             .optional()?;
         if let Some(record) = &mut run {
             record.output = self.list_run_output(&record.id)?;
+            record.events = self.list_run_events(&record.id)?;
         }
         Ok(run)
     }
@@ -711,6 +764,27 @@ impl Database {
             })?
             .collect();
         output
+    }
+
+    fn list_run_events(&self, run_id: &str) -> Result<Vec<RunEvent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, kind, message, command, file_path, exit_code, created_at
+             FROM run_events WHERE run_id = ?1 ORDER BY id ASC",
+        )?;
+        let events = statement
+            .query_map([run_id], |row| {
+                Ok(RunEvent {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    message: row.get(2)?,
+                    command: row.get(3)?,
+                    file_path: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect();
+        events
     }
 
     fn task_location(&self, id: &str) -> Result<Option<(String, TaskStatus)>> {
@@ -769,6 +843,7 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> Result<Run> {
         exit_code: row.get(7)?,
         error: row.get(8)?,
         output: Vec::new(),
+        events: Vec::new(),
     })
 }
 
@@ -1181,6 +1256,11 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, RunStatus::Completed);
         assert_eq!(runs[0].output[0].text, "Task complete");
+        assert_eq!(runs[0].events[0].kind, "run.started");
+        assert!(runs[0]
+            .events
+            .iter()
+            .any(|event| event.kind == "run.completed"));
         drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }

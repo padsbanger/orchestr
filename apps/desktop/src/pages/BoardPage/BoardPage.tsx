@@ -99,9 +99,11 @@ export function BoardPage() {
       if (!runIds.current.has(event.runId)) return;
       if (event.kind === "output" && event.stream && event.text !== null) {
         const output = { stream: event.stream, text: event.text, createdAt: new Date().toISOString() };
+        const timelineEvent = { id: -Date.now(), kind: "command.output", message: event.text, command: null, filePath: null, exitCode: null, createdAt: output.createdAt };
         setRuns((current) => current.map((run) => run.id === event.runId ? {
           ...run,
           output: [...run.output, output],
+          events: [...run.events, timelineEvent],
         } : run));
         return;
       }

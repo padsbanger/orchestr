@@ -9,6 +9,16 @@ export type RunOutput = {
   createdAt: string;
 };
 
+export type RunEvent = {
+  id: number;
+  kind: string;
+  message: string;
+  command: string | null;
+  filePath: string | null;
+  exitCode: number | null;
+  createdAt: string;
+};
+
 export type TaskRun = {
   id: string;
   taskId: string;
@@ -20,6 +30,7 @@ export type TaskRun = {
   exitCode: number | null;
   error: string | null;
   output: RunOutput[];
+  events: RunEvent[];
 };
 
 type StartedTaskRun = {
