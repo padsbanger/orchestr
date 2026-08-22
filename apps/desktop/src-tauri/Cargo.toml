@@ -1,0 +1,15 @@
+[package]
+name = "orchestr-desktop"
+version = "0.1.0"
+description = "Orchestr local desktop control plane"
+authors = ["Orchestr contributors"]
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+orchestr-db = { path = "../../../crates/orchestr-db" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
+

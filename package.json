@@ -1,0 +1,19 @@
+{
+  "name": "orchestr",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first engineering control room for projects, tasks, and workers.",
+  "scripts": {
+    "dev": "npm run dev --workspace @orchestr/desktop",
+    "build": "npm run build --workspace @orchestr/desktop",
+    "check": "npm run check --workspace @orchestr/desktop",
+    "tauri": "npm run tauri --workspace @orchestr/desktop"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
+

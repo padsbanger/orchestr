@@ -1,0 +1,10 @@
+[package]
+name = "orchestr-db"
+version = "0.1.0"
+description = "SQLite persistence for Orchestr metadata"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+
