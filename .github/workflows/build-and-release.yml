@@ -46,6 +46,13 @@ jobs:
       - name: Test persistence crate
         run: cargo test -p orchestr-db
 
+      - name: Verify release tag matches the app version
+        if: ${{ github.ref_type == 'tag' }}
+        shell: bash
+        run: |
+          app_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          test "$app_version" = "$GITHUB_REF_NAME"
+
       - name: Build test installer
         if: ${{ github.ref_type != 'tag' }}
         uses: tauri-apps/tauri-action@v1

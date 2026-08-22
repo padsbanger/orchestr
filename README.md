@@ -29,5 +29,19 @@ cargo test -p orchestr-git
 The first launch creates Orchestr's local SQLite database in the operating
 system application-data directory and applies its migrations automatically.
 
+## Releases
+
+The numeric Git tag must match the version in
+`apps/desktop/src-tauri/tauri.conf.json`. For example, after updating the
+desktop version to `0.2.1`:
+
+```bash
+git tag 0.2.1
+git push origin 0.2.1
+```
+
+The release workflow validates this match before publishing the Windows
+installer.
+
 See [the M0 architecture notes](docs/architecture.md) for ownership boundaries
 and planned crate extraction points.
