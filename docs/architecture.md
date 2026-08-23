@@ -156,11 +156,9 @@ successful attempt and never undoes the integrated commit.
 
 The board exposes the queue in a dedicated inspector with its status, errors,
 and retry action. The primary repository inspector reflects a successful merge
-because the integration happens in the primary workspace. Validation gates and
-project-health checks remain M13 responsibilities; M12 establishes the
-serialized and recoverable integration boundary they will use.
+because the integration happens in the primary workspace.
 
-## Post-M12 workflow architecture (planned)
+## Quality gates and project health (M13)
 
 The system's primary measure of progress is a healthy integration branch, not
 agent activity. The intended flow is:
@@ -192,26 +190,41 @@ the single-task integration stage.
 
 ### Integration queue and branch health
 
-M12 provides persisted integration attempts and a serialized per-project
-queue. Exactly one attempt may mutate a project's configured integration
-branch at a time. The integration service acquires the project lock,
-updates the task branch against the latest integration branch, detects and
-persists conflicts, runs integration validation, performs the configured merge,
-records the outcome, and then releases the lock.
+Validation commands are project-scoped, ordered, and split between
+`implementation` and `integration` stages. A command has a display name, an
+executable, and an argument array. It is deliberately not a shell snippet:
+the worker runs `program + arguments` in the relevant workspace. This supports
+Node, Rust, Python, JVM, and other projects without binding the quality model
+to a package manager or a shell.
+
+Each check run is a durable `ValidationAttempt`, with independently persisted
+events for command start, stdout, stderr, exit code, and completion. The
+desktop emits those events while they arrive so the quality-gate inspector can
+show live output as well as history after restart.
+
+Implementation validation runs in the isolated task worktree after Codex exits
+cleanly. A configured failing check makes the run fail, so the task cannot
+reach Review successfully. Integration validation runs only after the task
+branch has been rebased onto the latest target branch and before its squash
+merge. Thus its working directory is the exact candidate being integrated.
+
+M12's queue remains serialized per project. Before claiming an attempt, the
+integration service reads project health. A `broken` integration branch refuses
+new integration until the operator runs the explicit recovery validation. A
+failed integration check returns the task to Approved, records the failure, and
+marks the project broken; it does not merge the candidate. A passing check
+permits the squash merge and then records the branch as healthy with the latest
+successful validation and integration timestamps.
 
 The initial merge strategy is squash merge: task branches may contain
 iterative commits, while the integration branch receives one clear task-level
 commit. Original branch and run history remain available as Orchestr metadata.
-After the merge, a project-health service records whether the integration
-branch is healthy. Only a successful merge followed by a healthy result can
-mark a task Done, unblock dependent work, and schedule cleanup. A merge that
-leaves the branch unhealthy is a recovery condition, not successful progress.
-
-Validation has two explicit contexts: implementation validation in the task
-worktree before Review, and integration validation after the task is updated
-against the current integration branch. Both execute through the worker, stream
-events, and persist their results against the relevant run or integration
-attempt.
+The project-health record has four states: `unknown`, `healthy`, `degraded`,
+and `broken`, plus the last validation, last known-good timestamp, last
+integration timestamp, and failing gate. The board header exposes the current
+state; the Quality Gates panel owns configuration, output history, and the
+manual recovery action. Only a successful validation and merge can mark a task
+Done. Dependency unblocking remains M14 work.
 
 ### Planning, blockers, and durable project context
 

@@ -9,10 +9,11 @@ use std::{
 
 use orchestr_db::{
     Agent, AgentUpdate, Database, IntegrationAttempt, NewAgent, NewProject, NewRun, NewRunEvent,
-    NewTask, Project, ProjectDeletion, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus,
-    TaskUpdate, Workspace,
+    NewTask, NewValidationCommand, NewValidationEvent, Project, ProjectDeletion, ProjectHealth,
+    Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, ValidationAttempt,
+    ValidationCommand, ValidationStage, ValidationStatus, Workspace,
 };
-use orchestr_git::{GitService, IntegrationResult, RepositoryDetails};
+use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
     AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
 };
@@ -144,6 +145,7 @@ struct WorkerRunEvent {
     stream: Option<OutputStream>,
     text: Option<String>,
     raw_text: Option<String>,
+    command: Option<String>,
     exit_code: Option<i32>,
 }
 
@@ -259,6 +261,82 @@ struct IntegrationExecutionResponse {
     cleanup_error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateValidationCommandInput {
+    project_id: String,
+    stage: String,
+    name: String,
+    program: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationCommandResponse {
+    id: String,
+    project_id: String,
+    stage: String,
+    name: String,
+    program: String,
+    arguments: Vec<String>,
+    position: i64,
+    enabled: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationEventResponse {
+    id: i64,
+    command_id: Option<String>,
+    kind: String,
+    message: String,
+    stream: Option<String>,
+    exit_code: Option<i32>,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationAttemptResponse {
+    id: String,
+    project_id: String,
+    task_id: Option<String>,
+    integration_attempt_id: Option<String>,
+    stage: String,
+    status: String,
+    error: Option<String>,
+    started_at: String,
+    completed_at: Option<String>,
+    events: Vec<ValidationEventResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectHealthResponse {
+    project_id: String,
+    status: String,
+    last_validation_attempt_id: Option<String>,
+    last_successful_validation_at: Option<String>,
+    last_integration_at: Option<String>,
+    failing_gate: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationRunEvent {
+    validation_attempt_id: String,
+    kind: String,
+    command_id: Option<String>,
+    stream: Option<OutputStream>,
+    text: String,
+    exit_code: Option<i32>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentResponse {
@@ -339,6 +417,68 @@ impl From<IntegrationAttempt> for IntegrationAttemptResponse {
             created_at: attempt.created_at,
             started_at: attempt.started_at,
             completed_at: attempt.completed_at,
+        }
+    }
+}
+
+impl From<ValidationCommand> for ValidationCommandResponse {
+    fn from(command: ValidationCommand) -> Self {
+        Self {
+            id: command.id,
+            project_id: command.project_id,
+            stage: command.stage.as_str().into(),
+            name: command.name,
+            program: command.program,
+            arguments: command.arguments,
+            position: command.position,
+            enabled: command.enabled,
+            created_at: command.created_at,
+            updated_at: command.updated_at,
+        }
+    }
+}
+
+impl From<orchestr_db::ValidationEvent> for ValidationEventResponse {
+    fn from(event: orchestr_db::ValidationEvent) -> Self {
+        Self {
+            id: event.id,
+            command_id: event.command_id,
+            kind: event.kind,
+            message: event.message,
+            stream: event.stream,
+            exit_code: event.exit_code,
+            created_at: event.created_at,
+        }
+    }
+}
+
+impl From<ValidationAttempt> for ValidationAttemptResponse {
+    fn from(attempt: ValidationAttempt) -> Self {
+        Self {
+            id: attempt.id,
+            project_id: attempt.project_id,
+            task_id: attempt.task_id,
+            integration_attempt_id: attempt.integration_attempt_id,
+            stage: attempt.stage.as_str().into(),
+            status: attempt.status.as_str().into(),
+            error: attempt.error,
+            started_at: attempt.started_at,
+            completed_at: attempt.completed_at,
+            events: attempt.events.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ProjectHealth> for ProjectHealthResponse {
+    fn from(health: ProjectHealth) -> Self {
+        Self {
+            project_id: health.project_id,
+            status: health.status.as_str().into(),
+            last_validation_attempt_id: health.last_validation_attempt_id,
+            last_successful_validation_at: health.last_successful_validation_at,
+            last_integration_at: health.last_integration_at,
+            failing_gate: health.failing_gate,
+            updated_at: health.updated_at,
         }
     }
 }
@@ -644,6 +784,7 @@ fn start_local_worker_run(
                     stream: Some(output.stream),
                     text: Some(output.text),
                     raw_text: None,
+                    command: None,
                     exit_code: None,
                 },
             );
@@ -677,6 +818,7 @@ fn start_local_worker_run(
                 stream: None,
                 text,
                 raw_text: None,
+                command: None,
                 exit_code,
             },
         );
@@ -893,10 +1035,384 @@ fn retry_integration_attempt(
 }
 
 #[tauri::command]
-fn integrate_next_task(
+fn list_validation_commands(
+    project_id: String,
+    stage: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ValidationCommandResponse>, String> {
+    let stage = parse_validation_stage(&stage)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_validation_commands(&project_id, stage)
+        .map(|commands| commands.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load validation commands: {error}"))
+}
+
+#[tauri::command]
+fn create_validation_command(
+    input: CreateValidationCommandInput,
+    state: State<'_, AppState>,
+) -> Result<ValidationCommandResponse, String> {
+    let stage = parse_validation_stage(&input.stage)?;
+    let name = input.name.trim();
+    let program = input.program.trim();
+    if name.is_empty() || program.is_empty() {
+        return Err("A validation command needs both a name and executable program.".into());
+    }
+    let arguments = input
+        .arguments
+        .into_iter()
+        .filter(|argument| !argument.trim().is_empty())
+        .collect();
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_validation_command(NewValidationCommand {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            stage,
+            name: name.to_owned(),
+            program: program.to_owned(),
+            arguments,
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to save validation command: {error}"))
+}
+
+#[tauri::command]
+fn delete_validation_command(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let removed = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .delete_validation_command(&id)
+        .map_err(|error| format!("Unable to delete validation command: {error}"))?;
+    if removed {
+        Ok(())
+    } else {
+        Err("The validation command no longer exists.".into())
+    }
+}
+
+#[tauri::command]
+fn list_validation_attempts(
     project_id: String,
     state: State<'_, AppState>,
+) -> Result<Vec<ValidationAttemptResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_validation_attempts(&project_id, 20)
+        .map(|attempts| attempts.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load validation history: {error}"))
+}
+
+#[tauri::command]
+fn get_project_health(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectHealthResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .get_project_health(&project_id)
+        .map(Into::into)
+        .map_err(|error| format!("Unable to load project health: {error}"))
+}
+
+#[tauri::command]
+fn rerun_integration_validation(
+    project_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ValidationAttemptResponse, String> {
+    let workspace_path = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .get_project(&project_id)
+        .map_err(|error| format!("Unable to load the project workspace: {error}"))?
+        .and_then(|project| {
+            project
+                .workspaces
+                .into_iter()
+                .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+        })
+        .map(|workspace| workspace.path)
+        .ok_or_else(|| "This project has no local integration workspace.".to_owned())?;
+    run_validation(
+        &state.database,
+        &app,
+        &project_id,
+        None,
+        None,
+        ValidationStage::Integration,
+        Path::new(&workspace_path),
+        true,
+    )
+    .map(Into::into)
+}
+
+fn parse_validation_stage(value: &str) -> Result<ValidationStage, String> {
+    match value {
+        "implementation" => Ok(ValidationStage::Implementation),
+        "integration" => Ok(ValidationStage::Integration),
+        _ => Err("Unknown validation stage.".into()),
+    }
+}
+
+fn run_validation(
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    project_id: &str,
+    task_id: Option<&str>,
+    integration_attempt_id: Option<&str>,
+    stage: ValidationStage,
+    working_directory: &Path,
+    updates_project_health: bool,
+) -> Result<ValidationAttempt, String> {
+    let attempt_id = Uuid::new_v4().to_string();
+    let commands = {
+        let mut database = database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        let attempt = database
+            .start_validation_attempt(
+                &attempt_id,
+                project_id,
+                task_id,
+                integration_attempt_id,
+                stage,
+            )
+            .map_err(|error| format!("Unable to begin validation: {error}"))?;
+        let commands = database
+            .list_validation_commands(project_id, stage)
+            .map_err(|error| format!("Unable to load validation commands: {error}"))?;
+        if commands.is_empty() {
+            database
+                .append_validation_event(
+                    &attempt.id,
+                    NewValidationEvent {
+                        command_id: None,
+                        kind: "validation.skipped".into(),
+                        message: "No validation commands are configured for this stage.".into(),
+                        stream: None,
+                        exit_code: None,
+                    },
+                )
+                .map_err(|error| format!("Unable to record validation event: {error}"))?;
+        }
+        commands
+            .into_iter()
+            .filter(|command| command.enabled)
+            .collect::<Vec<_>>()
+    };
+
+    let mut status = ValidationStatus::Passed;
+    let mut failure: Option<String> = None;
+    for command in commands {
+        let command_line = display_validation_command(&command);
+        append_validation_event(
+            database,
+            app,
+            &attempt_id,
+            NewValidationEvent {
+                command_id: Some(command.id.clone()),
+                kind: "command.started".into(),
+                message: command_line.clone(),
+                stream: None,
+                exit_code: None,
+            },
+        )?;
+        let run = match LocalWorker::start(ProcessRequest {
+            program: command.program.clone(),
+            arguments: command.arguments.clone(),
+            working_directory: Some(working_directory.to_path_buf()),
+            standard_input: None,
+        }) {
+            Ok(run) => run,
+            Err(error) => {
+                status = ValidationStatus::Failed;
+                failure = Some(format!("{} could not start: {error}", command.name));
+                append_validation_event(
+                    database,
+                    app,
+                    &attempt_id,
+                    NewValidationEvent {
+                        command_id: Some(command.id.clone()),
+                        kind: "command.failed".into(),
+                        message: failure.clone().unwrap_or_default(),
+                        stream: None,
+                        exit_code: None,
+                    },
+                )?;
+                break;
+            }
+        };
+        let handle = run.handle;
+        for output in run.output {
+            let stream_name = match output.stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            };
+            append_validation_event(
+                database,
+                app,
+                &attempt_id,
+                NewValidationEvent {
+                    command_id: Some(command.id.clone()),
+                    kind: "command.output".into(),
+                    message: output.text,
+                    stream: Some(stream_name.into()),
+                    exit_code: None,
+                },
+            )?;
+        }
+        match handle.wait() {
+            Ok(exit) if exit.success() => append_validation_event(
+                database,
+                app,
+                &attempt_id,
+                NewValidationEvent {
+                    command_id: Some(command.id.clone()),
+                    kind: "command.completed".into(),
+                    message: format!("{} passed.", command.name),
+                    stream: None,
+                    exit_code: exit.code(),
+                },
+            )?,
+            Ok(exit) => {
+                status = ValidationStatus::Failed;
+                failure = Some(format!(
+                    "{} failed with exit code {}.",
+                    command.name,
+                    exit.code()
+                        .map_or("unknown".into(), |code| code.to_string())
+                ));
+                append_validation_event(
+                    database,
+                    app,
+                    &attempt_id,
+                    NewValidationEvent {
+                        command_id: Some(command.id.clone()),
+                        kind: "command.failed".into(),
+                        message: failure.clone().unwrap_or_default(),
+                        stream: None,
+                        exit_code: exit.code(),
+                    },
+                )?;
+                break;
+            }
+            Err(error) => {
+                status = ValidationStatus::Failed;
+                failure = Some(format!("{} could not finish: {error}", command.name));
+                append_validation_event(
+                    database,
+                    app,
+                    &attempt_id,
+                    NewValidationEvent {
+                        command_id: Some(command.id.clone()),
+                        kind: "command.failed".into(),
+                        message: failure.clone().unwrap_or_default(),
+                        stream: None,
+                        exit_code: None,
+                    },
+                )?;
+                break;
+            }
+        }
+    }
+    let attempt = database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .finish_validation_attempt(&attempt_id, status, failure.as_deref())
+        .map_err(|error| format!("Unable to finish validation: {error}"))?
+        .ok_or_else(|| "The validation attempt no longer exists.".to_owned())?;
+    if updates_project_health {
+        database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?
+            .record_project_validation(project_id, &attempt_id, status, failure.as_deref(), false)
+            .map_err(|error| format!("Unable to update project health: {error}"))?;
+    }
+    let _ = app.emit(
+        "validation://event",
+        ValidationRunEvent {
+            validation_attempt_id: attempt_id,
+            kind: format!("validation.{}", status.as_str()),
+            command_id: None,
+            stream: None,
+            text: failure.unwrap_or_else(|| "Validation passed.".into()),
+            exit_code: None,
+        },
+    );
+    Ok(attempt)
+}
+
+fn append_validation_event(
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    attempt_id: &str,
+    event: NewValidationEvent,
+) -> Result<(), String> {
+    let text = event.message.clone();
+    let command_id = event.command_id.clone();
+    let kind = event.kind.clone();
+    let stream = match event.stream.as_deref() {
+        Some("stdout") => Some(OutputStream::Stdout),
+        Some("stderr") => Some(OutputStream::Stderr),
+        _ => None,
+    };
+    let exit_code = event.exit_code;
+    database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .append_validation_event(attempt_id, event)
+        .map_err(|error| format!("Unable to record validation output: {error}"))?;
+    let _ = app.emit(
+        "validation://event",
+        ValidationRunEvent {
+            validation_attempt_id: attempt_id.to_owned(),
+            kind,
+            command_id,
+            stream,
+            text,
+            exit_code,
+        },
+    );
+    Ok(())
+}
+
+fn display_validation_command(command: &ValidationCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.arguments.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[tauri::command]
+fn integrate_next_task(
+    project_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<IntegrationExecutionResponse, String> {
+    let health = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .get_project_health(&project_id)
+        .map_err(|error| format!("Unable to load project health: {error}"))?;
+    if health.status == orchestr_db::ProjectHealthStatus::Broken {
+        let gate = health
+            .failing_gate
+            .unwrap_or_else(|| "a required integration validation command".into());
+        return Err(format!("Integration is paused because {} is broken. Re-run the integration validation after fixing {gate}.", project_id));
+    }
     let attempt = state
         .database
         .lock()
@@ -927,6 +1443,57 @@ fn integrate_next_task(
         );
     }
 
+    match GitService::prepare_task_for_integration(
+        Path::new(&workspace_path),
+        Path::new(worktree_path),
+        &attempt.source_branch,
+        &attempt.target_branch,
+    ) {
+        Ok(IntegrationPreparation::Ready) => {}
+        Ok(IntegrationPreparation::Conflict { paths }) => {
+            let message = format!("Integration conflicts: {}", paths.join(", "));
+            let task = state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .block_integration(&attempt.id, &message)
+                .map_err(|error| format!("Unable to record the integration conflict: {error}"))?
+                .ok_or_else(|| "The integration attempt is no longer active.".to_owned())?;
+            let attempt = integration_attempt(&state, &attempt.id)?;
+            return Ok(IntegrationExecutionResponse {
+                task: task.into(),
+                attempt: attempt.into(),
+                outcome: "conflict".into(),
+                message,
+                cleanup_error: None,
+            });
+        }
+        Err(error) => return finish_failed_integration(&state, &attempt.id, error.to_string()),
+    }
+    let validation = run_validation(
+        &state.database,
+        &app,
+        &task.project_id,
+        Some(&task.id),
+        Some(&attempt.id),
+        ValidationStage::Integration,
+        Path::new(worktree_path),
+        true,
+    );
+    let validation = match validation {
+        Ok(validation) => validation,
+        Err(error) => return finish_failed_integration(&state, &attempt.id, error),
+    };
+    if validation.status != ValidationStatus::Passed {
+        return finish_failed_integration(
+            &state,
+            &attempt.id,
+            validation
+                .error
+                .unwrap_or_else(|| "Integration validation failed.".into()),
+        );
+    }
+
     let message = format!("task: {}", task.title);
     match GitService::squash_integrate_task(
         Path::new(&workspace_path),
@@ -954,6 +1521,20 @@ fn integrate_next_task(
             })
         }
         Ok(IntegrationResult::Merged { commit }) => {
+            state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .record_project_validation(
+                    &task.project_id,
+                    &validation.id,
+                    ValidationStatus::Passed,
+                    None,
+                    true,
+                )
+                .map_err(|error| {
+                    format!("Unable to update project health after integration: {error}")
+                })?;
             let completed_task = state
                 .database
                 .lock()
@@ -1283,6 +1864,8 @@ fn start_task_run(
         })
         .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
     let repository_before = repository_observation(Path::new(&worktree_path));
+    let validation_project_id = task.project_id.clone();
+    let validation_task_id = task.id.clone();
     let run_id = Uuid::new_v4().to_string();
     let (persisted_run, updated_task) = state
         .database
@@ -1356,6 +1939,8 @@ fn start_task_run(
             let raw_text = output.text;
             let event = CodexProvider::execution_event(&raw_text);
             let text = event.message.clone();
+            let command = event.command.clone();
+            let event_kind = event.kind.clone();
             if let Ok(mut database) = database.lock() {
                 let _ = database.append_run_output(&event_run_id, stream_name, &raw_text);
                 let _ = database.append_run_event(
@@ -1373,10 +1958,11 @@ fn start_task_run(
                 "worker://run-event",
                 WorkerRunEvent {
                     run_id: event_run_id.clone(),
-                    kind: "output".into(),
+                    kind: event_kind,
                     stream: Some(stream),
                     text: Some(text),
                     raw_text: Some(raw_text),
+                    command,
                     exit_code: None,
                 },
             );
@@ -1406,7 +1992,27 @@ fn start_task_run(
                         ),
                         exit_status.code(),
                     ),
-                    Ok(_) => (RunStatus::Completed, "completed", None, exit_status.code()),
+                    Ok(_) => match run_validation(
+                        &database,
+                        &app,
+                        &validation_project_id,
+                        Some(&validation_task_id),
+                        None,
+                        ValidationStage::Implementation,
+                        Path::new(&worktree_path),
+                        false,
+                    ) {
+                        Ok(validation) if validation.status == ValidationStatus::Passed => {
+                            (RunStatus::Completed, "completed", None, exit_status.code())
+                        }
+                        Ok(validation) => (
+                            RunStatus::Failed,
+                            "failed",
+                            Some(validation.error.unwrap_or_else(|| "Implementation validation failed.".into())),
+                            exit_status.code(),
+                        ),
+                        Err(error) => (RunStatus::Failed, "failed", Some(error), exit_status.code()),
+                    },
                     Err(error) => (
                         RunStatus::Failed,
                         "failed",
@@ -1440,6 +2046,7 @@ fn start_task_run(
                 stream: None,
                 text,
                 raw_text: None,
+                command: None,
                 exit_code,
             },
         );
@@ -2073,6 +2680,12 @@ fn main() {
             list_integration_attempts,
             retry_integration_attempt,
             integrate_next_task,
+            list_validation_commands,
+            create_validation_command,
+            delete_validation_command,
+            list_validation_attempts,
+            get_project_health,
+            rerun_integration_validation,
             cleanup_task_worktree,
             open_task_worktree,
             start_task_run,

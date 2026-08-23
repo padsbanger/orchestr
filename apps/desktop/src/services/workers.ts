@@ -22,6 +22,7 @@ export type WorkerRunEvent = {
   stream: "stdout" | "stderr" | null;
   text: string | null;
   rawText?: string | null;
+  command?: string | null;
   exitCode: number | null;
 };
 

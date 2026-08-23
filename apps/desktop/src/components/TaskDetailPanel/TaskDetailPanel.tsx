@@ -131,9 +131,64 @@ function RunSummary({ run, now }: { run: TaskRun; now: number }) {
 }
 
 function TimelineEvent({ event }: { event: RunEvent }) {
+  const command = event.command ?? commandFromProviderStatus(event.message);
+  const activity = command ? commandActivity(command, commandActivityKind(event)) : undefined;
+  const message = shouldShowEventMessage(event, command) ? event.message : undefined;
   return <div className={`timeline-event ${event.kind.replaceAll(".", "-")}`}>
-    <time>{time(event.createdAt)}</time><span className="timeline-marker" /><div><strong>{event.kind.replaceAll(".", " · ")}</strong>{event.command && <code>$ {event.command}</code>}<p>{event.message}</p>{event.filePath && <code>{event.filePath}</code>}{event.exitCode !== null && <span className="timeline-exit">exit {event.exitCode}</span>}</div>
+    <time>{time(event.createdAt)}</time><span className="timeline-marker" /><div><strong>{activity ?? eventLabel(event.kind)}</strong>{message && <EventMessage text={message} failed={event.exitCode !== null && event.exitCode !== 0} />}{event.filePath && <code>{event.filePath}</code>}{event.exitCode !== null && <span className="timeline-exit">exit {event.exitCode}</span>}</div>
   </div>;
+}
+
+function EventMessage({ text, failed }: { text: string; failed: boolean }) {
+  const lineCount = text.split("\n").length;
+  if (lineCount > 4) return <details className="timeline-output" open={failed}><summary>Output · {lineCount} lines</summary><pre>{text}</pre></details>;
+  return <p>{text}</p>;
+}
+
+function shouldShowEventMessage(event: RunEvent, command?: string) {
+  if (!command) return true;
+  const normalized = event.message.trim();
+  return normalized !== `in_progress: ${command}` && normalized !== `completed: ${command}` && normalized !== `failed: ${command}`;
+}
+
+function commandFromProviderStatus(message: string) {
+  const match = /^(?:in_progress|completed|failed):\s+(.+)$/s.exec(message.trim());
+  return match?.[1];
+}
+
+function commandActivityKind(event: RunEvent) {
+  if (event.kind !== "command.output") return event.kind;
+  if (event.message.startsWith("in_progress:")) return "command.started";
+  return "command.completed";
+}
+
+function eventLabel(kind: string) {
+  const labels: Record<string, string> = {
+    "agent.session_started": "Codex session started",
+    "agent.started": "Codex started working",
+    "agent.completed": "Codex finished working",
+    "agent.reasoning": "Thinking",
+    "agent.message": "Codex",
+    "file.modified": "Changed files",
+    "provider.error": "Provider error",
+    "run.completed": "Run completed",
+    "run.failed": "Run failed",
+  };
+  return labels[kind] ?? kind.replaceAll(".", " · ");
+}
+
+function commandActivity(command: string, kind: string) {
+  const normalized = command.toLowerCase();
+  const action = kind.startsWith("validation") ? "Checking" : kind === "command.started" ? "Running" : "Finished";
+  if (/\b(git status|git diff|git log|git show|git branch)\b/.test(normalized)) return `${action} repository inspection`;
+  if (/\b(rg|find|fd|ls|dir|cat|type|get-content|select-string)\b/.test(normalized)) return `${action} file inspection`;
+  if (/\bgit (add|commit|restore|checkout|rebase|merge)\b/.test(normalized)) return `${action} Git update`;
+  if (/\b(npm|pnpm|yarn|bun)\b/.test(normalized)) return `${action} JavaScript task`;
+  if (/\bcargo\b/.test(normalized)) return `${action} Rust task`;
+  if (/\b(pytest|python)\b/.test(normalized)) return `${action} Python task`;
+  if (/\b(gradle|mvn|java)\b/.test(normalized)) return `${action} JVM task`;
+  if (/\b(write|set-content|out-file|copy-item|move-item|mkdir|new-item)\b/.test(normalized)) return `${action} file update`;
+  return `${action} command`;
 }
 
 function timestamp(value: string) { return Date.parse(value.endsWith("Z") ? value : `${value}Z`); }

@@ -1,11 +1,12 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowLeft, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
 import { IntegrationQueuePanel } from "../../components/IntegrationQueuePanel/IntegrationQueuePanel";
+import { QualityGatesPanel } from "../../components/QualityGatesPanel/QualityGatesPanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
@@ -13,6 +14,7 @@ import { getProject, getRepositoryDetails, type Project, type RepositoryDetails 
 import { cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
 import { approveTaskReview, getTaskReview, requestTaskChanges, type TaskReview } from "../../services/reviews";
 import { integrateNextTask, listIntegrationAttempts, retryIntegrationAttempt, type IntegrationAttempt } from "../../services/integrations";
+import { createValidationCommand, deleteValidationCommand, getProjectHealth, listValidationAttempts, listValidationCommands, listenToValidationEvents, rerunIntegrationValidation, type ProjectHealth, type ValidationAttempt, type ValidationCommand, type ValidationStage } from "../../services/quality";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -52,6 +54,13 @@ export function BoardPage() {
   const [isIntegrationQueueOpen, setIsIntegrationQueueOpen] = useState(false);
   const [isIntegrationQueueLoading, setIsIntegrationQueueLoading] = useState(false);
   const [isIntegrating, setIsIntegrating] = useState(false);
+  const [health, setHealth] = useState<ProjectHealth>();
+  const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
+  const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
+  const [validationAttempts, setValidationAttempts] = useState<ValidationAttempt[]>([]);
+  const [isQualityGatesOpen, setIsQualityGatesOpen] = useState(false);
+  const [isQualityLoading, setIsQualityLoading] = useState(false);
+  const [isRerunningIntegrationValidation, setIsRerunningIntegrationValidation] = useState(false);
   const runIds = useRef(new Set<string>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
@@ -87,6 +96,27 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadQualityGates = useCallback(async () => {
+    if (!projectId) return;
+    setIsQualityLoading(true);
+    try {
+      const [loadedHealth, loadedImplementation, loadedIntegration, loadedAttempts] = await Promise.all([
+        getProjectHealth(projectId),
+        listValidationCommands(projectId, "implementation"),
+        listValidationCommands(projectId, "integration"),
+        listValidationAttempts(projectId),
+      ]);
+      setHealth(loadedHealth);
+      setImplementationCommands(loadedImplementation);
+      setIntegrationCommands(loadedIntegration);
+      setValidationAttempts(loadedAttempts);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load project quality gates.");
+    } finally {
+      setIsQualityLoading(false);
+    }
+  }, [projectId]);
+
   const loadBoard = useCallback(async () => {
     if (!projectId) return;
     setIsLoading(true);
@@ -98,12 +128,13 @@ export function BoardPage() {
       setAgents(loadedAgents);
       void loadRepository();
       void loadIntegrationQueue();
+      void loadQualityGates();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       setIsLoading(false);
     }
-  }, [loadIntegrationQueue, loadRepository, projectId]);
+  }, [loadIntegrationQueue, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard();
@@ -134,9 +165,9 @@ export function BoardPage() {
     let disposed = false;
     void listenToWorkerRunEvents((event) => {
       if (!runIds.current.has(event.runId)) return;
-      if (event.kind === "output" && event.stream && event.text !== null) {
+      if (event.stream && event.text !== null) {
         const output = { stream: event.stream, text: event.rawText ?? event.text, createdAt: new Date().toISOString() };
-        const timelineEvent = { id: -Date.now(), kind: "command.output", message: event.text, command: null, filePath: null, exitCode: null, createdAt: output.createdAt };
+        const timelineEvent = { id: -Date.now(), kind: event.kind === "output" ? "command.output" : event.kind, message: event.text, command: event.command ?? null, filePath: null, exitCode: null, createdAt: output.createdAt };
         setRuns((current) => current.map((run) => run.id === event.runId ? {
           ...run,
           output: [...run.output, output],
@@ -162,6 +193,22 @@ export function BoardPage() {
     const current = tasks.find((task) => task.id === inspectedTask.id);
     if (current && current !== inspectedTask) setInspectedTask(current);
   }, [inspectedTask, tasks]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listenToValidationEvents((event) => {
+      if (event.kind === "command.started" && projectId) {
+        void listValidationAttempts(projectId).then(setValidationAttempts).catch(() => undefined);
+      }
+      setValidationAttempts((current) => current.map((attempt) => attempt.id !== event.validationAttemptId ? attempt : {
+        ...attempt,
+        events: [...attempt.events, { id: -Date.now(), commandId: event.commandId, kind: event.kind, message: event.text, stream: event.stream, exitCode: event.exitCode, createdAt: new Date().toISOString() }],
+      }));
+      if (event.kind.startsWith("validation.")) void loadQualityGates();
+    }).then((stopListening) => { if (disposed) stopListening(); else unlisten = stopListening; });
+    return () => { disposed = true; unlisten?.(); };
+  }, [loadQualityGates, projectId]);
 
   const tasksByStatus = useMemo(() => Object.fromEntries(
     TASK_STATUSES.map((status) => [status, tasks.filter((task) => task.status === status).sort((a, b) => a.position - b.position)]),
@@ -305,6 +352,39 @@ export function BoardPage() {
     }
   };
 
+  const addValidationCommand = async (input: { stage: ValidationStage; name: string; program: string; arguments: string[] }) => {
+    if (!projectId) return;
+    try {
+      await createValidationCommand({ projectId, ...input });
+      await loadQualityGates();
+    } catch (commandError) {
+      setError(commandError instanceof Error ? commandError.message : "Unable to save validation command.");
+    }
+  };
+
+  const removeValidationCommand = async (id: string) => {
+    try {
+      await deleteValidationCommand(id);
+      await loadQualityGates();
+    } catch (commandError) {
+      setError(commandError instanceof Error ? commandError.message : "Unable to delete validation command.");
+    }
+  };
+
+  const rerunQualityGates = async () => {
+    if (!projectId) return;
+    setIsRerunningIntegrationValidation(true);
+    setError(undefined);
+    try {
+      await rerunIntegrationValidation(projectId);
+      await Promise.all([loadQualityGates(), loadRepository(), loadIntegrationQueue()]);
+    } catch (validationError) {
+      setError(validationError instanceof Error ? validationError.message : "Unable to run integration validation.");
+    } finally {
+      setIsRerunningIntegrationValidation(false);
+    }
+  };
+
   if (isLoading) return <section className="page"><div className="empty-state"><span className="empty-index">SYNC</span><h2>Loading board</h2></div></section>;
   if (!project) return <section className="page"><div className="empty-state"><h2>Project not found</h2><Link className="secondary-button" to="/projects">Return to projects</Link></div></section>;
 
@@ -315,13 +395,13 @@ export function BoardPage() {
         <div className="board-title-row">
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
+            <button className={`secondary-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => setIsQualityGatesOpen(true)}><Activity size={15} /> {health?.status ?? "unknown"}</button>
             <button className="secondary-button" type="button" onClick={() => setIsIntegrationQueueOpen(true)}><GitMerge size={16} />Integrate <span>{integrationAttempts.filter((attempt) => attempt.status === "queued").length}</span></button>
             <button className="repository-status" type="button" onClick={() => setIsRepositoryInspectorOpen(true)} title="Inspect repository activity">
               <GitBranch size={15} />
               <span>{repository?.summary.currentBranch ?? project.defaultBranch}</span>
               <strong className={repository?.summary.isClean === false ? "repository-dirty" : repository ? "repository-clean" : "repository-pending"}>{repository?.summary.isClean === false ? `${repository.summary.changedFileCount} changed` : repository ? "Clean" : isRepositoryLoading ? "Checking" : "Unavailable"}</strong>
             </button>
-            <button className="secondary-button" type="button" onClick={() => setIsRepositoryInspectorOpen(true)}><SearchCode size={16} /> Inspect</button>
             <button className="primary-button" type="button" onClick={() => { setEditingTask(null); setIsCreating(true); }}><Plus size={16} /> New task</button>
           </div>
         </div>
@@ -349,6 +429,7 @@ export function BoardPage() {
       {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
       {isIntegrationQueueOpen && <IntegrationQueuePanel attempts={integrationAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} onClose={() => setIsIntegrationQueueOpen(false)} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} />}
+      {isQualityGatesOpen && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={() => setIsQualityGatesOpen(false)} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
     </section>
   );
 }

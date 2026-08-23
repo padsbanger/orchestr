@@ -439,7 +439,9 @@ No task becomes Done while its code exists only on an isolated branch.
 
 ---
 
-# M13 — Quality Gates + Project Health
+# M13 — Quality Gates + Project Health — Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 
@@ -1247,7 +1249,7 @@ A user can approve a plan and allow Orchestr to make sustained project progress 
 - M10 Worktrees — Complete
 - M11 Review Workflow — Complete
 - M12 Integration Queue — Complete
-- M13 Quality Gates + Project Health — Next
+- M13 Quality Gates + Project Health — Complete
 
 v0.3 is complete when accepted AI work reliably lands on a healthy integration branch.
 
@@ -1298,7 +1300,7 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the current M12-complete state:
+Continue from the current M13-complete state:
 
 ```text
 1. Add project validation configuration

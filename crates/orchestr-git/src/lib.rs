@@ -79,6 +79,12 @@ pub enum IntegrationResult {
     Conflict { paths: Vec<String> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationPreparation {
+    Ready,
+    Conflict { paths: Vec<String> },
+}
+
 #[derive(Debug)]
 pub struct GitError(String);
 
@@ -358,35 +364,13 @@ impl GitService {
     ) -> Result<IntegrationResult> {
         let repository_path = repository_root(repository_path)?;
         let task_worktree_path = repository_root(task_worktree_path)?;
-        run_git(
+        if let IntegrationPreparation::Conflict { paths } = Self::prepare_task_for_integration(
             &repository_path,
-            ["check-ref-format", "--branch", source_branch],
-        )?;
-        run_git(
-            &repository_path,
-            ["check-ref-format", "--branch", target_branch],
-        )?;
-        if source_branch == target_branch {
-            return Err(GitError(
-                "A task branch cannot integrate into itself.".into(),
-            ));
-        }
-        ensure_clean_integration_workspace(&repository_path, target_branch)?;
-        ensure_task_worktree_ready(&task_worktree_path, source_branch)?;
-
-        if run_git_if_success(
-            &repository_path,
-            ["merge-base", "--is-ancestor", target_branch, source_branch],
-        )?
-        .is_none()
-        {
-            if let Err(error) = run_git(&task_worktree_path, ["rebase", target_branch]) {
-                let paths = conflicted_paths(&task_worktree_path)?;
-                if !paths.is_empty() {
-                    return Ok(IntegrationResult::Conflict { paths });
-                }
-                return Err(error);
-            }
+            &task_worktree_path,
+            source_branch,
+            target_branch,
+        )? {
+            return Ok(IntegrationResult::Conflict { paths });
         }
 
         if let Err(error) = run_git(
@@ -414,6 +398,49 @@ impl GitService {
         Ok(IntegrationResult::Merged {
             commit: commit.trim().to_owned(),
         })
+    }
+
+    /// Rebase a task branch onto the current integration branch before its
+    /// integration quality gates execute. This is intentionally separate from
+    /// the squash merge so validation observes the exact branch to be merged.
+    pub fn prepare_task_for_integration(
+        repository_path: &Path,
+        task_worktree_path: &Path,
+        source_branch: &str,
+        target_branch: &str,
+    ) -> Result<IntegrationPreparation> {
+        let repository_path = repository_root(repository_path)?;
+        let task_worktree_path = repository_root(task_worktree_path)?;
+        run_git(
+            &repository_path,
+            ["check-ref-format", "--branch", source_branch],
+        )?;
+        run_git(
+            &repository_path,
+            ["check-ref-format", "--branch", target_branch],
+        )?;
+        if source_branch == target_branch {
+            return Err(GitError(
+                "A task branch cannot integrate into itself.".into(),
+            ));
+        }
+        ensure_clean_integration_workspace(&repository_path, target_branch)?;
+        ensure_task_worktree_ready(&task_worktree_path, source_branch)?;
+        if run_git_if_success(
+            &repository_path,
+            ["merge-base", "--is-ancestor", target_branch, source_branch],
+        )?
+        .is_none()
+        {
+            if let Err(error) = run_git(&task_worktree_path, ["rebase", target_branch]) {
+                let paths = conflicted_paths(&task_worktree_path)?;
+                if !paths.is_empty() {
+                    return Ok(IntegrationPreparation::Conflict { paths });
+                }
+                return Err(error);
+            }
+        }
+        Ok(IntegrationPreparation::Ready)
     }
 
     pub fn delete_integrated_task_branch(repository_path: &Path, branch: &str) -> Result<()> {

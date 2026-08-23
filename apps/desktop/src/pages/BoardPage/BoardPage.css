@@ -5,6 +5,10 @@
 .board-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .board-title-row h1 { margin-bottom: 6px; }
 .board-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.project-health-button { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-transform: uppercase; }
+.project-health-button.healthy { color: #81c998; border-color: #3b6348; }
+.project-health-button.broken { color: #ef9a92; border-color: #74453d; }
+.project-health-button.degraded { color: #e5ba73; border-color: #715a38; }
 .repository-status { display: inline-flex; align-items: center; gap: 7px; min-width: 0; height: 34px; padding: 0 9px; border: 1px solid #354047; background: #171c1f; color: #aeb8bd; cursor: pointer; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
 .repository-status:hover { border-color: #4c5b64; background: #1c2327; }
 .repository-status > span { overflow: hidden; max-width: 130px; text-overflow: ellipsis; white-space: nowrap; }

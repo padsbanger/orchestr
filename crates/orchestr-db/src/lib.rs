@@ -3,7 +3,10 @@
 //! This crate owns the persistence boundary. UI and Tauri command handlers use
 //! repositories here instead of issuing SQLite statements themselves.
 
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
@@ -20,6 +23,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("../migrations/0007_run_events.sql")),
     (8, include_str!("../migrations/0008_task_worktrees.sql")),
     (9, include_str!("../migrations/0009_integration_queue.sql")),
+    (10, include_str!("../migrations/0010_quality_gates.sql")),
+    (11, include_str!("../migrations/0011_task_readiness.sql")),
 ];
 
 pub struct Database {
@@ -67,7 +72,7 @@ pub enum ProjectDeletion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Backlog,
-    Todo,
+    Ready,
     InProgress,
     Review,
     Approved,
@@ -80,7 +85,7 @@ impl TaskStatus {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "backlog" => Some(Self::Backlog),
-            "todo" => Some(Self::Todo),
+            "ready" => Some(Self::Ready),
             "in_progress" => Some(Self::InProgress),
             "review" => Some(Self::Review),
             "approved" => Some(Self::Approved),
@@ -94,7 +99,7 @@ impl TaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Backlog => "backlog",
-            Self::Todo => "todo",
+            Self::Ready => "ready",
             Self::InProgress => "in_progress",
             Self::Review => "review",
             Self::Approved => "approved",
@@ -116,12 +121,214 @@ impl TaskStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPriority {
+    Critical,
+    High,
+    Normal,
+    Low,
+}
+
+impl TaskPriority {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "critical" => Some(Self::Critical),
+            "high" => Some(Self::High),
+            "normal" => Some(Self::Normal),
+            "low" => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        Self::parse(&value).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                format!("Unknown task priority: {value}").into(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationStatus {
     Queued,
     Integrating,
     Conflict,
     Merged,
     Failed,
+}
+
+/// The point in the delivery pipeline at which a validation command runs.
+/// Commands are represented as program/argument arrays so the worker never has
+/// to evaluate a project supplied shell string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationStage {
+    Implementation,
+    Integration,
+}
+
+impl ValidationStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Implementation => "implementation",
+            Self::Integration => "integration",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "implementation" => Ok(Self::Implementation),
+            "integration" => Ok(Self::Integration),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                format!("Unknown validation stage: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationStatus {
+    Running,
+    Passed,
+    Failed,
+    Cancelled,
+}
+
+impl ValidationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "running" => Ok(Self::Running),
+            "passed" => Ok(Self::Passed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                format!("Unknown validation status: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectHealthStatus {
+    Unknown,
+    Healthy,
+    Degraded,
+    Broken,
+}
+
+impl ProjectHealthStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Broken => "broken",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "unknown" => Ok(Self::Unknown),
+            "healthy" => Ok(Self::Healthy),
+            "degraded" => Ok(Self::Degraded),
+            "broken" => Ok(Self::Broken),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("Unknown project health status: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationCommand {
+    pub id: String,
+    pub project_id: String,
+    pub stage: ValidationStage,
+    pub name: String,
+    pub program: String,
+    pub arguments: Vec<String>,
+    pub position: i64,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewValidationCommand {
+    pub id: String,
+    pub project_id: String,
+    pub stage: ValidationStage,
+    pub name: String,
+    pub program: String,
+    pub arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationAttempt {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub integration_attempt_id: Option<String>,
+    pub stage: ValidationStage,
+    pub status: ValidationStatus,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub events: Vec<ValidationEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationEvent {
+    pub id: i64,
+    pub command_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    pub stream: Option<String>,
+    pub exit_code: Option<i32>,
+    pub created_at: String,
+}
+
+pub struct NewValidationEvent {
+    pub command_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    pub stream: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHealth {
+    pub project_id: String,
+    pub status: ProjectHealthStatus,
+    pub last_validation_attempt_id: Option<String>,
+    pub last_successful_validation_at: Option<String>,
+    pub last_integration_at: Option<String>,
+    pub failing_gate: Option<String>,
+    pub updated_at: String,
 }
 
 impl IntegrationStatus {
@@ -179,6 +386,8 @@ pub struct Task {
     pub assigned_agent_id: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    pub priority: TaskPriority,
+    pub blocked_reason: Option<String>,
     pub status: TaskStatus,
     pub position: i64,
     pub created_at: String,
@@ -195,6 +404,7 @@ pub struct NewTask {
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
+    pub priority: TaskPriority,
 }
 
 pub struct TaskUpdate {
@@ -205,6 +415,7 @@ pub struct TaskUpdate {
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
+    pub priority: TaskPriority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,6 +623,10 @@ impl Database {
                 new_project.workspace_path
             ],
         )?;
+        transaction.execute(
+            "INSERT INTO project_health (project_id) VALUES (?1)",
+            [&new_project.id],
+        )?;
         transaction.commit()?;
 
         self.project_by_id(&new_project.id)?
@@ -428,6 +643,165 @@ impl Database {
 
     pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
         self.agent_by_id(id)
+    }
+
+    pub fn list_validation_commands(
+        &self,
+        project_id: &str,
+        stage: ValidationStage,
+    ) -> Result<Vec<ValidationCommand>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, stage, name, program, arguments, position, enabled, created_at, updated_at
+             FROM validation_commands WHERE project_id = ?1 AND stage = ?2
+             ORDER BY position ASC, created_at ASC",
+        )?;
+        let commands = statement
+            .query_map(
+                params![project_id, stage.as_str()],
+                validation_command_from_row,
+            )?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(commands)
+    }
+
+    pub fn create_validation_command(
+        &mut self,
+        command: NewValidationCommand,
+    ) -> Result<ValidationCommand> {
+        let arguments = encode_string_list(&command.arguments)?;
+        let position: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM validation_commands
+             WHERE project_id = ?1 AND stage = ?2",
+            params![command.project_id, command.stage.as_str()],
+            |row| row.get(0),
+        )?;
+        self.connection.execute(
+            "INSERT INTO validation_commands (id, project_id, stage, name, program, arguments, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                command.id,
+                command.project_id,
+                command.stage.as_str(),
+                command.name,
+                command.program,
+                arguments,
+                position,
+            ],
+        )?;
+        self.validation_command_by_id(&command.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn delete_validation_command(&mut self, id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM validation_commands WHERE id = ?1", [id])?
+            > 0)
+    }
+
+    pub fn get_project_health(&self, project_id: &str) -> Result<ProjectHealth> {
+        self.connection.query_row(
+            "SELECT project_id, status, last_validation_attempt_id, last_successful_validation_at,
+                    last_integration_at, failing_gate, updated_at
+             FROM project_health WHERE project_id = ?1",
+            [project_id],
+            project_health_from_row,
+        )
+    }
+
+    pub fn start_validation_attempt(
+        &mut self,
+        id: &str,
+        project_id: &str,
+        task_id: Option<&str>,
+        integration_attempt_id: Option<&str>,
+        stage: ValidationStage,
+    ) -> Result<ValidationAttempt> {
+        self.connection.execute(
+            "INSERT INTO validation_attempts (id, project_id, task_id, integration_attempt_id, stage, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running')",
+            params![id, project_id, task_id, integration_attempt_id, stage.as_str()],
+        )?;
+        self.validation_attempt_by_id(id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn append_validation_event(
+        &mut self,
+        attempt_id: &str,
+        event: NewValidationEvent,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO validation_events (validation_attempt_id, validation_command_id, kind, message, stream, exit_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![attempt_id, event.command_id, event.kind, event.message, event.stream, event.exit_code],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_validation_attempt(
+        &mut self,
+        id: &str,
+        status: ValidationStatus,
+        error: Option<&str>,
+    ) -> Result<Option<ValidationAttempt>> {
+        self.connection.execute(
+            "UPDATE validation_attempts SET status = ?1, error = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?3 AND status = 'running'",
+            params![status.as_str(), error, id],
+        )?;
+        self.validation_attempt_by_id(id)
+    }
+
+    pub fn list_validation_attempts(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ValidationAttempt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, task_id, integration_attempt_id, stage, status, error, started_at, completed_at
+             FROM validation_attempts WHERE project_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+        )?;
+        let ids = statement
+            .query_map(params![project_id, limit as i64], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| {
+                self.validation_attempt_by_id(&id)?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)
+            })
+            .collect()
+    }
+
+    pub fn record_project_validation(
+        &mut self,
+        project_id: &str,
+        attempt_id: &str,
+        status: ValidationStatus,
+        failing_gate: Option<&str>,
+        integration_completed: bool,
+    ) -> Result<()> {
+        let health = match status {
+            ValidationStatus::Passed => ProjectHealthStatus::Healthy,
+            ValidationStatus::Failed | ValidationStatus::Cancelled => ProjectHealthStatus::Broken,
+            ValidationStatus::Running => ProjectHealthStatus::Unknown,
+        };
+        self.connection.execute(
+            "INSERT INTO project_health (project_id, status, last_validation_attempt_id, last_successful_validation_at, last_integration_at, failing_gate)
+             VALUES (?1, ?2, ?3,
+                 CASE WHEN ?2 = 'healthy' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                 CASE WHEN ?4 THEN CURRENT_TIMESTAMP ELSE NULL END, ?5)
+             ON CONFLICT(project_id) DO UPDATE SET
+                 status = excluded.status,
+                 last_validation_attempt_id = excluded.last_validation_attempt_id,
+                 last_successful_validation_at = CASE WHEN excluded.status = 'healthy' THEN CURRENT_TIMESTAMP ELSE project_health.last_successful_validation_at END,
+                 last_integration_at = CASE WHEN ?4 THEN CURRENT_TIMESTAMP ELSE project_health.last_integration_at END,
+                 failing_gate = excluded.failing_gate,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![project_id, health.as_str(), attempt_id, integration_completed, failing_gate],
+        )?;
+        Ok(())
     }
 
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
@@ -1136,6 +1510,41 @@ impl Database {
             .optional()
     }
 
+    fn validation_command_by_id(&self, id: &str) -> Result<Option<ValidationCommand>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, stage, name, program, arguments, position, enabled, created_at, updated_at
+                 FROM validation_commands WHERE id = ?1",
+                [id],
+                validation_command_from_row,
+            )
+            .optional()
+    }
+
+    fn validation_attempt_by_id(&self, id: &str) -> Result<Option<ValidationAttempt>> {
+        let mut attempt = self.connection.query_row(
+            "SELECT id, project_id, task_id, integration_attempt_id, stage, status, error, started_at, completed_at
+             FROM validation_attempts WHERE id = ?1",
+            [id],
+            validation_attempt_from_row,
+        ).optional()?;
+        if let Some(record) = &mut attempt {
+            record.events = self.list_validation_events(&record.id)?;
+        }
+        Ok(attempt)
+    }
+
+    fn list_validation_events(&self, attempt_id: &str) -> Result<Vec<ValidationEvent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, validation_command_id, kind, message, stream, exit_code, created_at
+             FROM validation_events WHERE validation_attempt_id = ?1 ORDER BY id ASC",
+        )?;
+        let events = statement
+            .query_map([attempt_id], validation_event_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
     fn finish_integration(
         &mut self,
         attempt_id: &str,
@@ -1332,6 +1741,60 @@ fn integration_attempt_from_row(row: &rusqlite::Row<'_>) -> Result<IntegrationAt
     })
 }
 
+fn validation_command_from_row(row: &rusqlite::Row<'_>) -> Result<ValidationCommand> {
+    Ok(ValidationCommand {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        stage: ValidationStage::from_database(row.get(2)?)?,
+        name: row.get(3)?,
+        program: row.get(4)?,
+        arguments: decode_string_list(row.get(5)?)?,
+        position: row.get(6)?,
+        enabled: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn validation_attempt_from_row(row: &rusqlite::Row<'_>) -> Result<ValidationAttempt> {
+    Ok(ValidationAttempt {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        task_id: row.get(2)?,
+        integration_attempt_id: row.get(3)?,
+        stage: ValidationStage::from_database(row.get(4)?)?,
+        status: ValidationStatus::from_database(row.get(5)?)?,
+        error: row.get(6)?,
+        started_at: row.get(7)?,
+        completed_at: row.get(8)?,
+        events: Vec::new(),
+    })
+}
+
+fn validation_event_from_row(row: &rusqlite::Row<'_>) -> Result<ValidationEvent> {
+    Ok(ValidationEvent {
+        id: row.get(0)?,
+        command_id: row.get(1)?,
+        kind: row.get(2)?,
+        message: row.get(3)?,
+        stream: row.get(4)?,
+        exit_code: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn project_health_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectHealth> {
+    Ok(ProjectHealth {
+        project_id: row.get(0)?,
+        status: ProjectHealthStatus::from_database(row.get(1)?)?,
+        last_validation_attempt_id: row.get(2)?,
+        last_successful_validation_at: row.get(3)?,
+        last_integration_at: row.get(4)?,
+        failing_gate: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
 fn agent_from_row(row: &rusqlite::Row<'_>) -> Result<Agent> {
     Ok(Agent {
         id: row.get(0)?,
@@ -1466,7 +1929,8 @@ fn migrate(connection: &Connection) -> Result<()> {
 mod tests {
     use super::{
         AgentUpdate, Database, IntegrationStatus, NewAgent, NewProject, NewRun, NewTask,
-        ProjectDeletion, RunStatus, TaskStatus, TaskUpdate,
+        NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RunStatus, TaskStatus,
+        TaskUpdate, ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -1530,6 +1994,78 @@ mod tests {
             .expect("project name checks"));
         drop(reopened);
 
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn validation_commands_attempts_and_project_health_are_persisted() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Quality project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/quality-project".into(),
+            })
+            .expect("project saves");
+        let command = database
+            .create_validation_command(NewValidationCommand {
+                id: "gate-1".into(),
+                project_id: "project-1".into(),
+                stage: ValidationStage::Integration,
+                name: "Build".into(),
+                program: "cargo".into(),
+                arguments: vec!["test".into()],
+            })
+            .expect("gate saves");
+        assert_eq!(command.arguments, ["test"]);
+        let attempt = database
+            .start_validation_attempt(
+                "validation-1",
+                "project-1",
+                None,
+                None,
+                ValidationStage::Integration,
+            )
+            .expect("attempt starts");
+        database
+            .append_validation_event(
+                &attempt.id,
+                super::NewValidationEvent {
+                    command_id: Some(command.id),
+                    kind: "command.completed".into(),
+                    message: "Build passed.".into(),
+                    stream: None,
+                    exit_code: Some(0),
+                },
+            )
+            .expect("event saves");
+        database
+            .finish_validation_attempt(&attempt.id, ValidationStatus::Passed, None)
+            .expect("attempt finishes");
+        database
+            .record_project_validation(
+                "project-1",
+                &attempt.id,
+                ValidationStatus::Passed,
+                None,
+                true,
+            )
+            .expect("health saves");
+        let health = database
+            .get_project_health("project-1")
+            .expect("health loads");
+        assert_eq!(health.status, ProjectHealthStatus::Healthy);
+        assert_eq!(
+            health.last_validation_attempt_id.as_deref(),
+            Some("validation-1")
+        );
+        assert!(health.last_integration_at.is_some());
+        drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 

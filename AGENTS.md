@@ -27,10 +27,11 @@ Completed milestones:
 - M10 — Task Branches + Git Worktrees
 - M11 — Review Workflow
 - M12 — Integration Queue
+- M13 — Quality Gates + Project Health
 
 Immediate next milestone:
 
-**M13 — Quality Gates + Project Health**
+**M14 — Dependencies + Ready / Blocked Workflow**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1254,7 +1255,7 @@ Git/integration tests should use temporary repositories.
 
 Current next milestone:
 
-**M13 — Quality Gates + Project Health**
+**M14 — Dependencies + Ready / Blocked Workflow**
 
 Do not prioritize:
 
