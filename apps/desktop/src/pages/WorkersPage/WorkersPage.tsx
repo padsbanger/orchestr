@@ -41,11 +41,18 @@ export function WorkersPage() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listenToWorkerRunEvents((event) => {
       applyRunEvent(event, setRuns);
       if (event.kind !== "output") void loadWorker();
-    }).then((stopListening) => { unlisten = stopListening; });
-    return () => unlisten?.();
+    }).then((stopListening) => {
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [loadWorker]);
 
   const startDiagnostic = async () => {

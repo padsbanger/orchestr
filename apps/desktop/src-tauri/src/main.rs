@@ -8,10 +8,11 @@ use std::{
 };
 
 use orchestr_db::{
-    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewRunEvent, NewTask, Project,
-    ProjectDeletion, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
+    Agent, AgentUpdate, Database, IntegrationAttempt, NewAgent, NewProject, NewRun, NewRunEvent,
+    NewTask, Project, ProjectDeletion, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus,
+    TaskUpdate, Workspace,
 };
-use orchestr_git::{GitService, RepositoryDetails};
+use orchestr_git::{GitService, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
     AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
 };
@@ -142,6 +143,7 @@ struct WorkerRunEvent {
     kind: String,
     stream: Option<OutputStream>,
     text: Option<String>,
+    raw_text: Option<String>,
     exit_code: Option<i32>,
 }
 
@@ -233,6 +235,32 @@ struct TaskResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct IntegrationAttemptResponse {
+    id: String,
+    task_id: String,
+    source_branch: String,
+    target_branch: String,
+    status: String,
+    queue_position: i64,
+    merge_commit: Option<String>,
+    error: Option<String>,
+    created_at: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrationExecutionResponse {
+    task: TaskResponse,
+    attempt: IntegrationAttemptResponse,
+    outcome: String,
+    message: String,
+    cleanup_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentResponse {
     id: String,
     name: String,
@@ -293,6 +321,24 @@ impl From<Task> for TaskResponse {
             position: task.position,
             created_at: task.created_at,
             updated_at: task.updated_at,
+        }
+    }
+}
+
+impl From<IntegrationAttempt> for IntegrationAttemptResponse {
+    fn from(attempt: IntegrationAttempt) -> Self {
+        Self {
+            id: attempt.id,
+            task_id: attempt.task_id,
+            source_branch: attempt.source_branch,
+            target_branch: attempt.target_branch,
+            status: attempt.status.as_str().to_owned(),
+            queue_position: attempt.queue_position,
+            merge_commit: attempt.merge_commit,
+            error: attempt.error,
+            created_at: attempt.created_at,
+            started_at: attempt.started_at,
+            completed_at: attempt.completed_at,
         }
     }
 }
@@ -597,6 +643,7 @@ fn start_local_worker_run(
                     kind: "output".into(),
                     stream: Some(output.stream),
                     text: Some(output.text),
+                    raw_text: None,
                     exit_code: None,
                 },
             );
@@ -629,6 +676,7 @@ fn start_local_worker_run(
                 kind: kind.into(),
                 stream: None,
                 text,
+                raw_text: None,
                 exit_code,
             },
         );
@@ -665,6 +713,76 @@ fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<Run
 }
 
 #[tauri::command]
+fn export_task_run_log(
+    run_id: String,
+    destination_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let run = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .get_run(&run_id)
+        .map_err(|error| format!("Unable to load the execution log: {error}"))?
+        .ok_or_else(|| "The execution run no longer exists.".to_owned())?;
+    let destination = PathBuf::from(destination_path);
+    if destination.is_dir() {
+        return Err("Choose a file destination for the execution log.".into());
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "The selected log destination folder no longer exists.".to_owned())?;
+    if parent.as_os_str().is_empty() {
+        return Err("Choose a file destination for the execution log.".into());
+    }
+    fs::write(&destination, format_run_log(&run))
+        .map_err(|error| format!("Unable to export the execution log: {error}"))
+}
+
+fn format_run_log(run: &Run) -> String {
+    let mut output = format!(
+        "Orchestr execution log\nRun: {}\nTask: {}\nAgent: {}\nWorker: {}\nStatus: {}\nStarted: {}\nCompleted: {}\nExit code: {}\nError: {}\n\n=== Raw process output (ANSI control codes removed) ===\n",
+        run.id,
+        run.task_id,
+        run.agent_id,
+        run.worker_id,
+        run.status.as_str(),
+        run.started_at,
+        run.completed_at.as_deref().unwrap_or("still running"),
+        run.exit_code.map(|code| code.to_string()).as_deref().unwrap_or("not available"),
+        run.error.as_deref().unwrap_or("none"),
+    );
+    if run.output.is_empty() {
+        output.push_str("No raw process output was persisted for this run.\n");
+    } else {
+        for entry in &run.output {
+            output.push_str(&format!(
+                "[{}] [{}] {}\n",
+                entry.created_at, entry.stream, entry.text
+            ));
+        }
+    }
+    output.push_str("\n=== Orchestr event timeline ===\n");
+    for event in &run.events {
+        output.push_str(&format!(
+            "[{}] [{}] {}\n",
+            event.created_at, event.kind, event.message
+        ));
+        if let Some(command) = &event.command {
+            output.push_str(&format!("  command: {command}\n"));
+        }
+        if let Some(file_path) = &event.file_path {
+            output.push_str(&format!("  file: {file_path}\n"));
+        }
+        if let Some(exit_code) = event.exit_code {
+            output.push_str(&format!("  exit: {exit_code}\n"));
+        }
+    }
+    output
+}
+
+#[tauri::command]
 fn get_task_review(
     task_id: String,
     state: State<'_, AppState>,
@@ -696,12 +814,36 @@ fn approve_task_review(
     task_id: String,
     state: State<'_, AppState>,
 ) -> Result<TaskResponse, String> {
+    let worktree_path = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&task_id)
+            .map_err(|error| format!("Unable to load the task for approval: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        if task.status != TaskStatus::Review {
+            return Err("Only Review tasks can be approved for integration.".into());
+        }
+        task.worktree_path
+            .ok_or_else(|| "This task has no isolated worktree to approve.".to_owned())?
+    };
+    let repository = GitService::inspect_repository(Path::new(&worktree_path))
+        .map_err(|error| format!("Unable to verify the task worktree before approval: {error}"))?;
+    if !repository.is_clean {
+        return Err(
+            "The task worktree has uncommitted changes. Commit or discard them before approval."
+                .into(),
+        );
+    }
+
     state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
-        .approve_task_review(&task_id)
-        .map_err(|_| "Only tasks in Review can be approved.".to_owned())?
+        .approve_task_review(&task_id, &Uuid::new_v4().to_string())
+        .map_err(|_| "Only Review tasks with an isolated branch can be approved.".to_owned())?
         .map(Into::into)
         .ok_or_else(|| "The task no longer exists.".into())
 }
@@ -719,6 +861,230 @@ fn request_task_changes(
         .map_err(|_| "Only tasks in Review can be returned for changes.".to_owned())?
         .map(Into::into)
         .ok_or_else(|| "The task no longer exists.".into())
+}
+
+#[tauri::command]
+fn list_integration_attempts(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<IntegrationAttemptResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_integration_attempts(&project_id)
+        .map(|attempts| attempts.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load the integration queue: {error}"))
+}
+
+#[tauri::command]
+fn retry_integration_attempt(
+    attempt_id: String,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .retry_integration(&attempt_id, &Uuid::new_v4().to_string())
+        .map_err(|_| "Only failed or conflicted integrations can be retried.".to_owned())?
+        .map(Into::into)
+        .ok_or_else(|| "The integration attempt no longer exists.".into())
+}
+
+#[tauri::command]
+fn integrate_next_task(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<IntegrationExecutionResponse, String> {
+    let attempt = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .claim_next_integration(&project_id)
+        .map_err(|_| "Another task is already integrating for this project.".to_owned())?
+        .ok_or_else(|| "No approved task is waiting for integration.".to_owned())?;
+
+    let (task, workspace_path) = match integration_context(&state, &attempt) {
+        Ok(context) => context,
+        Err(error) => return finish_failed_integration(&state, &attempt.id, error),
+    };
+    let worktree_path = match task.worktree_path.as_deref() {
+        Some(path) => path,
+        None => {
+            return finish_failed_integration(
+                &state,
+                &attempt.id,
+                "The task worktree is no longer available.".into(),
+            )
+        }
+    };
+    if task.branch.as_deref() != Some(attempt.source_branch.as_str()) {
+        return finish_failed_integration(
+            &state,
+            &attempt.id,
+            "The task branch no longer matches its queued integration attempt.".into(),
+        );
+    }
+
+    let message = format!("task: {}", task.title);
+    match GitService::squash_integrate_task(
+        Path::new(&workspace_path),
+        Path::new(worktree_path),
+        &attempt.source_branch,
+        &attempt.target_branch,
+        &message,
+    ) {
+        Ok(IntegrationResult::Conflict { paths }) => {
+            let message = format!("Integration conflicts: {}", paths.join(", "));
+            let task = state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .block_integration(&attempt.id, &message)
+                .map_err(|error| format!("Unable to record the integration conflict: {error}"))?
+                .ok_or_else(|| "The integration attempt is no longer active.".to_owned())?;
+            let attempt = integration_attempt(&state, &attempt.id)?;
+            Ok(IntegrationExecutionResponse {
+                task: task.into(),
+                attempt: attempt.into(),
+                outcome: "conflict".into(),
+                message,
+                cleanup_error: None,
+            })
+        }
+        Ok(IntegrationResult::Merged { commit }) => {
+            let completed_task = state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .complete_integration(&attempt.id, &commit)
+                .map_err(|error| format!("Unable to record the completed integration: {error}"))?
+                .ok_or_else(|| "The integration attempt is no longer active.".to_owned())?;
+            let cleanup_error = cleanup_integrated_task(
+                &state,
+                &attempt.id,
+                &completed_task,
+                &workspace_path,
+                &attempt.source_branch,
+            )
+            .err();
+            let task = state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .get_task(&completed_task.id)
+                .map_err(|error| format!("Unable to load the integrated task: {error}"))?
+                .ok_or_else(|| "The integrated task no longer exists.".to_owned())?;
+            let attempt = integration_attempt(&state, &attempt.id)?;
+            let target_branch = attempt.target_branch.clone();
+            Ok(IntegrationExecutionResponse {
+                task: task.into(),
+                attempt: attempt.into(),
+                outcome: "merged".into(),
+                message: format!("Squash-merged into {target_branch}."),
+                cleanup_error,
+            })
+        }
+        Err(error) => finish_failed_integration(&state, &attempt.id, error.to_string()),
+    }
+}
+
+fn integration_context(
+    state: &AppState,
+    attempt: &IntegrationAttempt,
+) -> Result<(Task, String), String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    let task = database
+        .get_task(&attempt.task_id)
+        .map_err(|error| format!("Unable to load the queued task: {error}"))?
+        .ok_or_else(|| "The queued task no longer exists.".to_owned())?;
+    let workspace_path = database
+        .get_project(&task.project_id)
+        .map_err(|error| format!("Unable to load the project integration workspace: {error}"))?
+        .and_then(|project| {
+            project
+                .workspaces
+                .into_iter()
+                .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+                .map(|workspace| workspace.path)
+        })
+        .ok_or_else(|| "This project has no local integration workspace.".to_owned())?;
+    Ok((task, workspace_path))
+}
+
+fn integration_attempt(state: &AppState, attempt_id: &str) -> Result<IntegrationAttempt, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .get_integration_attempt(attempt_id)
+        .map_err(|error| format!("Unable to load the integration result: {error}"))?
+        .ok_or_else(|| "The integration attempt no longer exists.".to_owned())
+}
+
+fn finish_failed_integration(
+    state: &AppState,
+    attempt_id: &str,
+    error: String,
+) -> Result<IntegrationExecutionResponse, String> {
+    let task = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .fail_integration(attempt_id, &error)
+        .map_err(|database_error| {
+            format!("Unable to record the failed integration: {database_error}")
+        })?
+        .ok_or_else(|| "The integration attempt is no longer active.".to_owned())?;
+    let attempt = integration_attempt(state, attempt_id)?;
+    Ok(IntegrationExecutionResponse {
+        task: task.into(),
+        attempt: attempt.into(),
+        outcome: "failed".into(),
+        message: error,
+        cleanup_error: None,
+    })
+}
+
+fn cleanup_integrated_task(
+    state: &AppState,
+    attempt_id: &str,
+    task: &Task,
+    workspace_path: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let worktree_path = task.worktree_path.as_deref().ok_or_else(|| {
+        "The integrated task worktree is no longer available for cleanup.".to_owned()
+    })?;
+    let cleanup = (|| {
+        GitService::remove_task_worktree(Path::new(workspace_path), Path::new(worktree_path))
+            .map_err(|error| format!("Unable to remove the integrated task worktree: {error}"))?;
+        state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?
+            .release_task_worktree(&task.id)
+            .map_err(|error| format!("Unable to release the integrated task worktree: {error}"))?
+            .ok_or_else(|| "The integrated task worktree was already released.".to_owned())?;
+        GitService::delete_integrated_task_branch(Path::new(workspace_path), branch)
+            .map_err(|error| format!("Unable to delete the integrated task branch: {error}"))
+    })();
+    if let Err(error) = cleanup {
+        state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?
+            .record_integration_cleanup_error(attempt_id, &error)
+            .map_err(|database_error| {
+                format!("Unable to record the cleanup failure: {database_error}")
+            })?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -908,6 +1274,12 @@ fn start_task_run(
             model: agent.model.clone(),
             prompt: build_task_prompt(&task, &agent),
             working_directory: PathBuf::from(&worktree_path),
+            additional_writable_directories: GitService::writable_git_directories(Path::new(
+                &worktree_path,
+            ))
+            .map_err(|error| {
+                format!("Unable to prepare Git metadata access for the task worktree: {error}")
+            })?,
         })
         .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
     let repository_before = repository_observation(Path::new(&worktree_path));
@@ -976,9 +1348,16 @@ fn start_task_run(
     let event_run_id = run_id.clone();
     thread::spawn(move || {
         for output in run.output {
-            let event = CodexProvider::execution_event(&output.text);
+            let stream = output.stream.clone();
+            let stream_name = match &stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            };
+            let raw_text = output.text;
+            let event = CodexProvider::execution_event(&raw_text);
             let text = event.message.clone();
             if let Ok(mut database) = database.lock() {
+                let _ = database.append_run_output(&event_run_id, stream_name, &raw_text);
                 let _ = database.append_run_event(
                     &event_run_id,
                     NewRunEvent {
@@ -995,8 +1374,9 @@ fn start_task_run(
                 WorkerRunEvent {
                     run_id: event_run_id.clone(),
                     kind: "output".into(),
-                    stream: Some(output.stream),
+                    stream: Some(stream),
                     text: Some(text),
+                    raw_text: Some(raw_text),
                     exit_code: None,
                 },
             );
@@ -1016,7 +1396,24 @@ fn start_task_run(
                 exit_status.code(),
             ),
             Ok(exit_status) if exit_status.success() => {
-                (RunStatus::Completed, "completed", None, exit_status.code())
+                match GitService::inspect_repository(Path::new(&worktree_path)) {
+                    Ok(repository) if !repository.is_clean => (
+                        RunStatus::Failed,
+                        "failed",
+                        Some(
+                            "Codex finished with uncommitted task changes. Commit the task worktree before requesting review."
+                                .into(),
+                        ),
+                        exit_status.code(),
+                    ),
+                    Ok(_) => (RunStatus::Completed, "completed", None, exit_status.code()),
+                    Err(error) => (
+                        RunStatus::Failed,
+                        "failed",
+                        Some(format!("Unable to verify the task worktree after Codex completed: {error}")),
+                        exit_status.code(),
+                    ),
+                }
             }
             Ok(exit_status) => (
                 RunStatus::Failed,
@@ -1042,6 +1439,7 @@ fn start_task_run(
                 kind: kind.into(),
                 stream: None,
                 text,
+                raw_text: None,
                 exit_code,
             },
         );
@@ -1515,7 +1913,12 @@ fn build_task_prompt(task: &Task, agent: &Agent) -> String {
             prompt.push_str(&format!("\n- {skill}"));
         }
     }
-    prompt.push_str("\n\nWhen finished, summarize the changes and validation performed.");
+    prompt.push_str(
+        "\n\n## Completion contract\n\
+         Before finishing, inspect `git status`. After validating your work, commit every task-related change on this task branch with a clear commit message. Do not leave staged or unstaged task changes behind. Do not commit unrelated pre-existing changes.\n\
+         If a normal `git add` or `git commit` fails because repository metadata is not writable, stop and report the exact error. Do not modify filesystem permissions, use an alternate Git index, or invoke low-level Git plumbing as a workaround.\n\
+         When finished, summarize the changes, validation performed, and the commit hash.",
+    );
     prompt
 }
 
@@ -1663,9 +2066,13 @@ fn main() {
             test_codex_connection,
             cancel_local_worker_run,
             list_task_runs,
+            export_task_run_log,
             get_task_review,
             approve_task_review,
             request_task_changes,
+            list_integration_attempts,
+            retry_integration_attempt,
+            integrate_next_task,
             cleanup_task_worktree,
             open_task_worktree,
             start_task_run,
@@ -1685,7 +2092,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_workspace_path;
+    use super::{build_task_prompt, format_run_log, normalize_workspace_path};
+    use orchestr_db::{Agent, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus};
 
     #[cfg(windows)]
     #[test]
@@ -1698,5 +2106,77 @@ mod tests {
             normalize_workspace_path(r"\\?\UNC\server\share\repo"),
             r"\\server\share\repo"
         );
+    }
+
+    #[test]
+    fn task_prompt_requires_a_clean_committed_task_worktree() {
+        let prompt = build_task_prompt(
+            &Task {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Commit task work".into(),
+                description: None,
+                acceptance_criteria: Vec::new(),
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+                branch: Some("task/commit-task-work".into()),
+                worktree_path: Some("C:/work/task-1".into()),
+                status: TaskStatus::InProgress,
+                position: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            &Agent {
+                id: "agent-1".into(),
+                name: "Codex".into(),
+                provider: "codex".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+        );
+        assert!(prompt.contains("commit every task-related change"));
+        assert!(prompt.contains("Do not leave staged or unstaged task changes behind"));
+        assert!(prompt.contains("Do not modify filesystem permissions"));
+        assert!(prompt.contains("low-level Git plumbing"));
+    }
+
+    #[test]
+    fn raw_run_log_includes_process_output_and_event_context() {
+        let log = format_run_log(&Run {
+            id: "run-1".into(),
+            task_id: "task-1".into(),
+            agent_id: "agent-1".into(),
+            worker_id: "local".into(),
+            status: RunStatus::Failed,
+            started_at: "2026-08-23 12:00:00".into(),
+            completed_at: Some("2026-08-23 12:01:00".into()),
+            exit_code: Some(1),
+            error: Some("Codex exited with an error.".into()),
+            output: vec![RunOutput {
+                stream: "stderr".into(),
+                text: "raw provider output".into(),
+                created_at: "2026-08-23 12:00:30".into(),
+            }],
+            events: vec![RunEvent {
+                id: 1,
+                kind: "command.completed".into(),
+                message: "command failed".into(),
+                command: Some("git commit".into()),
+                file_path: None,
+                exit_code: Some(1),
+                created_at: "2026-08-23 12:00:31".into(),
+            }],
+        });
+
+        assert!(log.contains("[stderr] raw provider output"));
+        assert!(log.contains("command: git commit"));
+        assert!(log.contains("exit: 1"));
     }
 }

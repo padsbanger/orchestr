@@ -1,16 +1,18 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowLeft, GitBranch, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
+import { ArrowLeft, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
+import { IntegrationQueuePanel } from "../../components/IntegrationQueuePanel/IntegrationQueuePanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
 import { cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
 import { approveTaskReview, getTaskReview, requestTaskChanges, type TaskReview } from "../../services/reviews";
+import { integrateNextTask, listIntegrationAttempts, retryIntegrationAttempt, type IntegrationAttempt } from "../../services/integrations";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -20,6 +22,9 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   todo: { label: "Todo", tone: "blue" },
   in_progress: { label: "In Progress", tone: "amber" },
   review: { label: "Review", tone: "violet" },
+  approved: { label: "Approved", tone: "indigo" },
+  integrating: { label: "Integrating", tone: "cyan" },
+  blocked: { label: "Blocked", tone: "orange" },
   done: { label: "Done", tone: "green" },
 };
 
@@ -36,12 +41,17 @@ export function BoardPage() {
   const [activeTaskId, setActiveTaskId] = useState<string>();
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [isStartingRun, setIsStartingRun] = useState(false);
+  const [cancellingRunId, setCancellingRunId] = useState<string>();
   const [isCleaningWorktree, setIsCleaningWorktree] = useState(false);
   const [isOpeningWorktree, setIsOpeningWorktree] = useState(false);
   const [review, setReview] = useState<TaskReview>();
   const [reviewError, setReviewError] = useState<string>();
   const [isReviewLoading, setIsReviewLoading] = useState(false);
   const [isReviewActionPending, setIsReviewActionPending] = useState(false);
+  const [integrationAttempts, setIntegrationAttempts] = useState<IntegrationAttempt[]>([]);
+  const [isIntegrationQueueOpen, setIsIntegrationQueueOpen] = useState(false);
+  const [isIntegrationQueueLoading, setIsIntegrationQueueLoading] = useState(false);
+  const [isIntegrating, setIsIntegrating] = useState(false);
   const runIds = useRef(new Set<string>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
@@ -65,6 +75,18 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadIntegrationQueue = useCallback(async () => {
+    if (!projectId) return;
+    setIsIntegrationQueueLoading(true);
+    try {
+      setIntegrationAttempts(await listIntegrationAttempts(projectId));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load the integration queue.");
+    } finally {
+      setIsIntegrationQueueLoading(false);
+    }
+  }, [projectId]);
+
   const loadBoard = useCallback(async () => {
     if (!projectId) return;
     setIsLoading(true);
@@ -75,12 +97,13 @@ export function BoardPage() {
       setTasks(loadedTasks);
       setAgents(loadedAgents);
       void loadRepository();
+      void loadIntegrationQueue();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       setIsLoading(false);
     }
-  }, [loadRepository, projectId]);
+  }, [loadIntegrationQueue, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard();
@@ -108,10 +131,11 @@ export function BoardPage() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listenToWorkerRunEvents((event) => {
       if (!runIds.current.has(event.runId)) return;
       if (event.kind === "output" && event.stream && event.text !== null) {
-        const output = { stream: event.stream, text: event.text, createdAt: new Date().toISOString() };
+        const output = { stream: event.stream, text: event.rawText ?? event.text, createdAt: new Date().toISOString() };
         const timelineEvent = { id: -Date.now(), kind: "command.output", message: event.text, command: null, filePath: null, exitCode: null, createdAt: output.createdAt };
         setRuns((current) => current.map((run) => run.id === event.runId ? {
           ...run,
@@ -123,8 +147,14 @@ export function BoardPage() {
       if (event.kind !== "output" && inspectedTask) {
         void Promise.all([listTaskRuns(inspectedTask.id), loadBoard()]).then(([loadedRuns]) => setRuns(loadedRuns));
       }
-    }).then((stopListening) => { unlisten = stopListening; });
-    return () => unlisten?.();
+    }).then((stopListening) => {
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [inspectedTask?.id, loadBoard]);
 
   useEffect(() => {
@@ -143,6 +173,10 @@ export function BoardPage() {
     if (!source) return;
     const destinationStatus = statusForDropTarget(String(over.id), tasks);
     if (!destinationStatus) return;
+    if (isSystemManagedStatus(destinationStatus)) {
+      setError("Approved, Integrating, Blocked, and Done are managed by review and integration actions.");
+      return;
+    }
     const destinationTasks = tasksByStatus[destinationStatus];
     const overIndex = destinationTasks.findIndex((task) => task.id === over.id);
     const destinationPosition = overIndex === -1 ? destinationTasks.length : overIndex;
@@ -193,10 +227,13 @@ export function BoardPage() {
 
   const cancelRun = async (runId: string) => {
     setError(undefined);
+    setCancellingRunId(runId);
     try {
       await cancelTaskRun(runId);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Unable to cancel the Codex task.");
+    } finally {
+      setCancellingRunId(undefined);
     }
   };
 
@@ -235,9 +272,37 @@ export function BoardPage() {
       const updatedTask = decision === "approve" ? await approveTaskReview(inspectedTask.id) : await requestTaskChanges(inspectedTask.id);
       setTasks((current) => current.map((task) => task.id === updatedTask.id ? updatedTask : task));
       setInspectedTask(updatedTask);
+      await loadIntegrationQueue();
     } catch (reviewActionError) {
       setError(reviewActionError instanceof Error ? reviewActionError.message : "Unable to update the review state.");
     } finally { setIsReviewActionPending(false); }
+  };
+
+  const integrateNext = async () => {
+    if (!projectId) return;
+    setError(undefined);
+    setIsIntegrating(true);
+    try {
+      const result = await integrateNextTask(projectId);
+      if (result.outcome !== "merged") setError(result.message);
+      else if (result.cleanupError) setError(`Integrated successfully, but cleanup needs attention: ${result.cleanupError}`);
+      await Promise.all([loadBoard(), loadIntegrationQueue(), loadRepository()]);
+    } catch (integrationError) {
+      setError(integrationError instanceof Error ? integrationError.message : "Unable to integrate the next task.");
+      await loadIntegrationQueue();
+    } finally {
+      setIsIntegrating(false);
+    }
+  };
+
+  const retryIntegration = async (attempt: IntegrationAttempt) => {
+    setError(undefined);
+    try {
+      await retryIntegrationAttempt(attempt.id);
+      await Promise.all([loadBoard(), loadIntegrationQueue()]);
+    } catch (retryError) {
+      setError(retryError instanceof Error ? retryError.message : "Unable to queue the integration retry.");
+    }
   };
 
   if (isLoading) return <section className="page"><div className="empty-state"><span className="empty-index">SYNC</span><h2>Loading board</h2></div></section>;
@@ -250,6 +315,7 @@ export function BoardPage() {
         <div className="board-title-row">
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
+            <button className="secondary-button" type="button" onClick={() => setIsIntegrationQueueOpen(true)}><GitMerge size={16} />Integrate <span>{integrationAttempts.filter((attempt) => attempt.status === "queued").length}</span></button>
             <button className="repository-status" type="button" onClick={() => setIsRepositoryInspectorOpen(true)} title="Inspect repository activity">
               <GitBranch size={15} />
               <span>{repository?.summary.currentBranch ?? project.defaultBranch}</span>
@@ -280,14 +346,15 @@ export function BoardPage() {
         </DndContext>
       </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
+      {isIntegrationQueueOpen && <IntegrationQueuePanel attempts={integrationAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} onClose={() => setIsIntegrationQueueOpen(false)} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} />}
     </section>
   );
 }
 
 function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
-  const { setNodeRef, isOver } = useDroppable({ id: columnDropId(status) });
+  const { setNodeRef, isOver } = useDroppable({ id: columnDropId(status), disabled: isSystemManagedStatus(status) });
   return (
     <section ref={setNodeRef} className={`kanban-column ${isOver ? "is-over" : ""}`}>
       <header className="column-header"><div><span className={`status-dot ${columns[status].tone}`} /><h2>{columns[status].label}</h2></div><span>{tasks.length}</span></header>
@@ -295,7 +362,7 @@ function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: Ta
         <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
           {tasks.map((task) => <TaskCard key={task.id} task={task} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
         </SortableContext>
-        {tasks.length === 0 && <p className="empty-column">Drop task here</p>}
+        {tasks.length === 0 && <p className="empty-column">{isSystemManagedStatus(status) ? "Workflow managed" : "Drop task here"}</p>}
       </div>
     </section>
   );
@@ -338,6 +405,10 @@ function columnCollisionDetection(args: Parameters<typeof pointerWithin>[0]) {
 function statusForDropTarget(id: string, tasks: Task[]): TaskStatus | undefined {
   if (id.startsWith("column:")) return id.slice("column:".length) as TaskStatus;
   return tasks.find((task) => task.id === id)?.status;
+}
+
+function isSystemManagedStatus(status: TaskStatus) {
+  return status === "approved" || status === "integrating" || status === "blocked" || status === "done";
 }
 
 function moveTaskLocally(tasks: Task[], id: string, status: TaskStatus, position: number) {

@@ -73,6 +73,12 @@ pub struct TaskWorktree {
     pub created_branch: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationResult {
+    Merged { commit: String },
+    Conflict { paths: Vec<String> },
+}
+
 #[derive(Debug)]
 pub struct GitError(String);
 
@@ -103,32 +109,31 @@ impl GitService {
             ));
         }
 
-        let mut arguments: Vec<String> = Vec::new();
-        if run_git_if_success(&root_path, ["config", "--get", "user.name"])?
-            .and_then(non_empty)
-            .is_none()
-        {
-            arguments.extend(["-c".into(), "user.name=Orchestr".into()]);
-        }
-        if run_git_if_success(&root_path, ["config", "--get", "user.email"])?
-            .and_then(non_empty)
-            .is_none()
-        {
-            arguments.extend(["-c".into(), "user.email=orchestr@local".into()]);
-        }
-        arguments.extend([
-            "commit".into(),
-            "--allow-empty".into(),
-            "--message".into(),
-            "chore: initialize project".into(),
-        ]);
-        run_git(&root_path, arguments)?;
+        commit_with_fallback_identity(&root_path, "chore: initialize project", true)?;
         Self::inspect_repository(&root_path)
     }
 
     pub fn inspect_repository(path: &Path) -> Result<RepositorySummary> {
         let root_path = repository_root(path)?;
         repository_summary(&root_path)
+    }
+
+    /// Returns every Git metadata directory that must be writable for commands
+    /// executed from this checkout.
+    ///
+    /// Linked worktrees keep their index and HEAD locks in a private directory
+    /// under the primary repository's common `.git` database. Windows sandbox
+    /// ACLs require that private directory to be granted explicitly, even when
+    /// its parent common directory is already writable.
+    pub fn writable_git_directories(path: &Path) -> Result<Vec<PathBuf>> {
+        let root_path = repository_root(path)?;
+        let worktree_directory = resolve_git_directory(&root_path, "--git-dir")?;
+        let common_directory = resolve_git_directory(&root_path, "--git-common-dir")?;
+        let mut directories = vec![worktree_directory];
+        if !directories.contains(&common_directory) {
+            directories.push(common_directory);
+        }
+        Ok(directories)
     }
 
     pub fn repository_details(path: &Path) -> Result<RepositoryDetails> {
@@ -343,6 +348,86 @@ impl GitService {
         )?;
         Ok(())
     }
+
+    pub fn squash_integrate_task(
+        repository_path: &Path,
+        task_worktree_path: &Path,
+        source_branch: &str,
+        target_branch: &str,
+        message: &str,
+    ) -> Result<IntegrationResult> {
+        let repository_path = repository_root(repository_path)?;
+        let task_worktree_path = repository_root(task_worktree_path)?;
+        run_git(
+            &repository_path,
+            ["check-ref-format", "--branch", source_branch],
+        )?;
+        run_git(
+            &repository_path,
+            ["check-ref-format", "--branch", target_branch],
+        )?;
+        if source_branch == target_branch {
+            return Err(GitError(
+                "A task branch cannot integrate into itself.".into(),
+            ));
+        }
+        ensure_clean_integration_workspace(&repository_path, target_branch)?;
+        ensure_task_worktree_ready(&task_worktree_path, source_branch)?;
+
+        if run_git_if_success(
+            &repository_path,
+            ["merge-base", "--is-ancestor", target_branch, source_branch],
+        )?
+        .is_none()
+        {
+            if let Err(error) = run_git(&task_worktree_path, ["rebase", target_branch]) {
+                let paths = conflicted_paths(&task_worktree_path)?;
+                if !paths.is_empty() {
+                    return Ok(IntegrationResult::Conflict { paths });
+                }
+                return Err(error);
+            }
+        }
+
+        if let Err(error) = run_git(
+            &repository_path,
+            ["merge", "--squash", "--no-commit", source_branch],
+        ) {
+            let paths = conflicted_paths(&repository_path)?;
+            if !paths.is_empty() {
+                run_git(&repository_path, ["reset", "--merge"])?;
+                return Ok(IntegrationResult::Conflict { paths });
+            }
+            return Err(error);
+        }
+        if run_git_if_success(&repository_path, ["diff", "--cached", "--quiet"])?.is_some() {
+            return Err(GitError(
+                "The task branch has no changes to integrate into the current integration branch."
+                    .into(),
+            ));
+        }
+        if let Err(error) = commit_with_fallback_identity(&repository_path, message, false) {
+            run_git(&repository_path, ["reset", "--merge"])?;
+            return Err(error);
+        }
+        let commit = run_git(&repository_path, ["rev-parse", "HEAD"])?;
+        Ok(IntegrationResult::Merged {
+            commit: commit.trim().to_owned(),
+        })
+    }
+
+    pub fn delete_integrated_task_branch(repository_path: &Path, branch: &str) -> Result<()> {
+        let repository_path = repository_root(repository_path)?;
+        run_git(&repository_path, ["check-ref-format", "--branch", branch])?;
+        let current_branch = non_empty(run_git(&repository_path, ["branch", "--show-current"])?);
+        if current_branch.as_deref() == Some(branch) {
+            return Err(GitError(
+                "The current integration workspace cannot delete its checked-out branch.".into(),
+            ));
+        }
+        run_git(&repository_path, ["branch", "--delete", "--force", branch])?;
+        Ok(())
+    }
 }
 
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
@@ -357,6 +442,75 @@ fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn ensure_clean_integration_workspace(path: &Path, target_branch: &str) -> Result<()> {
+    let current_branch = non_empty(run_git(path, ["branch", "--show-current"])?);
+    if current_branch.as_deref() != Some(target_branch) {
+        return Err(GitError(format!(
+            "The primary workspace must be checked out on {target_branch} before integration."
+        )));
+    }
+    if !run_git(path, ["status", "--porcelain=v1"])?
+        .trim()
+        .is_empty()
+    {
+        return Err(GitError(
+            "The primary workspace has uncommitted changes. Commit, stash, or discard them before integration."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_task_worktree_ready(path: &Path, source_branch: &str) -> Result<()> {
+    let current_branch = non_empty(run_git(path, ["branch", "--show-current"])?);
+    if current_branch.as_deref() != Some(source_branch) {
+        return Err(GitError(
+            "The task worktree is no longer checked out on its recorded task branch.".into(),
+        ));
+    }
+    if !run_git(path, ["status", "--porcelain=v1"])?
+        .trim()
+        .is_empty()
+    {
+        return Err(GitError(
+            "The task worktree has uncommitted changes. Commit, stash, or discard them before integration."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn conflicted_paths(path: &Path) -> Result<Vec<String>> {
+    Ok(run_git(path, ["diff", "--name-only", "--diff-filter=U"])?
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn commit_with_fallback_identity(path: &Path, message: &str, allow_empty: bool) -> Result<()> {
+    let mut arguments: Vec<String> = Vec::new();
+    if run_git_if_success(path, ["config", "--get", "user.name"])?
+        .and_then(non_empty)
+        .is_none()
+    {
+        arguments.extend(["-c".into(), "user.name=Orchestr".into()]);
+    }
+    if run_git_if_success(path, ["config", "--get", "user.email"])?
+        .and_then(non_empty)
+        .is_none()
+    {
+        arguments.extend(["-c".into(), "user.email=orchestr@local".into()]);
+    }
+    arguments.push("commit".into());
+    if allow_empty {
+        arguments.push("--allow-empty".into());
+    }
+    arguments.extend(["--message".into(), message.into()]);
+    run_git(path, arguments).map(|_| ())
 }
 
 fn git_argument_path(path: &Path) -> std::ffi::OsString {
@@ -411,6 +565,21 @@ fn repository_root(path: &Path) -> Result<PathBuf> {
     let output = run_git(&path, ["rev-parse", "--show-toplevel"])?;
     let root = PathBuf::from(output.trim());
     canonical_directory(&root)
+}
+
+fn resolve_git_directory(root_path: &Path, argument: &str) -> Result<PathBuf> {
+    let directory = non_empty(run_git(root_path, ["rev-parse", argument])?).ok_or_else(|| {
+        GitError(format!(
+            "Git did not report its {argument} metadata directory for this repository."
+        ))
+    })?;
+    let directory = PathBuf::from(directory);
+    let directory = if directory.is_absolute() {
+        directory
+    } else {
+        root_path.join(directory)
+    };
+    canonical_directory(&directory)
 }
 
 fn default_branch(path: &Path, current_branch: Option<&str>) -> Result<String> {
@@ -596,9 +765,10 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FilePreview, GitService};
+    use super::{FilePreview, GitService, IntegrationResult};
     use std::{
         fs,
+        path::Path,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -741,6 +911,15 @@ mod tests {
         )
         .expect("task worktree creates");
         assert!(worktree.created_branch);
+        let writable_git_directories = GitService::writable_git_directories(&worktree.path)
+            .expect("worktree metadata directories resolve");
+        assert_eq!(writable_git_directories.len(), 2);
+        assert!(writable_git_directories
+            .iter()
+            .any(|path| path.ends_with(".git")));
+        assert!(writable_git_directories.iter().any(|path| path
+            .parent()
+            .is_some_and(|parent| parent.ends_with(Path::new(".git/worktrees")))));
         assert_eq!(
             GitService::inspect_repository(&worktree.path)
                 .expect("worktree inspects")
@@ -752,6 +931,153 @@ mod tests {
             .expect("task worktree removes");
         assert!(!worktree_path.exists());
 
+        fs::remove_dir_all(directory).expect("temporary directory removes");
+    }
+
+    #[test]
+    fn squash_integrates_a_task_branch_and_retains_a_single_main_commit() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("orchestr-git-integrate-{nonce}"));
+        fs::create_dir(&directory).expect("temporary directory creates");
+        let repository =
+            GitService::initialize_repository(&directory).expect("repository initializes");
+        GitService::create_initial_commit(&directory).expect("initial commit creates");
+        let worktree_path =
+            std::env::temp_dir().join(format!("orchestr-git-integrate-worktree-{nonce}"));
+        let worktree = GitService::create_task_worktree(
+            &directory,
+            &worktree_path,
+            "task/integration-test",
+            &repository.default_branch,
+        )
+        .expect("task worktree creates");
+
+        fs::write(worktree.path.join("feature.txt"), "integrated\n").expect("feature writes");
+        run_git(&worktree.path, &["add", "feature.txt"]);
+        run_git(
+            &worktree.path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "Implement feature",
+            ],
+        );
+
+        let result = GitService::squash_integrate_task(
+            &directory,
+            &worktree.path,
+            "task/integration-test",
+            &repository.default_branch,
+            "task: integrate feature",
+        )
+        .expect("integration completes");
+        assert!(matches!(result, IntegrationResult::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(directory.join("feature.txt"))
+                .expect("integrated file reads")
+                .replace("\r\n", "\n"),
+            "integrated\n"
+        );
+        assert_eq!(
+            GitService::repository_details(&directory)
+                .expect("repository details load")
+                .recent_commits[0]
+                .subject,
+            "task: integrate feature"
+        );
+
+        GitService::remove_task_worktree(&directory, &worktree.path)
+            .expect("task worktree removes");
+        GitService::delete_integrated_task_branch(&directory, "task/integration-test")
+            .expect("task branch removes");
+        fs::remove_dir_all(directory).expect("temporary directory removes");
+    }
+
+    #[test]
+    fn integration_conflicts_preserve_the_task_worktree_and_primary_workspace() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("orchestr-git-conflict-{nonce}"));
+        fs::create_dir(&directory).expect("temporary directory creates");
+        let repository =
+            GitService::initialize_repository(&directory).expect("repository initializes");
+        fs::write(directory.join("shared.txt"), "base\n").expect("base file writes");
+        run_git(&directory, &["add", "shared.txt"]);
+        run_git(
+            &directory,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "Base",
+            ],
+        );
+        let worktree_path =
+            std::env::temp_dir().join(format!("orchestr-git-conflict-worktree-{nonce}"));
+        let worktree = GitService::create_task_worktree(
+            &directory,
+            &worktree_path,
+            "task/conflict-test",
+            &repository.default_branch,
+        )
+        .expect("task worktree creates");
+        fs::write(worktree.path.join("shared.txt"), "task change\n").expect("task file writes");
+        run_git(&worktree.path, &["add", "shared.txt"]);
+        run_git(
+            &worktree.path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "Task change",
+            ],
+        );
+        fs::write(directory.join("shared.txt"), "main change\n").expect("main file writes");
+        run_git(&directory, &["add", "shared.txt"]);
+        run_git(
+            &directory,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "Main change",
+            ],
+        );
+
+        let result = GitService::squash_integrate_task(
+            &directory,
+            &worktree.path,
+            "task/conflict-test",
+            &repository.default_branch,
+            "task: conflict test",
+        )
+        .expect("conflict is an integration result");
+        assert!(matches!(result, IntegrationResult::Conflict { paths } if paths == ["shared.txt"]));
+        assert_eq!(
+            fs::read_to_string(directory.join("shared.txt")).expect("primary file reads"),
+            "main change\n"
+        );
+        run_git(&worktree.path, &["rebase", "--abort"]);
+        GitService::remove_task_worktree(&directory, &worktree.path)
+            .expect("task worktree removes");
         fs::remove_dir_all(directory).expect("temporary directory removes");
     }
 }

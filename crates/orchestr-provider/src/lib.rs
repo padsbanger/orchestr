@@ -71,6 +71,10 @@ pub struct AgentRunInput {
     pub model: Option<String>,
     pub prompt: String,
     pub working_directory: PathBuf,
+    /// Provider-specific runtime metadata directories needed alongside the
+    /// isolated task worktree. The desktop host derives these from Git rather
+    /// than accepting them from task text or the UI.
+    pub additional_writable_directories: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +280,14 @@ impl AgentProvider for CodexProvider {
                 "The selected workspace no longer exists on this worker.".into(),
             ));
         }
+        for directory in &input.additional_writable_directories {
+            if !directory.is_dir() {
+                return Err(ProviderError(format!(
+                    "A required writable runtime directory no longer exists: {}",
+                    directory.display()
+                )));
+            }
+        }
 
         let mut arguments = vec![
             "exec".into(),
@@ -285,6 +297,10 @@ impl AgentProvider for CodexProvider {
             "--sandbox".into(),
             "workspace-write".into(),
         ];
+        for directory in input.additional_writable_directories {
+            arguments.push("--add-dir".into());
+            arguments.push(directory.to_string_lossy().into_owned());
+        }
         if let Some(model) = input.model.filter(|model| !model.trim().is_empty()) {
             if !model.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
@@ -368,11 +384,14 @@ mod tests {
 
     #[test]
     fn codex_execution_uses_structured_workspace_write_arguments() {
+        let working_directory = std::env::current_dir().expect("current directory");
+        let additional_directories = vec![working_directory.clone(), std::env::temp_dir()];
         let request = CodexProvider
             .execution_request(AgentRunInput {
                 model: Some("gpt-5.6-terra".into()),
                 prompt: "Implement the task.".into(),
-                working_directory: std::env::current_dir().expect("current directory"),
+                working_directory,
+                additional_writable_directories: additional_directories.clone(),
             })
             .expect("request builds");
         assert_eq!(request.program, "codex");
@@ -385,6 +404,16 @@ mod tests {
             .arguments
             .windows(2)
             .any(|pair| pair == ["--sandbox", "workspace-write"]));
+        let writable_arguments = request
+            .arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--add-dir")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(writable_arguments.len(), 2);
+        for directory in additional_directories {
+            assert!(writable_arguments.contains(&directory.to_string_lossy().as_ref()));
+        }
         assert_eq!(request.arguments.last().map(String::as_str), Some("-"));
         assert_eq!(
             request.standard_input.as_deref(),

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export const TASK_STATUSES = ["backlog", "todo", "in_progress", "review", "done"] as const;
+export const TASK_STATUSES = ["backlog", "todo", "in_progress", "review", "approved", "integrating", "blocked", "done"] as const;
 export type TaskStatus = typeof TASK_STATUSES[number];
 
 export type Task = {

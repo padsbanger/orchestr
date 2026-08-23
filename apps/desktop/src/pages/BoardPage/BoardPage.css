@@ -26,6 +26,9 @@
 .status-dot.blue { background: #55a3d6; }
 .status-dot.amber { background: #d59d4f; }
 .status-dot.violet { background: #aa86da; }
+.status-dot.indigo { background: #7c90dc; }
+.status-dot.cyan { background: #65b9bc; }
+.status-dot.orange { background: #dd9364; }
 .status-dot.green { background: #63b67b; }
 .task-list { display: grid; flex: 1; align-content: start; gap: 8px; min-height: 100px; padding: 9px; }
 .empty-column { display: grid; min-height: 68px; margin: 0; place-items: center; border: 1px dashed #333c42; color: #6d7880; font-size: 11px; pointer-events: none; }

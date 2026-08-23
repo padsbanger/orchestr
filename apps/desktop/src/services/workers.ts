@@ -21,6 +21,7 @@ export type WorkerRunEvent = {
   kind: "output" | "completed" | "failed" | "cancelled";
   stream: "stdout" | "stderr" | null;
   text: string | null;
+  rawText?: string | null;
   exitCode: number | null;
 };
 

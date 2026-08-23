@@ -183,14 +183,62 @@ impl WorkerHandle {
             .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?;
         match child.try_wait() {
             Ok(Some(_)) => Ok(()),
-            Ok(None) => child
-                .kill()
-                .map_err(|error| WorkerError(format!("Unable to cancel worker process: {error}"))),
+            Ok(None) => {
+                #[cfg(windows)]
+                {
+                    // npm-installed CLIs such as Codex are launched through a .cmd wrapper.
+                    // Killing only that wrapper leaves its Node child alive (and its output pipes
+                    // open), so the run never reaches its terminal state. `taskkill /T` stops the
+                    // complete process tree rooted at the worker process.
+                    let process_id = child.id();
+                    drop(child);
+                    terminate_process_tree(process_id, &self.child)
+                }
+
+                #[cfg(not(windows))]
+                {
+                    child.kill().map_err(|error| {
+                        WorkerError(format!("Unable to cancel worker process: {error}"))
+                    })
+                }
+            }
             Err(error) => Err(WorkerError(format!(
                 "Unable to inspect worker process status: {error}"
             ))),
         }
     }
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(process_id: u32, child: &Arc<Mutex<Child>>) -> Result<()> {
+    let output = Command::new("taskkill")
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .output()
+        .map_err(|error| WorkerError(format!("Unable to cancel worker process tree: {error}")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    // A process can finish in the small window between try_wait and taskkill.
+    // Treat that race as a successful cancellation rather than showing a false error.
+    let mut child = child
+        .lock()
+        .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?;
+    if child
+        .try_wait()
+        .map_err(|error| WorkerError(format!("Unable to inspect worker process status: {error}")))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(WorkerError(if details.is_empty() {
+        "Unable to cancel worker process tree.".into()
+    } else {
+        format!("Unable to cancel worker process tree: {details}")
+    }))
 }
 
 fn validate_request(request: &ProcessRequest) -> Result<()> {
@@ -455,5 +503,30 @@ mod tests {
 
         assert!(npm.installed);
         assert!(npm.version.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelling_a_command_wrapper_stops_its_process_tree() {
+        let run = LocalWorker::start(ProcessRequest {
+            program: "cmd".into(),
+            arguments: vec![
+                "/C".into(),
+                "ping".into(),
+                "127.0.0.1".into(),
+                "-n".into(),
+                "30".into(),
+            ],
+            working_directory: None,
+            standard_input: None,
+        })
+        .expect("command wrapper starts");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        run.handle.cancel().expect("process tree cancels");
+        let status = run.handle.wait().expect("process exits after cancellation");
+        drop(run.output);
+
+        assert!(!status.success());
     }
 }

@@ -1,7 +1,8 @@
-import { Bot, CheckSquare, Code2, FileCode2, FolderOpen, GitBranch, Pencil, Play, Square, Terminal, X } from "lucide-react";
+import { Bot, CheckSquare, Code2, Download, FileCode2, FolderOpen, GitBranch, Pencil, Play, Square, Terminal, X } from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
-import type { RunEvent, TaskRun } from "../../services/runs";
+import { exportTaskRunLog, type RunEvent, type TaskRun } from "../../services/runs";
 import type { Task } from "../../services/tasks";
 import type { TaskReview } from "../../services/reviews";
 import "./TaskDetailPanel.css";
@@ -11,6 +12,7 @@ type TaskDetailPanelProps = {
   assignedAgent?: Agent;
   runs: TaskRun[];
   isStartingRun: boolean;
+  cancellingRunId?: string;
   isCleaningWorktree: boolean;
   isOpeningWorktree: boolean;
   review?: TaskReview;
@@ -27,7 +29,7 @@ type TaskDetailPanelProps = {
   onRequestChanges: () => void;
 };
 
-export function TaskDetailPanel({ task, assignedAgent, runs, isStartingRun, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges }: TaskDetailPanelProps) {
+export function TaskDetailPanel({ task, assignedAgent, runs, isStartingRun, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges }: TaskDetailPanelProps) {
   const activeRun = runs.find((run) => run.status === "running");
   const latestRun = activeRun ?? runs[0];
   const [now, setNow] = useState(() => Date.now());
@@ -72,12 +74,12 @@ export function TaskDetailPanel({ task, assignedAgent, runs, isStartingRun, isCl
           {task.worktreePath ? <><p className="task-detail-copy"><span className="task-detail-label">Worktree</span><code className="task-worktree-path">{task.worktreePath}</code></p><div className="task-worktree-actions"><button className="secondary-button" type="button" disabled={isOpeningWorktree} onClick={onOpenWorktree}><FolderOpen size={14} /> {isOpeningWorktree ? "Opening..." : "Open folder"}</button><button className="secondary-button" type="button" disabled={Boolean(activeRun) || isCleaningWorktree} onClick={onCleanupWorktree}>{isCleaningWorktree ? "Removing..." : "Remove worktree"}</button></div><p className="task-detail-hint">Open the isolated checkout to inspect the agent's files. Removing it retains the task branch for review.</p></> : <p className="task-detail-hint">The task branch is retained; its isolated checkout has been removed.</p>}
         </TaskSection>}
         {task.status === "review" && <TaskSection title="Human review" icon={<GitBranch size={14} />}>
-          {isReviewLoading ? <p className="task-detail-empty">Loading task branch changes...</p> : reviewError ? <p className="task-run-error">{reviewError}</p> : review && <><p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><div className="review-actions"><button className="primary-button" type="button" disabled={isReviewActionPending} onClick={onApproveReview}>Approve to Done</button><button className="secondary-button" type="button" disabled={isReviewActionPending} onClick={onRequestChanges}>Request changes</button></div><h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}<h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}</>}
+          {isReviewLoading ? <p className="task-detail-empty">Loading task branch changes...</p> : reviewError ? <p className="task-run-error">{reviewError}</p> : review && <><p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><div className="review-actions"><button className="primary-button" type="button" disabled={isReviewActionPending} onClick={onApproveReview}>Approve for integration</button><button className="secondary-button" type="button" disabled={isReviewActionPending} onClick={onRequestChanges}>Request changes</button></div><p className="task-detail-hint">Approval queues a serialized squash merge; it does not mark the task Done.</p><h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}<h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}</>}
         </TaskSection>}
         <TaskSection title="Execution" icon={<Terminal size={14} />}>
           <div className="task-run-actions">
             <button className="primary-button" type="button" disabled={!canStart || isStartingRun} onClick={onStartRun}><Play size={15} /> {isStartingRun ? "Starting..." : "Run with Codex"}</button>
-            {activeRun && <button className="secondary-button" type="button" onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> Cancel</button>}
+            {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : "Cancel"}</button>}
           </div>
           {!assignedAgent ? <p className="task-detail-hint">Assign a Codex agent before starting this task.</p> : task.status !== "todo" && !activeRun ? <p className="task-detail-hint">Only Todo tasks can be started. Successful runs are sent to Review for human approval.</p> : <p className="task-detail-hint">Codex runs in an isolated task worktree. Successful runs move the task to Review.</p>}
           {latestRun ? <RunSummary run={latestRun} now={now} /> : <p className="task-detail-empty">No runs recorded for this task.</p>}
@@ -95,14 +97,35 @@ function RunSummary({ run, now }: { run: TaskRun; now: number }) {
   const runtimeEnd = run.completedAt ? timestamp(run.completedAt) : now;
   const runtime = Math.max(0, runtimeEnd - timestamp(run.startedAt));
   const timelineRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string>();
 
   useEffect(() => {
     timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight });
   }, [run.id, run.events.length]);
 
+  const exportRawLog = async () => {
+    setExportError(undefined);
+    try {
+      const destination = await save({
+        title: "Save raw execution log",
+        defaultPath: `orchestr-run-${run.id}.txt`,
+        filters: [{ name: "Text log", extensions: ["txt"] }],
+      });
+      if (!destination) return;
+      setIsExporting(true);
+      await exportTaskRunLog(run.id, destination);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Unable to export the raw execution log.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return <div className="task-run-summary">
-    <div className="task-run-meta"><span className={`run-status ${run.status}`}>{run.status}</span><span>{formatDuration(runtime)}</span>{run.exitCode !== null && <span>exit {run.exitCode}</span>}</div>
+    <div className="task-run-meta"><span className={`run-status ${run.status}`}>{run.status}</span><span>{formatDuration(runtime)}</span>{run.exitCode !== null && <span>exit {run.exitCode}</span>}<button className="task-run-log-link" type="button" disabled={isExporting} onClick={() => void exportRawLog()}><Download size={13} /> {isExporting ? "Saving..." : "Log.txt"}</button></div>
     {run.error && <p className="task-run-error">{run.error}</p>}
+    {exportError && <p className="task-run-error">{exportError}</p>}
     <div ref={timelineRef} className="task-run-timeline" aria-live="polite">{run.events.length === 0 ? <p>Waiting for Codex events...</p> : run.events.map((event) => <TimelineEvent event={event} key={event.id} />)}</div>
   </div>;
 }

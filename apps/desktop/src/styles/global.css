@@ -20,7 +20,7 @@ h2 { margin-bottom: 5px; font-size: 14px; font-weight: 600; }
 .muted { margin-bottom: 0; color: #89939a; font-size: 13px; line-height: 1.55; }
 .primary-button { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border: 1px solid #2f6f99; background: #19506f; color: #eff8fd; cursor: pointer; font-size: 13px; }
 .primary-button:disabled { cursor: not-allowed; opacity: .48; }
-.secondary-button { display: inline-flex; align-items: center; justify-content: center; height: 34px; padding: 0 12px; border: 1px solid #3c444a; background: transparent; color: #c3c9cd; cursor: pointer; font-size: 13px; text-decoration: none; }
+.secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 34px; padding: 0 12px; border: 1px solid #3c444a; background: transparent; color: #c3c9cd; cursor: pointer; font-size: 13px; text-decoration: none; }
 .secondary-button:hover { background: #22272b; color: #f3f5f6; }
 
 @media (max-width: 700px) {

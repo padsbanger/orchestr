@@ -2,11 +2,17 @@
 
 # Orchestr Roadmap
 
-This roadmap intentionally grows Orchestr from a useful local Kanban + Git application into a distributed AI software-development control plane.
+Orchestr grows from a local Kanban + Git application into a distributed AI software-development control plane.
 
-Each milestone should leave the application in a coherent, usable state.
+The roadmap is optimized around one central objective:
+
+> **consistent, integrated, healthy project progress**
+
+Each milestone should leave Orchestr in a coherent and usable state.
 
 ---
+
+# Completed Foundation
 
 ## M0 — Desktop Foundation — Complete
 
@@ -29,14 +35,6 @@ Create the basic local desktop application and persistence layer.
 - error handling
 - basic settings storage
 
-### Deliverables
-
-- app launches as a desktop application
-- SQLite database is initialized automatically
-- persistent sidebar/application shell
-- basic project dashboard route exists
-- development and production builds work
-
 ### Definition of done
 
 ```text
@@ -48,9 +46,7 @@ Launch app
 
 ---
 
-## M1 — Projects + Local Git Repositories
-
-**Status:** Complete
+## M1 — Projects + Local Git Repositories — Complete
 
 ### Goal
 
@@ -58,80 +54,27 @@ Treat every Orchestr project as a software project backed by Git.
 
 ### Scope
 
-Create project from:
-
-- new empty repository
-- existing local Git repository
-
-Initial project fields:
-
-- id
-- name
-- description
-- default branch
-- timestamps
-
-Initial workspace fields:
-
-- project
-- local worker
-- repository path
-
-### Git features
-
-- `git init`
-- repository validation
-- current branch
+- create new local Git repository
+- register existing local Git repository
+- persist project
+- persist local workspace
+- detect default/current branch
 - working tree status
 - latest commit
 
-### UI
-
-Project dashboard:
-
-```text
-Projects
-
-Trading Bot
-VPS Monitor
-Android App
-
-+ New Project
-```
-
-Project creation flow:
-
-```text
-New project
-  -> choose/create directory
-  -> initialize Git
-  -> persist project/workspace
-  -> open project
-```
-
 ### Definition of done
 
-A user can create a project, close Orchestr, reopen it, and open the same valid Git repository again.
+A user can create/register a project, restart Orchestr, and reopen the same Git repository.
 
 ---
 
-## M2 — Core Kanban
-
-**Status:** Complete
+## M2 — Core Kanban — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Make Orchestr useful as a normal local Kanban project manager.
-
-### Columns
-
-- Backlog
-- Todo
-- In Progress
-- Review
-- Done
+Make Orchestr useful as a local Kanban project manager.
 
 ### Scope
 
@@ -143,227 +86,122 @@ Make Orchestr useful as a normal local Kanban project manager.
 - persist ordering
 - project-specific boards
 
-### Task fields
-
-- id
-- project id
-- title
-- description
-- status
-- position
-- timestamps
-
 ### Definition of done
 
 ```text
 Create project
   -> create tasks
-  -> drag tasks
-  -> reorder tasks
-  -> restart Orchestr
-  -> exact board state is restored
+  -> drag/reorder tasks
+  -> restart
+  -> exact board state restored
 ```
 
 ---
 
-## M3 — Repository Awareness
-
-**Status:** Complete
+## M3 — Repository Awareness — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Make Git state visible without turning the product into a full Git client.
+Expose useful Git state without becoming a full Git client.
 
 ### Scope
 
-Project header:
-
 - current branch
-- clean/dirty status
+- clean/dirty
 - changed file count
 - latest commit
-
-Repository view:
-
 - recent commits
 - changed files
 - basic diff inspection
 
-### Architecture
-
-Introduce/solidify a Git service abstraction.
-
-React components must not execute Git commands directly.
-
 ### Definition of done
 
-The board can remain open while users inspect current repository state and recent Git activity.
+Repository state can be inspected while remaining in the project workflow.
 
 ---
 
-## M4 — Local Worker Runtime
-
-**Status:** Complete
+## M4 — Local Worker Runtime — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Introduce the Worker abstraction before AI execution.
-
-Initially the user has one implicit local worker.
+Introduce the Worker abstraction.
 
 ### Scope
 
-Worker can:
-
-- report OS and architecture
-- report installed tools
-- execute a process
-- specify working directory
-- stream stdout
-- stream stderr
-- cancel execution
-- report exit code
-
-### Capability detection
-
-Initially detect useful tools such as:
-
-- git
-- node
-- npm
-- pnpm
-- bun
-- docker
-- python
-- cargo
-- java
-- gradle
-- codex
-
-### UI
-
-```text
-Workers
-
-Local Machine    Ready
-
-Windows x64
-Git      2.x
-Node     24.x
-Codex    installed
-Docker   installed
-```
+- OS/architecture detection
+- tool detection
+- process execution
+- working directory
+- stdout/stderr streaming
+- cancellation
+- exit codes
 
 ### Definition of done
 
-Orchestr can run a harmless command through the Worker abstraction and stream its output into the desktop UI.
+Orchestr executes commands through the Worker abstraction and streams output into the UI.
 
 ---
 
-## M5 — Task Specification
-
-**Status:** Complete
+## M5 — Task Specification — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Make tasks precise enough to be handed to AI workers.
+Make tasks precise enough for human or AI implementation.
 
 ### Scope
-
-Add:
 
 - acceptance criteria
-- optional implementation notes
-- task dependencies field/model preparation
-- optional relevant paths/context
+- implementation notes
+- dependency model preparation
+- relevant paths/context
 - richer task detail panel
-
-Example:
-
-```text
-TASK-42
-Add GitHub OAuth
-
-Acceptance criteria
-- successful callback creates session
-- invalid callback shows an error
-- authentication tests exist
-- build passes
-```
 
 ### Definition of done
 
-A task contains enough structured information that a developer or AI agent can determine when it is complete.
+A task contains enough information to determine whether implementation satisfies the requested outcome.
 
 ---
 
-## M6 — AI Provider Integration
-
-**Status:** Complete
+## M6 — AI Provider Integration — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Make AI providers first-class integrations without yet implementing complex scheduling.
-
-Start with Codex.
+Make AI providers first-class integrations.
 
 ### Scope
 
-Provider abstraction:
+Start with Codex:
 
 - installation detection
 - version detection
 - authentication status
 - login
 - logout
-- connection test
-
-### Codex authentication
-
-- use official Codex authentication
-- support local browser-based login
-- later support device/headless authentication
-- Orchestr does not store raw OAuth credentials
-
-### UI
-
-```text
-Settings
-  AI Providers
-
-Codex
-Installed       yes
-Authenticated   yes
-Status          Ready
-```
+- readiness test
 
 ### Definition of done
 
-A user can install/detect Codex, authenticate through the supported official flow, and Orchestr reports the provider as ready.
+Codex can be authenticated and reported as Ready without Orchestr storing raw provider OAuth credentials.
 
 ---
 
-## M7 — Agents
-
-**Status:** Complete
+## M7 — Agents — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Introduce configurable AI workers as application entities.
+Introduce configurable AI agents.
 
 ### Scope
-
-Agent fields:
 
 - name
 - provider
@@ -373,210 +211,291 @@ Agent fields:
 - skills
 - concurrency limit
 
-Examples:
-
-```text
-Codex Terra
-Frontend Engineer
-
-Codex Sol
-Architect
-```
-
-### Important rule
-
-Agents contain configuration, not authentication credentials.
-
-Authentication belongs to a provider installation on a worker.
-
 ### Definition of done
 
-Users can create/edit/delete agent configurations and select an agent for a task.
+Users can configure agents and assign one to a task.
 
 ---
 
-## M8 — First Agent Task Execution
-
-**Status:** Complete
+## M8 — First Agent Task Execution — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Run a task with Codex on the local worker.
+Run a Kanban task with Codex.
 
-### Scope
-
-Workflow:
+### Workflow
 
 ```text
 TODO
   -> assign agent
   -> IN_PROGRESS
-  -> execute Codex
+  -> execute
   -> REVIEW
 ```
 
-Persist a Run entity containing:
+### Scope
+
+Persist Run data:
 
 - task
 - agent
 - worker
-- start time
-- end time
+- timestamps
 - status
 - output/events
 
-### UI
-
-Task inspector shows:
-
-- assigned agent
-- run status
-- runtime
-- logs
-- cancel action
-
-### Important rule
-
-The worker/agent does not mark its own work `DONE`.
-
-Successful execution moves the task to `REVIEW`.
-
 ### Definition of done
 
-A user can assign Codex to a task, watch its output, and receive the resulting task in Review.
+A user can assign Codex, watch execution, and receive the result in Review.
 
 ---
 
-## M9 — Execution Timeline + Observability
-
-**Status:** Complete
+## M9 — Execution Timeline + Observability — Complete
 
 **Completed:** 2026-08-22
 
 ### Goal
 
-Make AI work inspectable.
+Make AI execution inspectable.
 
 ### Scope
 
-Persist structured events:
-
-- run started
-- command started
-- command completed
-- file modified
-- validation started
-- validation completed
-- commit created
-- run failed
-- run completed
-
-Example:
-
-```text
-15:20:01  Task assigned
-15:20:03  Agent started
-15:20:17  Read package.json
-15:21:42  Modified auth.ts
-15:22:13  Added auth.test.ts
-15:22:40  npm test
-15:22:54  Tests passed
-```
+Persist structured run events and make previous runs inspectable after restart.
 
 ### Definition of done
 
-A run can be inspected after it finishes or fails, including after restarting Orchestr.
+Completed and failed runs retain useful execution history.
 
 ---
 
-## M10 — Task Branches + Git Worktrees
-
-**Status:** Complete
+## M10 — Task Branches + Git Worktrees — Complete
 
 **Completed:** 2026-08-23
 
 ### Goal
 
-Isolate AI tasks so multiple tasks can safely modify the same project.
+Isolate concurrent AI implementation work.
 
 ### Scope
 
-For eligible tasks:
-
-- create task branch
-- create isolated worktree
-- persist branch/worktree ownership
-- execute agent in the worktree
-- preserve failed worktrees for inspection
-- cleanup explicitly
-
-Example:
-
-```text
-main repo
-|
-+-- worktrees/
-    +-- TASK-42/
-    +-- TASK-43/
-```
+- task branches
+- isolated worktrees
+- persisted ownership
+- execute agent in task worktree
+- preserve failed work
+- explicit cleanup
 
 ### Definition of done
 
-Two tasks can modify the same project concurrently without sharing a working directory.
+Two tasks can work against the same project concurrently without sharing the same working directory.
 
 ---
 
-## M11 — Review Workflow
-
-**Status:** Complete
+## M11 — Review Workflow — Complete
 
 **Completed:** 2026-08-23
 
 ### Goal
 
-Turn `REVIEW` into a real workflow state.
+Make Review a real workflow stage.
 
 ### Scope
 
 Reviewer can:
 
-- inspect task specification
+- inspect task
 - inspect diff
 - inspect commits
 - inspect logs
 - approve
 - request changes
-- return task to In Progress
 
-Workflow:
+### Important correction
 
-```text
-IN_PROGRESS
-  -> REVIEW
-      -> DONE
+Approval no longer means Done.
 
-or
-
-IN_PROGRESS
-  -> REVIEW
-      -> IN_PROGRESS
-```
-
-### Definition of done
-
-An AI-produced change can be reviewed and either accepted or returned with feedback without losing execution history.
+Approved work must pass through Integration.
 
 ---
 
-## M12 — Quality Gates
+# Immediate Progress Pipeline
+
+The near-term pipeline is:
+
+```text
+Task
+  -> Ready
+  -> Implementation
+  -> Implementation Validation
+  -> Review
+  -> Approval
+  -> Integration Queue
+  -> Latest Integration Branch
+  -> Integration Validation
+  -> Merge
+  -> Main Healthy
+  -> Done
+  -> Unblock Next Tasks
+```
+
+---
+
+# M12 — Integration Queue — Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 
-Validate work automatically before review.
+Ensure accepted work safely reaches the project's canonical integration branch.
 
-### Project configuration
+Initial default: `main`.
+
+### Core invariant
+
+> A task is DONE only when its accepted changes exist on the integration branch and that branch remains healthy.
+
+### Workflow
+
+```text
+REVIEW
+  -> APPROVED
+  -> INTEGRATING
+  -> DONE
+```
+
+Failure paths:
+
+```text
+INTEGRATING
+  -> BLOCKED       conflict
+
+INTEGRATING
+  -> IN_PROGRESS   implementation issue discovered
+
+INTEGRATING
+  -> retryable failure
+```
+
+### Integration queue
+
+Implementation may be parallel.
+
+Integration is serialized per project.
+
+```text
+TASK-41 ----\
+TASK-42 -----+--> Integration Queue --> main
+TASK-43 ----/
+```
+
+### Scope
+
+- `APPROVED` state
+- `INTEGRATING` state
+- `BLOCKED` support
+- IntegrationAttempt persistence
+- per-project integration queue
+- per-project integration lock
+- refresh integration branch
+- update task branch against latest integration branch
+- conflict detection
+- merge/integrate
+- persist result
+- cleanup after successful integration
+- retry integration
+- Integration Queue UI
+
+### Initial merge strategy
+
+Recommended default:
+
+**squash merge**
+
+Keep original branch/run/commit history in Orchestr metadata.
+
+### Cleanup
+
+Before Done preserve:
+
+- branch
+- worktree
+- commits
+- run history
+- review history
+
+After successful integration:
+
+- delete worktree
+- delete local task branch when safe
+- preserve historical metadata
+
+### Definition of done
+
+Multiple implementation tasks may finish independently, but accepted work lands one-by-one on the latest integration branch.
+
+No task becomes Done while its code exists only on an isolated branch.
+
+---
+
+# M13 — Quality Gates + Project Health
+
+### Goal
+
+Make the integration branch reliably green and expose project health.
+
+### Main invariant
+
+> Automatic integration must stop when the integration branch is broken.
+
+### Two-stage validation
+
+#### Implementation validation
+
+```text
+agent finishes
+  -> validation
+  -> REVIEW
+```
+
+Question:
+
+> Does this task work on its own branch?
+
+#### Integration validation
+
+```text
+APPROVED
+  -> update against latest integration branch
+  -> validation
+  -> merge
+```
+
+Question:
+
+> Does this task still work with everything already integrated?
+
+### Project health
+
+Track:
+
+```text
+unknown
+healthy
+degraded
+broken
+```
+
+Project header should expose:
+
+- integration branch
+- health
+- last successful validation
+- last integration
+- failing gate when broken
+
+### Validation configuration
 
 Example:
 
@@ -588,26 +507,194 @@ validation:
   - npm run build
 ```
 
+Must support non-Node projects.
+
 ### Scope
 
 - configurable validation commands
-- streamed validation output
-- pass/fail state
-- attach results to run
-- failed validation prevents automatic transition to Review
-- optionally send failure back to the same agent for repair
+- streamed logs
+- persisted results
+- implementation validation
+- integration validation
+- integration-branch health state
+- stop automatic integration on Broken
+- recovery/re-run validation action
 
 ### Definition of done
 
-A task cannot enter successful review without satisfying configured project checks.
+Tasks cannot enter successful Review without required implementation checks, cannot integrate without latest-branch checks, and Orchestr clearly knows whether the canonical branch is healthy.
 
 ---
 
-## M13 — Architect / Reviewer Agent
+# M14 — Dependencies + Ready / Blocked Workflow
 
 ### Goal
 
-Automate technical review without allowing the implementing agent to approve itself.
+Ensure agents only start work that is actually executable.
+
+### New workflow concepts
+
+```text
+BACKLOG
+  -> READY
+  -> IN_PROGRESS
+```
+
+Blocked work:
+
+```text
+BLOCKED
+  -> READY
+```
+
+### READY definition
+
+A task is Ready when:
+
+- acceptance criteria exist
+- dependencies are Done
+- required context exists
+- no project blocker prevents execution
+- required worker/provider is available when applicable
+
+### Dependencies
+
+Example:
+
+```text
+TASK-10 Database
+   |
+   v
+TASK-11 API
+   |
+   v
+TASK-14 UI
+```
+
+Dependencies are satisfied only by `DONE`.
+
+Not by:
+
+- run completed
+- Review
+- Approved
+- Integrating
+
+### Scope
+
+- dependency persistence
+- dependency cycle validation
+- Ready eligibility calculation
+- Blocked reason
+- automatic re-evaluation
+- Done -> unblock dependent tasks
+- priority field
+
+Priority:
+
+```text
+critical
+high
+normal
+low
+```
+
+### Definition of done
+
+The scheduler/UI can distinguish:
+
+- work that exists
+- work that is Ready
+- work that is Blocked
+
+Completing and integrating one task can automatically make the next task Ready.
+
+---
+
+# M15 — Milestones, Epics + Project Progress
+
+### Goal
+
+Measure whether the project is moving toward meaningful outcomes.
+
+### Hierarchy
+
+```text
+Project
+  |
+Milestone
+  |
+Epic
+  |
+Task
+```
+
+### Scope
+
+Milestones:
+
+- title
+- description
+- status
+- optional target date
+
+Epics:
+
+- title
+- description
+- milestone link
+- status
+
+Tasks may belong to:
+
+- milestone
+- epic
+
+### Progress dashboard
+
+Prefer outcome metrics:
+
+```text
+Remote Workers Milestone
+
+17 / 27 Done
+4 Ready
+3 In Progress
+2 Review
+1 Blocked
+
+Integration Queue: 1
+Main: HEALTHY
+```
+
+Avoid using agent activity as primary progress:
+
+```text
+12 agents running
+4.5M tokens
+183 commands
+```
+
+Those remain secondary operational metrics.
+
+### Definition of done
+
+The user can answer:
+
+- what milestone is active?
+- what outcome is being built?
+- what is Done?
+- what is Ready next?
+- what is Blocked?
+- is main healthy?
+
+---
+
+# M16 — Architect / Reviewer Agent
+
+### Goal
+
+Automate technical review without self-approval.
 
 ### Inputs
 
@@ -615,10 +702,11 @@ Architect receives:
 
 - task
 - acceptance criteria
+- relevant project decisions
 - diff
 - commits
-- validation results
-- worker summary
+- implementation validation
+- run summary
 
 ### Outputs
 
@@ -632,90 +720,68 @@ Architect receives:
 Worker Agent
   -> REVIEW
   -> Architect
-
-Architect
-  -> approve -> DONE
-
-or
-
-Architect
-  -> request changes -> IN_PROGRESS
+  -> APPROVED
+  -> Integration Queue
 ```
 
-### Definition of done
-
-A separate architect agent can review a task and produce a structured decision with auditable reasoning/notes.
-
----
-
-## M14 — Dependencies + Blocking
-
-### Goal
-
-Represent task ordering explicitly.
-
-### Scope
-
-- task-to-task dependencies
-- blocked status/indicator
-- prevent execution of blocked tasks
-- automatically unblock when dependencies complete
-- dependency visualization
-
-Example:
+or:
 
 ```text
-TASK-10 Database
-   |
-   +--> TASK-11 API
-            |
-            +--> TASK-14 UI
+Architect
+  -> request changes
+  -> IN_PROGRESS
 ```
 
 ### Definition of done
 
-The scheduler/UI cannot accidentally start a task whose dependencies are incomplete.
+A logically separate reviewer agent can approve or reject work, but approved work still goes through normal integration.
 
 ---
 
-## M15 — Parallel Local Agents
+# M17 — Parallel Local Agents + WIP Limits
 
 ### Goal
 
-Run multiple isolated tasks concurrently on one capable machine.
+Increase throughput without creating excessive unfinished work.
 
 ### Scope
 
 - worker concurrency limits
 - agent concurrency limits
-- queue
-- multiple active worktrees
-- resource-safe cancellation
-- active run overview
+- execution queue
+- multiple worktrees
+- active runs
+- WIP limits
+- downstream backpressure
+
+Example:
+
+```text
+In Progress   max 4
+Review        max 3
+Approved      max 2
+Integrating   max 1
+```
+
+### Scheduler principle
+
+Do not start more implementation simply because an agent is idle.
+
+If Review or Integration is congested, reduce new starts.
 
 ### Definition of done
 
-Multiple independent tasks can execute concurrently without corrupting each other's files or run state.
+Multiple agents can work concurrently while Orchestr prevents downstream queues from growing without control.
 
 ---
 
-## M16 — Failure Recovery
+# M18 — Failure Recovery + Revert
 
 ### Goal
 
-Make Orchestr resilient to real agent failures.
+Recover safely from agent, process, Git, integration, cleanup, or regression failures.
 
-### Run states
-
-- queued
-- running
-- paused
-- failed
-- retrying
-- completed
-- cancelled
-
-### Actions
+### Run recovery
 
 - retry
 - resume
@@ -723,27 +789,128 @@ Make Orchestr resilient to real agent failures.
 - retry with another agent
 - inspect worktree
 - cancel
-- rollback/abandon result
-- escalate to human
+- abandon
+- escalate
+
+### Integration recovery
+
+- retry integration
+- recover stale integration lock
+- preserve conflict state
+- resume after Orchestr restart
+- handle merge-success/cleanup-failure
+
+### Revert
+
+For already-integrated regressions:
+
+- create normal Git revert
+- link revert to original task/integration
+- update project health
+- optionally create repair task
 
 ### Definition of done
 
-Killing Codex or restarting Orchestr does not lose task/run ownership or leave the system unable to recover.
+Crashes and bad changes are recoverable without losing traceability or rewriting shared history.
 
 ---
 
-## M17 — Remote Worker Protocol
+# M19 — Project Blockers + Needs Input
 
 ### Goal
 
-Allow Orchestr Desktop to dispatch work to another machine.
+Prevent agents from repeatedly guessing or failing on unresolved human/project issues.
+
+### Needs Input
+
+```text
+IN_PROGRESS
+  -> NEEDS_INPUT
+  -> IN_PROGRESS
+```
+
+Persist:
+
+- question
+- answer
+- requesting run/agent
+- timestamps
+
+### Project blockers
+
+Examples:
+
+- missing credentials
+- SDK unavailable
+- broken main
+- external API unavailable
+- unresolved product decision
+
+### Scope
+
+- task-level Needs Input
+- project-level blocker records
+- blocker affected tasks
+- pause/suppress unsafe automatic scheduling
+- resume affected tasks when blocker resolved
+
+### Definition of done
+
+Orchestr can stop and ask rather than allowing many agents to repeatedly fail or invent decisions.
+
+---
+
+# M20 — Architecture Decisions / Project Knowledge
+
+### Goal
+
+Give agents durable project memory and prevent architectural drift.
+
+### Sources
+
+- `AGENTS.md`
+- ADRs
+- architecture docs
+- coding standards
+- repository instructions
+- reusable skills
+- task context
+
+### ADR examples
+
+```text
+ADR-001 Use Tauri
+ADR-002 Worker is Rust
+ADR-003 Tasks use worktrees
+ADR-004 Integration is serialized
+```
+
+### Scope
+
+- accepted architecture decisions
+- superseded decisions
+- relevant context selection
+- context preview in UI
+- inject relevant knowledge into agent runs
+
+### Definition of done
+
+Agents receive consistent, inspectable project knowledge and do not casually contradict accepted architectural decisions.
+
+---
+
+# M21 — Remote Worker Protocol
+
+### Goal
+
+Dispatch work to another machine.
 
 ### Architecture
 
 ```text
 Orchestr Desktop
       |
-  authenticated
+ authenticated
  HTTPS/WebSocket
       |
 Remote Worker
@@ -751,30 +918,26 @@ Remote Worker
 
 ### Scope
 
-- worker registration
-- authenticated connection
+- registration
+- authentication
 - heartbeat
-- capability report
+- capabilities
 - create job
 - stream events
-- cancel job
-- reconnect behavior
-
-### Security
-
-Remote execution must never be exposed as an unauthenticated command API.
+- cancel
+- reconnect
 
 ### Definition of done
 
-A task created on Orchestr Desktop can execute on a second computer and stream its run state back to the board.
+A task can execute on another computer while state remains visible in Orchestr.
 
 ---
 
-## M18 — Worker Management
+# M22 — Worker Management
 
 ### Goal
 
-Support a pool of heterogeneous machines.
+Support heterogeneous worker machines.
 
 Example:
 
@@ -794,27 +957,38 @@ xcode, ios
 
 ### Scope
 
-- worker names
+- names
 - labels
 - capabilities
-- online/offline state
+- online/offline
 - provider authentication state
 - concurrency
-- maintenance/disabled state
+- maintenance state
 
 ### Definition of done
 
-Users can understand which machines are available and what each machine can execute.
+Users can understand which machines are available and what each can execute.
 
 ---
 
-## M19 — Capability-Aware Scheduler
+# M23 — Capability-Aware Scheduler
 
 ### Goal
 
-Select the correct worker automatically.
+Automatically choose valid work + valid workers.
 
-Example task:
+### Scheduling inputs
+
+- task Ready state
+- priority
+- dependencies
+- worker capability
+- agent/provider readiness
+- project health
+- WIP limits
+- downstream congestion
+
+Example:
 
 ```text
 Build Android APK
@@ -825,69 +999,29 @@ requires:
   gradle
 ```
 
-Possible workers:
-
-```text
-Windows Desktop    eligible
-Linux VPS          not eligible
-Mac Mini           eligible
-```
-
-### Scope
-
-- task requirements
-- worker labels/capabilities
-- eligibility filtering
-- worker availability
-- agent/provider availability
-- basic scheduling policy
-
 ### Definition of done
 
-A queued task can automatically be assigned only to a worker capable of executing it.
+Orchestr selects only Ready work and dispatches it only to capable workers without overwhelming downstream stages.
 
 ---
 
-## M20 — Project Knowledge
+# M24 — Planning Agent
 
 ### Goal
 
-Give agents consistent project context.
+Turn project goals/features into structured work.
 
-### Sources
-
-- `AGENTS.md`
-- architecture docs
-- coding standards
-- repository-specific instructions
-- reusable skills
-- task context
-
-### UI
-
-Expose the context that will be provided to the agent.
-
-### Definition of done
-
-An agent run receives predictable, inspectable project instructions rather than ad hoc prompt construction.
-
----
-
-## M21 — Planning Agent
-
-### Goal
-
-Turn feature requests into structured tasks.
-
-Example input:
+Example:
 
 ```text
-Add GitHub OAuth authentication.
+Add GitHub OAuth authentication
 ```
 
-Example output:
+Planner proposes:
 
 ```text
+Epic: GitHub Authentication
+
 TASK-101 Configure OAuth
 TASK-102 Create callback
 TASK-103 Add session handling
@@ -898,259 +1032,295 @@ TASK-106 Add tests
 
 ### Scope
 
-- feature/epic input
-- proposed tasks
+- milestone/epic proposal
+- task proposal
 - acceptance criteria
 - dependency proposal
-- human approval before task creation
+- priority proposal
+- human approval
 
 ### Definition of done
 
-The user can describe a feature and approve an AI-generated implementation plan that becomes Kanban tasks.
+A user can approve an AI-generated implementation plan that becomes structured, dependency-aware project work.
 
 ---
 
-## M22 — Agent Collaboration
+# M25 — Agent Collaboration
 
 ### Goal
 
-Allow agents to coordinate through Orchestr rather than unrestricted peer-to-peer chat.
+Allow agents to coordinate through auditable Orchestr workflows.
 
 ### Scope
 
 Agents may:
 
-- comment on tasks
-- create structured requests
+- comment
+- create requests
 - report blockers
-- reference another task
-- request API/interface changes
+- reference tasks
+- request interface changes
 - escalate questions
 
-All communication must be persisted.
+All communication is persisted.
 
 ### Definition of done
 
-One agent can request work/information from another agent through an auditable Orchestr workflow.
+Agents can coordinate without hidden peer-to-peer conversation.
 
 ---
 
-## M23 — Remote Git Hosting
+# M26 — Remote Git Hosting
 
 ### Goal
 
-Integrate project repositories with hosted Git platforms.
+Integrate with hosted Git providers.
 
 Start with GitHub.
 
 ### Scope
 
-- clone remote repository
-- configure remote
+- clone
+- remotes
 - push task branch
-- read issues
-- issue -> Orchestr task
-- create pull request
-- inspect pull-request checks/comments
-- merge after approval
+- issues
+- issue -> task
+- PR creation
+- checks/comments
+- merge workflow
+
+### Integration modes
+
+Later support:
+
+- local integration
+- PR-based integration
+- hybrid integration
 
 ### Definition of done
 
-An Orchestr task can produce a normal remote Git branch/PR workflow without abandoning the local-first architecture.
+An Orchestr task can participate in a normal hosted Git workflow without abandoning local-first behavior.
 
 ---
 
-## M24 — CI/CD Integration
+# M27 — CI/CD Integration
 
 ### Goal
 
-Combine local agent validation with external CI.
+Combine local validation with external CI/deployment state.
 
 ### Scope
 
-- read CI state
-- associate CI runs with tasks/PRs
-- prevent completion when required checks fail
-- deployment status
-- optional deployment task types
+- read CI status
+- associate CI with task/PR
+- required checks
+- deployment state
+- deployment task types
 
 ### Definition of done
 
-Review can include both local quality gates and remote CI results.
+Project progress can include both local validation and remote CI outcomes.
 
 ---
 
-## M25 — Metrics + Cost Control
+# M28 — Metrics + Cost Control
 
 ### Goal
 
-Understand how effective the agent system is.
+Measure reliability, cost, and bottlenecks.
 
-### Metrics
+### Operational metrics
 
-- task count
+- run count
 - success/failure
 - retries
-- run duration
-- token usage where available
-- model/provider usage
-- cost where available
+- duration
+- token usage
+- provider/model usage
+- cost
 - worker utilization
+
+### Flow metrics
+
+- Ready lead time
+- In Progress duration
+- Review queue time
+- Integration queue time
+- conflict rate
+- blocked time
 - validation failure rate
+- milestone throughput
+
+### Important rule
+
+Operational activity is not project progress.
 
 ### Definition of done
 
-Users can compare agents/workers and identify expensive, slow, or unreliable workflows.
+Users can identify bottlenecks, unreliable agents, excessive cost, or slow project flow.
 
 ---
 
-## M26 — Autonomous Project Mode
+# M29 — Autonomous Project Mode
 
 ### Goal
 
-Allow a high-level goal to flow through planning, implementation, validation, and review.
+Allow a project goal to move through planning, implementation, integration, and completion with limited supervision.
 
-Target workflow:
+### Target workflow
 
 ```text
-User goal
+Project Goal
    |
 Planner
    |
-Architecture / task proposal
+Milestone / Epic / Tasks
    |
 Human approval
    |
+Ready Queue
+   |
 Scheduler
    |
-Workers + agents
+Workers + Agents
    |
-Quality gates
+Implementation Validation
    |
-Architect review
+Review / Architect
    |
-Merge / completion
+Integration Queue
+   |
+Integration Validation
+   |
+Merge
+   |
+Main Healthy
+   |
+Done
+   |
+Unblock Next Tasks
 ```
 
 ### Safety requirements
 
-- configurable autonomy level
-- task/run audit trail
-- clear stop/cancel controls
+- configurable autonomy
+- audit trail
+- stop/cancel controls
 - no hidden merges
-- dependency-aware scheduling
-- failure/retry limits
+- dependencies
+- WIP limits
+- project-health gates
+- retry limits
+- conflict handling
 - human escalation
 
 ### Definition of done
 
-A user can approve a plan and allow Orchestr to execute multiple dependent tasks with limited supervision while retaining full visibility and control.
+A user can approve a plan and allow Orchestr to make sustained project progress while preserving control, health, and traceability.
 
 ---
 
-# Suggested Release Grouping
+# Updated Release Grouping
 
-## v0.1 — Local Kanban + Git
+## v0.1 — Local Kanban + Git — Complete
 
 - M0 Desktop Foundation
 - M1 Projects + Git
 - M2 Core Kanban
 - M3 Repository Awareness
 
-Useful even with zero AI.
-
 ---
 
-## v0.2 — Local Execution
+## v0.2 — Local Execution — Complete
 
 - M4 Local Worker
 - M5 Task Specification
 - M6 AI Provider Integration
 - M7 Agents
 
-The execution architecture exists before autonomous behavior.
-
 ---
 
 ## v0.3 — First AI Developer
 
-- M8 First Agent Task Execution
-- M9 Execution Timeline
-- M10 Task Branches + Worktrees
-- M11 Review Workflow
+- M8 Agent Task Execution — Complete
+- M9 Execution Timeline — Complete
+- M10 Worktrees — Complete
+- M11 Review Workflow — Complete
+- M12 Integration Queue — Complete
+- M13 Quality Gates + Project Health — Next
 
-A human can safely delegate one task to Codex.
+v0.3 is complete when accepted AI work reliably lands on a healthy integration branch.
 
 ---
 
-## v0.4 — Reliable AI Workflow
+## v0.4 — Consistent Project Progress
 
-- M12 Quality Gates
-- M13 Architect Agent
-- M14 Dependencies
-- M15 Parallel Local Agents
-- M16 Failure Recovery
+- M14 Dependencies + Ready/Blocked
+- M15 Milestones/Epics + Progress
+- M16 Architect Agent
+- M17 Parallel Agents + WIP Limits
+- M18 Failure Recovery + Revert
+- M19 Project Blockers + Needs Input
+- M20 Architecture Decisions / Project Knowledge
 
-Orchestr becomes useful for serious multi-task development on one machine.
+This release turns Orchestr from an agent runner into a system that manages project flow.
 
 ---
 
 ## v0.5 — Distributed Orchestr
 
-- M17 Remote Worker Protocol
-- M18 Worker Management
-- M19 Capability-Aware Scheduler
-
-Orchestr can use a Windows workstation, Linux VPS, Mac, GPU box, or other suitable development machine.
+- M21 Remote Worker Protocol
+- M22 Worker Management
+- M23 Capability-Aware Scheduler
 
 ---
 
 ## v0.6 — Project Intelligence
 
-- M20 Project Knowledge
-- M21 Planning Agent
-- M22 Agent Collaboration
-
-Feature requests can become coordinated implementation plans.
+- M24 Planning Agent
+- M25 Agent Collaboration
 
 ---
 
 ## v0.7 — Hosted Development Workflow
 
-- M23 Remote Git Hosting
-- M24 CI/CD Integration
-- M25 Metrics + Cost Control
-
-Orchestr becomes compatible with normal professional Git/CI workflows.
+- M26 Remote Git Hosting
+- M27 CI/CD Integration
+- M28 Metrics + Cost Control
 
 ---
 
 ## v1.0 — Autonomous Orchestration
 
-- M26 Autonomous Project Mode
-
-Goal -> plan -> tasks -> workers -> review -> completion.
+- M29 Autonomous Project Mode
 
 ---
 
-# Immediate implementation target
+# Immediate Implementation Sequence
 
-Start with **v0.1 only**.
-
-The first coding sequence should be:
+Continue from the current M12-complete state:
 
 ```text
-1. Scaffold React + TypeScript + Vite + Tauri
-2. Add SQLite + migrations
-3. Create application shell/sidebar
-4. Implement Project persistence
-5. Implement New Project flow
-6. Initialize/register Git repository
-7. Implement project dashboard
-8. Implement Kanban task persistence
-9. Implement task CRUD
-10. Implement drag/drop + ordering
-11. Add repository status to project header
+1. Add project validation configuration
+2. Add implementation validation
+3. Add integration validation
+4. Add integration-branch health state
+5. Stop automatic integration when the integration branch is Broken
+6. Add recovery/re-run validation actions
+7. Add basic dependency persistence
+8. Add Ready/Blocked computation
+9. Unblock dependent tasks when prerequisites become Done
 ```
 
-Do not implement Codex, remote workers, worktrees, or autonomous agents until this flow is solid.
+Do not optimize for maximum agent concurrency yet.
+
+The immediate objective is:
+
+```text
+accepted task
+  -> safely integrated
+  -> main remains healthy
+  -> next valid task becomes Ready
+```
+
+That loop is the foundation for consistent autonomous project progress.

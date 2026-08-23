@@ -4,89 +4,259 @@
 
 **Orchestr** is a local-first AI-powered Kanban application for building software projects with human and AI workers.
 
-Each Orchestr project represents a software project backed by an isolated Git repository. Users manage work through a Kanban board, assign tasks to AI agents, and later run those tasks across one or more local or remote worker machines.
+Each Orchestr project represents a software project backed by a Git repository. Tasks are managed through a Kanban workflow and may be executed by AI agents in isolated Git branches/worktrees.
 
-The initial product must work well as a normal Kanban + Git project manager before autonomous agent behavior is added.
-
----
-
-## Product principles
-
-1. **Local-first**
-   - The first usable version runs entirely on the user's machine.
-   - No cloud account is required for the MVP.
-   - Project source code stays in normal Git repositories owned by the user.
-
-2. **Project = Git repository**
-   - Every Orchestr project is associated with a Git repository.
-   - A project may be created as a new repository, registered from an existing local repository, or later cloned from a remote repository.
-
-3. **Kanban is the source of workflow state**
-   - Tasks move through explicit workflow states.
-   - Moving a task does not implicitly mutate Git unless the action explicitly requires it.
-
-4. **Human and AI parity**
-   - Any important action an agent can perform should also be possible through the UI or core API.
-   - Agents must use the same domain/application layer as human actions.
-   - Do not hide critical state transitions inside prompts.
-
-5. **Workers own execution environments**
-   - Orchestr manages projects, tasks, scheduling, and orchestration.
-   - Workers execute commands and provide machine capabilities.
-   - The control plane must not assume a specific OS, build system, programming language, or project type.
-
-6. **Provider credentials do not belong to Orchestr**
-   - Orchestr must not store raw Codex/ChatGPT OAuth tokens in its database.
-   - AI provider login should use the provider's official authentication flow.
-   - Authentication is associated with the worker environment where the provider CLI/runtime executes.
-
-7. **Observability over magic**
-   - Agent execution should be inspectable.
-   - Commands, logs, task state transitions, validation results, commits, and failures should become visible events.
-
-8. **Safe incremental autonomy**
-   - Early versions require human review.
-   - Workers cannot silently merge or mark their own work complete.
-   - Autonomous planning, scheduling, and merging are later milestones.
+The product is evolving from a local Kanban + Git application into a distributed AI software-development control plane.
 
 ---
 
-## Primary stack
+# Current project state
 
-### Desktop application
+Completed milestones:
+
+- M0 — Desktop Foundation
+- M1 — Projects + Local Git Repositories
+- M2 — Core Kanban
+- M3 — Repository Awareness
+- M4 — Local Worker Runtime
+- M5 — Task Specification
+- M6 — AI Provider Integration
+- M7 — Agents
+- M8 — First Agent Task Execution
+- M9 — Execution Timeline + Observability
+- M10 — Task Branches + Git Worktrees
+- M11 — Review Workflow
+- M12 — Integration Queue
+
+Immediate next milestone:
+
+**M13 — Quality Gates + Project Health**
+
+Do not skip integration correctness in favor of more agents or more automation.
+
+---
+
+# Primary product objective
+
+Orchestr must optimize for:
+
+> **completed, integrated, healthy project progress**
+
+It must not optimize for:
+
+- number of running agents
+- number of completed agent runs
+- number of branches
+- number of commits
+- token usage
+- worker utilization
+
+Those are operational metrics, not project progress.
+
+The fundamental project loop is:
+
+```text
+PROJECT GOAL
+    |
+MILESTONE / EPIC
+    |
+TASK
+    |
+dependencies satisfied?
+  /   \
+ no    yes
+ |      |
+BLOCKED READY
+         |
+         v
+    IN_PROGRESS
+         |
+implementation validation
+         |
+         v
+       REVIEW
+         |
+      APPROVED
+         |
+         v
+  INTEGRATION QUEUE
+         |
+ update against latest integration branch
+         |
+ integration validation
+         |
+         v
+       MERGE
+         |
+         v
+   MAIN HEALTHY
+         |
+         v
+        DONE
+         |
+         v
+ unblock dependent tasks
+```
+
+---
+
+# Product principles
+
+## 1. Local-first
+
+- The desktop application must remain useful without cloud infrastructure.
+- Project source code remains in normal Git repositories owned by the user.
+- Cloud services are optional extensions, not a requirement for basic use.
+
+## 2. Project = Git repository
+
+Each project is associated with a Git repository.
+
+A project may originate from:
+
+- a new local Git repository
+- an existing local Git repository
+- later, a cloned remote repository
+
+A project may have multiple physical workspaces across workers.
+
+## 3. Kanban represents workflow state
+
+Kanban state and Git state are related but distinct.
+
+Moving a card must not silently perform unrelated Git operations unless that transition explicitly represents such an operation.
+
+## 4. Human and AI parity
+
+Important actions must exist in the application/domain layer and be usable by both humans and agents.
+
+Examples:
+
+- create task
+- edit task
+- move task
+- assign agent
+- start run
+- cancel run
+- request review
+- approve
+- request changes
+- retry
+- integrate
+- revert
+
+Do not hide critical workflow transitions only inside prompts.
+
+## 5. Workers own execution environments
+
+Orchestr manages:
+
+- projects
+- milestones
+- epics
+- tasks
+- dependencies
+- agents
+- scheduling
+- reviews
+- integration
+- project progress
+
+Workers manage:
+
+- processes
+- Git
+- Codex
+- build tools
+- test tools
+- Android tooling
+- Xcode
+- Docker
+- project-specific commands
+
+The control plane must not assume all projects are web applications.
+
+## 6. Provider credentials do not belong to Orchestr
+
+Orchestr must not store raw Codex/ChatGPT OAuth credentials in SQLite.
+
+Provider authentication belongs to the worker environment where that provider executes.
+
+## 7. Observability over magic
+
+Persist and expose useful events such as:
+
+- task became Ready
+- task became Blocked
+- run started
+- process started
+- process output
+- process completed
+- files changed
+- validation started
+- validation completed
+- commit created
+- review requested
+- review approved
+- integration queued
+- integration started
+- integration conflict
+- integration failed
+- merge completed
+- main health changed
+- cleanup completed
+- dependent task unblocked
+
+## 8. Safe incremental autonomy
+
+Autonomy is introduced gradually.
+
+- implementing agents do not approve their own work
+- approval does not mean Done
+- Done requires integration
+- integration requires latest-main validation
+- automatic scheduling must respect dependencies and downstream capacity
+
+---
+
+# Primary stack
+
+## Desktop
 
 - React
 - TypeScript
 - Vite
 - Tauri 2
 - SQLite
-- `dnd-kit` for Kanban drag and drop
-- Radix UI or Base UI primitives
+- dnd-kit
+- Radix UI or Base UI
 - Lucide icons
-- Styling: Tailwind CSS or a similarly lightweight styling layer
+- Tailwind CSS or similarly lightweight styling
 
-### Worker
+## Worker
 
-Preferred implementation:
+Preferred:
 
 - Rust
-- One cross-platform codebase
-- Build targets:
-  - Windows x64
-  - Linux x64
-  - Linux ARM64
-  - macOS ARM64
-  - macOS x64
+- one cross-platform implementation
 
-Do not create independent Windows/Linux/macOS worker applications. Platform-specific behavior must live behind a small platform abstraction.
+Targets:
+
+- Windows x64
+- Linux x64
+- Linux ARM64
+- macOS ARM64
+- macOS x64
+
+Platform-specific behavior must remain behind a small adapter layer.
 
 ---
 
-## Visual direction
+# Visual direction
 
-Orchestr should feel like an engineering control room rather than a generic SaaS Kanban product.
+Orchestr should feel like an engineering control room, not a generic SaaS Kanban product.
 
-Design keywords:
+Keywords:
 
 - industrial
 - dense
@@ -97,37 +267,33 @@ Design keywords:
 Guidelines:
 
 - dark neutral base
+- compact cards
 - thin borders
-- compact information density
-- semantic color for status
+- semantic status colors
 - monospace for technical metadata
-- subtle animation only when it communicates state
+- subtle state-driven animation
+- persistent project navigation
+- detailed task/run inspector
+- project health visible at all times
 
-Avoid:
+Suggested semantics:
 
-- default unmodified shadcn appearance
-- oversized cards
-- excessive gradients
-- decorative cyberpunk effects
-- large empty whitespace typical of marketing SaaS dashboards
-
-Suggested status semantics:
-
-- backlog: neutral
-- todo: blue
-- in progress: amber
-- review: violet
-- done: green
-- blocked: orange
-- failed: red
+- Backlog — neutral
+- Ready — blue
+- In Progress — amber
+- Needs Input — yellow
+- Review — violet
+- Approved — indigo
+- Integrating — cyan
+- Done — green
+- Blocked — orange
+- Failed/Broken — red
 
 ---
 
-## Core domain model
+# Core domain concepts
 
-The exact schema may evolve, but keep the boundaries below.
-
-### Project
+## Project
 
 ```ts
 type Project = {
@@ -135,16 +301,17 @@ type Project = {
   name: string
   description?: string
   defaultBranch: string
+  integrationBranch: string
   createdAt: string
   updatedAt: string
 }
 ```
 
-Do not permanently model a project as a single machine-specific `repoPath`.
+Do not hard-code `main` throughout the application.
 
-A project may have one or more workspaces.
+Use the project's configured integration branch.
 
-### Workspace
+## Workspace
 
 ```ts
 type Workspace = {
@@ -155,55 +322,99 @@ type Workspace = {
 }
 ```
 
-A workspace represents a physical checkout of a project on a specific worker.
+A workspace is a physical checkout of a project on a worker.
 
-For the MVP there will normally be one local workspace.
+## Milestone
 
-### Task
+A milestone represents a major project outcome.
 
-Initial workflow:
+```ts
+type Milestone = {
+  id: string
+  projectId: string
+  title: string
+  description?: string
+  status: "planned" | "active" | "completed" | "blocked"
+  targetDate?: string
+}
+```
+
+## Epic
+
+An epic groups related tasks inside a milestone.
+
+```ts
+type Epic = {
+  id: string
+  projectId: string
+  milestoneId?: string
+  title: string
+  description?: string
+  status: "planned" | "active" | "completed" | "blocked"
+}
+```
+
+## Task
+
+Recommended workflow statuses:
 
 ```ts
 type TaskStatus =
   | "backlog"
-  | "todo"
+  | "ready"
   | "in_progress"
+  | "needs_input"
   | "review"
+  | "approved"
+  | "integrating"
+  | "blocked"
   | "done"
 ```
 
-Initial task model:
+If the existing database currently uses `todo`, migrate incrementally. `ready` should eventually replace ambiguous `todo` semantics for schedulable work.
+
+Suggested task model:
 
 ```ts
 type Task = {
   id: string
   projectId: string
+  milestoneId?: string
+  epicId?: string
+
   title: string
   description?: string
+
   status: TaskStatus
+  priority: "critical" | "high" | "normal" | "low"
+
   position: number
+
   createdAt: string
   updatedAt: string
 }
 ```
 
-Later fields may include:
+## Task execution metadata
 
 ```ts
 type TaskExecutionMetadata = {
   acceptanceCriteria: string[]
-  dependencies: string[]
+  implementationNotes?: string
+  relevantPaths?: string[]
+
+  dependencyIds: string[]
+
   assignedAgentId?: string
   assignedWorkerId?: string
+
   branch?: string
   worktreePath?: string
   lastRunId?: string
 }
 ```
 
-Do not add all later fields before they are required by a milestone.
-
-### Worker
+## Worker
 
 ```ts
 type Worker = {
@@ -211,36 +422,11 @@ type Worker = {
   name: string
   os: "windows" | "linux" | "macos"
   architecture: "x64" | "arm64"
-  status: "online" | "offline" | "busy"
+  status: "online" | "offline" | "busy" | "maintenance"
 }
 ```
 
-Workers expose capabilities separately.
-
-Example capabilities:
-
-```ts
-type WorkerCapabilities = {
-  tools: Record<string, string | boolean>
-  labels: string[]
-}
-```
-
-Examples of labels:
-
-- `windows`
-- `linux`
-- `macos`
-- `android`
-- `ios`
-- `xcode`
-- `docker`
-- `node`
-- `python`
-- `gpu`
-- `godot`
-
-### Agent
+## Agent
 
 Agents are configuration, not credentials.
 
@@ -257,9 +443,7 @@ type Agent = {
 }
 ```
 
-### Run
-
-Agent execution must eventually be represented explicitly.
+## Run
 
 ```ts
 type RunStatus =
@@ -271,299 +455,711 @@ type RunStatus =
   | "cancelled"
 ```
 
-Each run should be traceable to:
+Run state and Task state are separate.
 
-- task
-- agent
-- worker
-- workspace
-- branch/worktree
-- start/end timestamps
-- logs/events
-- validation results
-- resulting commits
+Example:
+
+```text
+Agent Run: COMPLETED
+Task:      REVIEW
+Branch:    task/TASK-42
+Worktree:  exists
+```
+
+Only after successful integration:
+
+```text
+Agent Run: COMPLETED
+Task:      DONE
+Branch:    removed
+Worktree:  removed
+Main:      contains accepted changes
+```
+
+## Integration Attempt
+
+```ts
+type IntegrationStatus =
+  | "queued"
+  | "integrating"
+  | "conflict"
+  | "validation_failed"
+  | "merged"
+  | "failed"
+
+type IntegrationAttempt = {
+  id: string
+  taskId: string
+  sourceBranch: string
+  targetBranch: string
+  status: IntegrationStatus
+  startedAt?: string
+  completedAt?: string
+  error?: string
+}
+```
+
+## Project Health
+
+Project health is a first-class concept.
+
+```ts
+type ProjectHealth =
+  | "unknown"
+  | "healthy"
+  | "degraded"
+  | "broken"
+```
+
+At minimum, track health of the integration branch.
 
 ---
 
-## Application architecture
+# Task readiness
 
-Keep UI, domain logic, Git operations, worker execution, and provider integrations separate.
+A task is schedulable only when it is `READY`.
 
-Target direction:
+`READY` means:
+
+- acceptance criteria exist
+- required dependencies are `DONE`
+- required project context exists
+- no unresolved project-level blocker prevents execution
+- a suitable worker can execute it
+- required provider authentication is available when AI execution is requested
+
+The scheduler must not treat all non-started tasks as eligible.
+
+Prefer:
+
+```ts
+getReadyTasks(projectId)
+```
+
+over:
+
+```ts
+getTodoTasks(projectId)
+```
+
+---
+
+# Dependency rules
+
+Dependencies determine what can run.
+
+Priority determines what should run first.
+
+A dependency is satisfied only when the dependency task is `DONE`.
+
+Not when:
+
+- its agent run completed
+- it reached Review
+- it was approved
+- it entered Integration
+
+Example:
+
+```text
+TASK-10 API
+   |
+   v
+TASK-11 UI
+```
+
+TASK-11 remains blocked until TASK-10 is integrated and Done.
+
+When TASK-10 becomes Done, Orchestr should re-evaluate and potentially move TASK-11:
+
+```text
+BLOCKED -> READY
+```
+
+Dependencies must be cycle-validated.
+
+---
+
+# Priority rules
+
+Initial priority levels:
+
+```text
+critical
+high
+normal
+low
+```
+
+Scheduling should consider:
+
+1. eligibility
+2. dependency satisfaction
+3. project health
+4. downstream WIP/backpressure
+5. priority
+6. worker/provider availability
+
+Do not optimize solely for keeping every agent busy.
+
+---
+
+# Needs Input workflow
+
+Agents must be able to ask for human input without guessing.
+
+Example:
+
+```text
+IN_PROGRESS
+  -> NEEDS_INPUT
+  -> IN_PROGRESS
+```
+
+Persist:
+
+- question
+- requesting agent/run
+- timestamp
+- answer
+- resolution timestamp
+
+`NEEDS_INPUT` should pause active execution unless the implementation can safely continue elsewhere.
+
+---
+
+# Project blockers
+
+Project-level blockers are first-class.
+
+Examples:
+
+- broken integration branch
+- unavailable external service
+- missing credentials
+- unresolved architecture decision
+- required SDK unavailable
+- project configuration broken
+
+A project blocker may affect multiple tasks.
+
+Do not repeatedly fail many tasks for the same known project-level issue.
+
+---
+
+# Architecture decisions
+
+Important technical decisions should be persisted as project knowledge.
+
+Use an ADR-style concept.
+
+Examples:
+
+```text
+ADR-001 Use Tauri
+ADR-002 Worker implemented in Rust
+ADR-003 Task execution uses Git worktrees
+ADR-004 Integration is serialized per project
+ADR-005 Done means integrated into integration branch
+```
+
+Agents should receive relevant accepted decisions automatically.
+
+Do not allow later agents to casually contradict established architecture without an explicit decision change.
+
+---
+
+# Application architecture
+
+Keep concerns separate:
 
 ```text
 React UI
    |
    v
-Application / domain layer
+Application / Domain Layer
    |
-   +--> SQLite repositories
+   +--> SQLite
    |
-   +--> Git service
+   +--> Git Service
    |
-   +--> Worker client
+   +--> Worker Client
+   |
+   +--> Readiness / Dependency Service
+   |
+   +--> Integration Service
+   |
+   +--> Project Health Service
              |
              v
-          Worker
+           Worker
              |
-      +------+------+------+
-      |      |      |      |
-     Git   Codex   npm   Gradle ...
+      Git / Codex / build tools
 ```
 
-Never call shell commands directly from React components.
+React components must not own raw shell behavior.
 
 Bad:
 
 ```ts
-// UI component
-await exec("git status")
+await exec("git rebase main")
 ```
 
 Good:
 
 ```ts
-await projectService.getRepositoryStatus(projectId)
+await integrationService.integrateTask(taskId)
 ```
-
-The service may delegate to a local or remote worker.
 
 ---
 
-## Suggested repository structure
+# Git rules
 
-This may evolve, but prefer clear boundaries.
+Use the installed `git` executable initially.
+
+Wrap Git behavior behind a dedicated service.
+
+Never:
+
+- scatter Git shell commands across UI code
+- assume the integration branch is always `main`
+- assume one OS path format
+- interpolate untrusted values into shell strings
+- delete recoverable branches/worktrees before successful integration
+
+Prefer command + argument arrays.
+
+---
+
+# Worktree rules
+
+AI implementation tasks use isolated branches/worktrees.
+
+Typical lifecycle:
 
 ```text
-orchestr/
-├── apps/
-│   └── desktop/
-│       ├── src/                  # React + TypeScript UI
-│       └── src-tauri/            # Tauri host
-│
-├── crates/
-│   ├── orchestr-core/            # domain/application logic
-│   ├── orchestr-db/              # SQLite persistence
-│   ├── orchestr-git/             # Git abstraction
-│   ├── orchestr-worker/          # worker runtime
-│   ├── orchestr-protocol/        # worker/control-plane protocol
-│   └── orchestr-platform/        # OS-specific worker adapters
-│
-├── docs/
-├── AGENTS.md
-└── MILESTONES.md
+READY
+  |
+start task
+  |
+create branch
+  |
+create worktree
+  |
+run agent
+  |
+commit
+  |
+implementation validation
+  |
+REVIEW
 ```
 
-If the first implementation keeps more logic inside `src-tauri`, preserve the same conceptual boundaries even before extracting crates.
+Parallel implementation is allowed because worktrees isolate filesystem state.
 
----
-
-## Git rules
-
-For the early milestones:
-
-- use the installed `git` executable
-- wrap Git operations in a dedicated service
-- never scatter Git shell commands throughout the codebase
-- validate paths before invoking commands
-- never assume the default branch is named `master`
-- prefer explicit repository/workspace context
-
-Initial supported operations:
-
-- initialize repository
-- validate repository
-- current branch
-- working-tree status
-- latest commit
-- basic commit history
-
-Later:
-
-- branches
-- worktrees
-- diffs
-- commit creation
-- merge/rebase
-- remote operations
-- pull requests
-
----
-
-## Worktree rules
-
-Worktrees are not part of the first MVP.
-
-When introduced:
-
-- one active AI implementation task should normally receive its own branch
-- parallel agent tasks must use isolated worktrees
-- branch/worktree ownership must be persisted
-- failed runs must not automatically delete worktrees
-- review must operate on the task branch/diff
-- cleanup must be explicit and safe
-
-Suggested naming:
+Suggested branch naming:
 
 ```text
 task/TASK-42-short-description
 ```
 
-Do not hard-code naming assumptions into the UI.
+Do not make UI behavior depend on exact branch naming.
 
 ---
 
-## Kanban rules
+# Critical integration invariant
 
-Initial columns:
+> **A task is DONE only when its accepted changes exist on the project's integration branch and that branch is healthy.**
 
-1. Backlog
-2. Todo
-3. In Progress
-4. Review
-5. Done
+A task must not be Done merely because:
 
-The initial board should support:
+- the agent finished
+- commits exist
+- review was approved
+- merge command returned successfully but health validation failed
 
-- create task
-- edit task
-- delete task
-- reorder within a column
-- drag between columns
-- persistence across app restart
+---
 
-Do not implement configurable columns before the core board is stable.
+# Main / integration branch health invariant
 
-Important invariant:
+The integration branch must remain healthy.
 
-> An AI worker must not directly declare its own implementation fully complete.
-
-Expected future workflow:
+At minimum:
 
 ```text
-TODO
-  -> IN_PROGRESS
-  -> REVIEW
-  -> DONE
+merge
+  |
+integration validation
+  |
+healthy?
+ /    \
+yes    no
+ |      |
+DONE   BROKEN / recovery
 ```
 
-The transition from `REVIEW` to `DONE` is performed by a human or architect/reviewer role.
+If project health is `broken`:
+
+- do not continue automatic integration
+- surface the failure prominently
+- preserve integration history
+- create/recommend repair work
+- avoid scheduling tasks that depend on the broken state when unsafe
+
+Project header should eventually show:
+
+```text
+main
+HEALTHY
+
+Build      pass
+Tests      pass
+Typecheck  pass
+Last merge TASK-42
+```
 
 ---
 
-## Persistence
+# Integration Queue
 
-Use SQLite for Orchestr metadata.
+Approved tasks enter a serialized integration queue.
 
-The database stores:
+Implementation may be parallel.
 
-- projects
-- workspaces
-- tasks
-- task ordering
-- workers
-- agents
-- runs
-- events
-- settings
+Integration is serialized per project.
 
-Project source code remains in user-owned Git repositories.
+```text
+TASK-41 ----\
+TASK-42 -----+--> Integration Queue --> integration branch
+TASK-43 ----/
+```
 
-Do not store Git repository contents inside SQLite.
-
-Prefer migrations from the beginning.
+Only one integration attempt may mutate a project's integration branch at a time.
 
 ---
 
-## Worker architecture
+# Integration workflow
 
-The worker is a general execution runtime, not a Codex-specific service.
+Expected lifecycle:
 
-It should eventually support:
+```text
+REVIEW
+  |
+approved
+  v
+APPROVED
+  |
+queue
+  v
+INTEGRATING
+  |
+  +--> success + healthy --------> DONE
+  |
+  +--> conflict -----------------> BLOCKED
+  |
+  +--> validation failure -------> IN_PROGRESS / BLOCKED
+  |
+  +--> infrastructure failure ---> retryable failure
+```
 
-- execute command
-- stream stdout/stderr
-- cancellation
-- process-tree termination
+Recommended process:
+
+```text
+1. acquire project integration lock
+2. verify task branch/worktree exists
+3. refresh integration branch
+4. update task branch against latest integration branch
+5. detect conflicts
+6. run integration validation
+7. integrate using configured merge strategy
+8. verify integration branch health
+9. persist integration result
+10. cleanup worktree
+11. cleanup branch when safe
+12. mark task DONE
+13. re-evaluate dependent tasks
+14. release integration lock
+```
+
+---
+
+# Merge strategy
+
+Use one explicit project merge strategy.
+
+Initial recommended default:
+
+**squash merge**
+
+Reason:
+
+AI task branches may contain noisy iterative commits.
+
+Example:
+
+```text
+task branch:
+- implement
+- fix test
+- retry
+- lint
+- final fix
+
+squash ->
+
+main:
+TASK-42 Add OAuth callback
+```
+
+Orchestr should still retain the original run/commit history in metadata/logs.
+
+Support other strategies later:
+
+- merge commit
+- rebase + fast-forward
+- PR-based integration
+
+---
+
+# Two-stage validation
+
+## Implementation validation
+
+Runs in the task worktree after implementation.
+
+Question:
+
+> Does the task work on its own branch?
+
+Typical:
+
+```text
+agent finishes
+  -> lint
+  -> typecheck
+  -> tests
+  -> build
+  -> REVIEW
+```
+
+## Integration validation
+
+Runs against the task updated onto the latest integration branch.
+
+Question:
+
+> Does it still work with everything that has already landed?
+
+Typical:
+
+```text
+APPROVED
+  -> update against latest integration branch
+  -> validation
+  -> merge
+  -> health check
+```
+
+Passing implementation validation does not imply integration validation will pass.
+
+---
+
+# Conflict handling
+
+Never silently discard changes.
+
+On conflict:
+
+- preserve branch
+- preserve worktree
+- persist conflicting files
+- mark task Blocked
+- expose manual resolution
+- allow agent-assisted resolution later
+- allow retry integration
+
+Example:
+
+```text
+TASK-42
+Integration blocked
+
+Conflicts:
+- src/auth/session.ts
+```
+
+---
+
+# Cleanup rules
+
+Cleanup occurs only after successful integration.
+
+Before Done, preserve:
+
+- task branch
+- task worktree
+- commits
+- run history
+- review history
+- integration history
+
+After successful integration:
+
+- remove task worktree
+- remove local task branch when safe
+- retain metadata/history
+
+If merge succeeds but cleanup fails, do not pretend integration failed.
+
+Treat cleanup as recoverable maintenance work.
+
+---
+
+# Revert rules
+
+Integrated changes may later prove incorrect.
+
+Support a future explicit Revert action.
+
+Revert must:
+
+- create normal Git history
+- not rewrite shared history
+- preserve link to original task/integration
+- update project health
+- optionally create a follow-up repair task
+
+Do not silently reset the integration branch.
+
+---
+
+# Quality gates
+
+Project validation is project-defined.
+
+Example:
+
+```yaml
+validation:
+  - npm run lint
+  - npm run typecheck
+  - npm test
+  - npm run build
+```
+
+Do not assume Node.
+
+Other examples:
+
+```text
+./gradlew test
+cargo test
+pytest
+dotnet test
+xcodebuild ...
+```
+
+Validation output must:
+
+- stream through worker events
+- persist result
+- attach to Run or Integration Attempt
+- distinguish implementation validation from integration validation
+
+---
+
+# WIP limits and backpressure
+
+Orchestr should optimize flow, not maximum concurrency.
+
+Support WIP limits at least conceptually:
+
+```text
+In Progress   max 4
+Review        max 3
+Approved      max 3
+Integrating   max 1
+```
+
+If downstream stages are congested, the scheduler should stop launching low-priority new work.
+
+Example:
+
+```text
+Review queue overloaded
+    |
+stop starting extra implementation
+```
+
+This prevents large amounts of unfinished AI-generated work from accumulating.
+
+---
+
+# Project progress
+
+Project progress must be based primarily on integrated outcomes.
+
+Useful progress signals:
+
+- milestone completion
+- epic completion
+- Done tasks
+- Ready tasks
+- Blocked tasks
+- critical/high-priority unfinished work
+- integration queue length
+- project health
+- dependency chain progress
+
+Do not present:
+
+- agents running
+- commands executed
+- tokens consumed
+
+as the primary measure of progress.
+
+Example:
+
+```text
+Remote Workers Milestone
+
+17 / 27 tasks Done
+4 Ready
+3 In Progress
+2 Review
+1 Blocked
+
+Integration queue: 1
+Main: HEALTHY
+```
+
+---
+
+# Worker architecture
+
+The Worker is a general execution runtime, not a Codex-specific service.
+
+It should support:
+
+- process execution
 - working directory
 - environment variables
+- stdout/stderr streaming
+- cancellation
+- process-tree termination
 - capability detection
 - filesystem operations required by Orchestr
 - Git operations
-- PTY support when needed
+- PTY where needed
 
-Conceptually:
-
-```rust
-trait Platform {
-    fn spawn(...);
-    fn kill_process_tree(...);
-    fn system_info(...);
-    fn detect_tools(...);
-}
-```
-
-OS-specific code should be limited to platform concerns such as:
-
-- paths
-- process signals
-- shell behavior
-- PTY/ConPTY
-- service/daemon installation
-- tool discovery differences
+Platform-specific differences belong behind an adapter.
 
 ---
 
-## Worker protocol
+# AI provider rules
 
-The local implementation may initially use Tauri commands directly.
-
-Design the application layer so a remote worker can later use the same conceptual API.
-
-Future protocol direction:
-
-```text
-Control Plane
-   |
- HTTPS / WebSocket
-   |
- Worker
-```
-
-Expected concepts:
-
-- register worker
-- heartbeat
-- capabilities
-- create job
-- cancel job
-- job status
-- streamed job events
-
-Possible event types:
-
-```text
-job.started
-job.completed
-job.failed
-command.started
-command.output
-command.completed
-file.modified
-git.branch.created
-git.commit.created
-validation.started
-validation.failed
-validation.passed
-```
-
-Do not expose arbitrary unauthenticated remote command execution.
-
----
-
-## AI provider integration
-
-Provider integration must be behind an abstraction.
+Provider integration stays abstracted.
 
 Conceptually:
 
@@ -578,126 +1174,140 @@ interface AgentProvider {
 }
 ```
 
-Start with Codex.
+Codex is the first provider.
 
-Future providers may include Claude, Gemini, or local runtimes.
-
-Do not hard-code Codex assumptions into the task model.
+Do not put Codex-specific assumptions into core task/project types.
 
 ---
 
-## Codex authentication
+# Codex authentication
 
 Codex authentication belongs to the worker.
 
-For local workers:
+Orchestr may:
 
-- detect whether Codex is installed
-- detect authentication status
-- allow the user to launch the official Codex login flow
-- re-check status after login
+- detect Codex
+- detect version
+- detect authentication
+- launch official login
+- launch device/headless login later
+- disconnect
+- test readiness
 
-For headless/remote workers:
+Do not ask for the user's ChatGPT password.
 
-- use the official device/browser authentication mechanism supported by Codex
-- surface the login instructions/code in Orchestr
-- never ask the user for their ChatGPT password
-
-Do not persist raw OAuth access/refresh tokens in Orchestr's database.
+Do not store raw Codex OAuth tokens.
 
 ---
 
-## Security
+# Security
 
-Treat workers as privileged executors.
+Workers are privileged executors.
 
 Rules:
 
-- never execute user-controlled command strings without structured validation where possible
-- avoid shell interpolation
-- pass command + argument arrays rather than concatenated shell strings
 - validate workspace paths
-- prevent path traversal outside allowed workspaces for automated operations
-- log privileged actions
-- remote workers require authenticated/encrypted transport
-- secrets must not be written to task logs
-- redact known secret patterns where practical
-- destructive Git/filesystem actions require explicit application-level intent
-
-The MVP may trust the local user, but architecture should not make remote security impossible later.
+- avoid shell interpolation
+- use command argument arrays
+- prevent path traversal
+- log privileged operations
+- redact secrets where practical
+- require authenticated encrypted remote worker transport
+- never expose unauthenticated arbitrary command execution
+- treat integration and revert operations as privileged actions
 
 ---
 
-## Testing
+# Testing priorities
 
-Prefer tests around domain behavior rather than implementation details.
-
-Priority areas:
+High-priority service-level tests:
 
 1. task state transitions
-2. task ordering
-3. project/workspace persistence
-4. Git repository detection
-5. command construction
-6. worker capability detection
-7. run state transitions
-8. failure/retry behavior
+2. Ready eligibility
+3. dependency satisfaction
+4. dependency cycle prevention
+5. project/workspace persistence
+6. task priority ordering
+7. worktree ownership
+8. run state vs task state
+9. Review -> Approved
+10. integration queue ordering
+11. per-project integration lock
+12. stale branch update behavior
+13. conflict handling
+14. implementation validation
+15. integration validation
+16. merge strategy
+17. project health changes
+18. cleanup after integration
+19. merge-success/cleanup-failure recovery
+20. Done -> dependent task Ready
+21. WIP/backpressure scheduling
+22. process cancellation
+23. worker capability detection
 
-For UI:
-
-- test important board interactions
-- test drag/drop state changes where practical
-- avoid brittle screenshot-heavy test suites early
-
----
-
-## Code quality
-
-- TypeScript strict mode
-- Rust warnings addressed
-- small focused modules
-- explicit error types where useful
-- no silent failures
-- errors shown to users with actionable context
-- keep domain logic outside React components
-- keep OS-specific logic outside generic worker code
-- avoid premature abstractions that are not connected to a milestone
-
-Prefer clarity over cleverness.
+Git/integration tests should use temporary repositories.
 
 ---
 
-## Scope discipline
+# Scope discipline
 
-Do not jump ahead to autonomous multi-agent orchestration while earlier milestones are incomplete.
+Current next milestone:
 
-In particular, the following are deliberately **not MVP features**:
+**M13 — Quality Gates + Project Health**
 
-- autonomous task planning
-- dynamic task dependencies
+Do not prioritize:
+
 - architect agent
-- automatic merging
-- cloud sync
-- teams
-- GitHub integration
+- autonomous planning
 - remote workers
-- multi-provider scheduling
-- configurable Kanban workflows
+- cloud sync
+- GitHub integration
 
-Build the local project + Git + Kanban foundation first.
+before accepted work can reliably land on a healthy integration branch.
+
+Immediately after integration correctness, prioritize:
+
+1. quality gates + project health
+2. dependencies + Ready/Blocked
+3. milestones/epics + project progress
+4. architect agent
+5. parallel scheduling + WIP/backpressure
+6. failure recovery
 
 ---
 
-## Definition of a good change
+# Definition of a good change
 
 A change is good when it:
 
 - advances the active milestone
-- preserves architecture boundaries
-- has a clear user-visible purpose
-- does not create unnecessary future lock-in
-- includes appropriate tests
-- does not introduce provider-specific logic into core domain objects
+- improves integrated project progress
+- keeps UI/domain/Git/worker boundaries clear
+- preserves history
+- remains recoverable under failure
+- does not delete recoverable work prematurely
+- has useful tests
+- keeps provider-specific logic out of core domain types
 - leaves the project buildable
+- does not trade project health for agent throughput
 
-If a requested change conflicts with these principles, prefer the simplest implementation that preserves the long-term architecture.
+The near-term system goal is:
+
+```text
+Task
+  -> Ready
+  -> Agent Run
+  -> Worktree
+  -> Implementation Validation
+  -> Review
+  -> Approval
+  -> Integration Queue
+  -> Latest Integration Branch
+  -> Integration Validation
+  -> Merge
+  -> Main Healthy
+  -> Cleanup
+  -> Done
+  -> Unblock Next Work
+```

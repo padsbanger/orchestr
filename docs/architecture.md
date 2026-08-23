@@ -75,6 +75,12 @@ worker. It persists and emits each output record, while the React task inspector
 uses typed run services to display live and historical output and offer
 cancellation. No React component constructs or runs a command directly.
 
+The task prompt includes a completion contract: after validation, Codex must
+commit task-related changes on its isolated branch and leave that worktree
+clean. The host verifies this after a successful provider process; uncommitted
+changes cause the run to fail and leave the task In Progress instead of moving
+it to Review.
+
 ## M9 execution timeline
 
 Each run owns an ordered, persisted event stream. Provider JSONL records are
@@ -106,6 +112,128 @@ Worktree removal is an explicit user action. It uses `git worktree remove`
 without force, so uncommitted changes remain protected; the branch is retained
 for the subsequent review workflow. Tasks that still own a worktree cannot be
 deleted, preventing an untracked checkout from being orphaned.
+
+## M11 review workflow
+
+Review is a human-controlled task stage. When a task enters Review, the task
+inspector loads a typed `TaskReview` through the frontend review service and a
+Tauri command. `orchestr-git` reads the task worktree to provide its branch,
+commits relative to the project's default branch, a bounded committed and
+uncommitted diff, and changed-file metadata. Existing persisted run events
+remain visible in the same inspector, so review does not depend on the
+primary workspace's repository inspector.
+
+The task inspector provides explicit human actions to request changes or
+approve the review. Requesting changes returns the task to In Progress while
+preserving its branch and worktree. The worktree can also be opened in the
+native file manager; the Tauri host verifies that it is the managed worktree
+owned by the requested task before launching the platform file manager.
+
+Approval is deliberately separate from Git integration. The legacy M11
+approval transition currently records `Review -> Done`; M12 must migrate that
+temporary transition to `Review -> Approved` and introduce a serialized,
+observable integration operation. A task may be considered Done only after
+its accepted branch has been integrated into the project's configured default
+branch. Until that succeeds, its branch, worktree, commits, and run history
+must remain available for inspection and recovery.
+
+## M12 integration queue
+
+Approval now creates a persisted, queued `IntegrationAttempt` and moves the
+task from Review to Approved. The database owns attempt history, queue order,
+and a per-project integration lock; only the queue processor may move a task
+through Integrating to Done. Failed attempts return the task to Approved for a
+retry, while Git conflicts move it to Blocked and preserve the branch and
+worktree for manual or later agent-assisted resolution.
+
+The Tauri integration command claims the next attempt under that lock, then
+asks `orchestr-git` to verify clean primary and task worktrees, rebase the task
+branch onto the current configured integration branch, and squash merge it.
+Git conflicts are returned as structured results rather than silently resolved.
+After a merge, the result and commit are persisted before best-effort cleanup
+removes the task worktree and branch. A cleanup failure remains visible on the
+successful attempt and never undoes the integrated commit.
+
+The board exposes the queue in a dedicated inspector with its status, errors,
+and retry action. The primary repository inspector reflects a successful merge
+because the integration happens in the primary workspace. Validation gates and
+project-health checks remain M13 responsibilities; M12 establishes the
+serialized and recoverable integration boundary they will use.
+
+## Post-M12 workflow architecture (planned)
+
+The system's primary measure of progress is a healthy integration branch, not
+agent activity. The intended flow is:
+
+```text
+Milestone / Epic -> Task -> READY -> IN_PROGRESS -> REVIEW -> APPROVED
+    -> integration queue -> integration + validation -> healthy branch -> DONE
+    -> dependent tasks re-evaluated as READY
+```
+
+The application/domain layer will own this state machine and expose typed
+services for readiness, dependencies, integration, health, blockers, and
+project knowledge. React will render and invoke those services; it will not
+derive eligibility, manipulate Git, or decide integration policy itself.
+
+### Readiness, dependencies, and flow control
+
+`READY` and `BLOCKED` will be first-class task states. A task is Ready only
+when it has sufficient specification and context, no unresolved project
+blocker, a suitable execution environment, and every dependency is truly
+Done. Reaching Review, approval, or a completed agent run never satisfies a
+dependency. Cycles must be rejected, and a successful integration must trigger
+re-evaluation of affected dependent tasks.
+
+Priority (`critical`, `high`, `normal`, `low`) determines ordering among
+eligible work; it does not bypass readiness. WIP limits and downstream
+backpressure will prevent new implementation work from overwhelming Review or
+the single-task integration stage.
+
+### Integration queue and branch health
+
+M12 provides persisted integration attempts and a serialized per-project
+queue. Exactly one attempt may mutate a project's configured integration
+branch at a time. The integration service acquires the project lock,
+updates the task branch against the latest integration branch, detects and
+persists conflicts, runs integration validation, performs the configured merge,
+records the outcome, and then releases the lock.
+
+The initial merge strategy is squash merge: task branches may contain
+iterative commits, while the integration branch receives one clear task-level
+commit. Original branch and run history remain available as Orchestr metadata.
+After the merge, a project-health service records whether the integration
+branch is healthy. Only a successful merge followed by a healthy result can
+mark a task Done, unblock dependent work, and schedule cleanup. A merge that
+leaves the branch unhealthy is a recovery condition, not successful progress.
+
+Validation has two explicit contexts: implementation validation in the task
+worktree before Review, and integration validation after the task is updated
+against the current integration branch. Both execute through the worker, stream
+events, and persist their results against the relevant run or integration
+attempt.
+
+### Planning, blockers, and durable project context
+
+Milestones and epics will sit above tasks to express outcomes rather than only
+activity. Project progress views will emphasize integrated Done work, Ready
+work, blockers, queue depth, priority, and integration-branch health.
+
+Project-level blockers and task-level `NEEDS_INPUT` records will stop unsafe
+or speculative execution. An input request retains its question, requesting
+agent/run, answer, and resolution timestamps. Architecture decisions and other
+durable project memory will be stored as ADR-style records so relevant,
+accepted context can be inspected and supplied to future agent runs.
+
+### Recovery and cleanup
+
+Before successful integration, branches, worktrees, review history, run logs,
+and integration attempts remain recoverable. Conflicts move work to an
+actionable blocked state; infrastructure failures are retryable. Cleanup is
+best-effort maintenance after an integrated, healthy result—its failure must
+not rewrite history or claim that an already successful merge failed. Future
+reverts will create normal Git history, retain the link to the original
+integration, and update project health rather than resetting shared history.
 
 ## Planned extraction points
 

@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("../migrations/0006_runs.sql")),
     (7, include_str!("../migrations/0007_run_events.sql")),
     (8, include_str!("../migrations/0008_task_worktrees.sql")),
+    (9, include_str!("../migrations/0009_integration_queue.sql")),
 ];
 
 pub struct Database {
@@ -69,6 +70,9 @@ pub enum TaskStatus {
     Todo,
     InProgress,
     Review,
+    Approved,
+    Integrating,
+    Blocked,
     Done,
 }
 
@@ -79,6 +83,9 @@ impl TaskStatus {
             "todo" => Some(Self::Todo),
             "in_progress" => Some(Self::InProgress),
             "review" => Some(Self::Review),
+            "approved" => Some(Self::Approved),
+            "integrating" => Some(Self::Integrating),
+            "blocked" => Some(Self::Blocked),
             "done" => Some(Self::Done),
             _ => None,
         }
@@ -90,6 +97,9 @@ impl TaskStatus {
             Self::Todo => "todo",
             Self::InProgress => "in_progress",
             Self::Review => "review",
+            Self::Approved => "approved",
+            Self::Integrating => "integrating",
+            Self::Blocked => "blocked",
             Self::Done => "done",
         }
     }
@@ -103,6 +113,57 @@ impl TaskStatus {
             )
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrationStatus {
+    Queued,
+    Integrating,
+    Conflict,
+    Merged,
+    Failed,
+}
+
+impl IntegrationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Integrating => "integrating",
+            Self::Conflict => "conflict",
+            Self::Merged => "merged",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "queued" => Ok(Self::Queued),
+            "integrating" => Ok(Self::Integrating),
+            "conflict" => Ok(Self::Conflict),
+            "merged" => Ok(Self::Merged),
+            "failed" => Ok(Self::Failed),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                format!("Unknown integration status: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationAttempt {
+    pub id: String,
+    pub task_id: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub status: IntegrationStatus,
+    pub queue_position: i64,
+    pub merge_commit: Option<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,7 +440,10 @@ impl Database {
                  WHEN 'todo' THEN 1
                  WHEN 'in_progress' THEN 2
                  WHEN 'review' THEN 3
-                 WHEN 'done' THEN 4
+                 WHEN 'approved' THEN 4
+                 WHEN 'integrating' THEN 5
+                 WHEN 'blocked' THEN 6
+                 WHEN 'done' THEN 7
              END, position ASC",
         )?;
         let records = statement
@@ -587,7 +651,7 @@ impl Database {
         transaction.commit()?;
 
         let run = self
-            .run_by_id(&new_run.id)?
+            .get_run(&new_run.id)?
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
         let task = self
             .task_by_id(&new_run.task_id)?
@@ -720,7 +784,7 @@ impl Database {
         transaction.commit()?;
 
         let run = self
-            .run_by_id(run_id)?
+            .get_run(run_id)?
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
         let task = self
             .task_by_id(&task_id)?
@@ -734,9 +798,21 @@ impl Database {
         target_status: TaskStatus,
         target_position: usize,
     ) -> Result<Option<Task>> {
+        if matches!(
+            target_status,
+            TaskStatus::Approved | TaskStatus::Integrating | TaskStatus::Blocked | TaskStatus::Done
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let Some((project_id, source_status)) = self.task_location(id)? else {
             return Ok(None);
         };
+        if matches!(
+            source_status,
+            TaskStatus::Approved | TaskStatus::Integrating | TaskStatus::Blocked | TaskStatus::Done
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let transaction = self.connection.transaction()?;
         move_task_in_transaction(
             &transaction,
@@ -750,12 +826,243 @@ impl Database {
         self.task_by_id(id)
     }
 
-    pub fn approve_task_review(&mut self, id: &str) -> Result<Option<Task>> {
-        self.transition_task_from_review(id, TaskStatus::Done)
+    pub fn approve_task_review(&mut self, id: &str, attempt_id: &str) -> Result<Option<Task>> {
+        let transaction = self.connection.transaction()?;
+        let task = transaction
+            .query_row(
+                "SELECT project_id, status, branch FROM tasks WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((project_id, status, source_branch)) = task else {
+            return Ok(None);
+        };
+        if status != TaskStatus::Review.as_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let source_branch = source_branch.ok_or(rusqlite::Error::InvalidQuery)?;
+        let target_branch: String = transaction.query_row(
+            "SELECT default_branch FROM projects WHERE id = ?1",
+            [&project_id],
+            |row| row.get(0),
+        )?;
+        let queue_position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(queue_position) + 1, 0)
+             FROM integration_attempts
+             WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&project_id],
+            |row| row.get(0),
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            id,
+            &project_id,
+            TaskStatus::Review,
+            TaskStatus::Approved,
+            usize::MAX,
+        )?;
+        transaction.execute(
+            "INSERT INTO integration_attempts (id, task_id, source_branch, target_branch, status, queue_position)
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
+            params![attempt_id, id, source_branch, target_branch, queue_position],
+        )?;
+        transaction.commit()?;
+        self.task_by_id(id)
     }
 
     pub fn request_task_changes(&mut self, id: &str) -> Result<Option<Task>> {
         self.transition_task_from_review(id, TaskStatus::InProgress)
+    }
+
+    pub fn list_integration_attempts(&self, project_id: &str) -> Result<Vec<IntegrationAttempt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT attempts.id, attempts.task_id, attempts.source_branch, attempts.target_branch,
+                    attempts.status, attempts.queue_position, attempts.merge_commit, attempts.error,
+                    attempts.created_at, attempts.started_at, attempts.completed_at
+             FROM integration_attempts AS attempts
+             JOIN tasks ON tasks.id = attempts.task_id
+             WHERE tasks.project_id = ?1
+             ORDER BY CASE attempts.status
+                 WHEN 'integrating' THEN 0
+                 WHEN 'queued' THEN 1
+                 WHEN 'conflict' THEN 2
+                 WHEN 'failed' THEN 3
+                 WHEN 'merged' THEN 4
+             END, attempts.queue_position ASC, attempts.created_at DESC",
+        )?;
+        let attempts = statement
+            .query_map([project_id], integration_attempt_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(attempts)
+    }
+
+    pub fn get_integration_attempt(&self, id: &str) -> Result<Option<IntegrationAttempt>> {
+        self.integration_attempt_by_id(id)
+    }
+
+    pub fn claim_next_integration(
+        &mut self,
+        project_id: &str,
+    ) -> Result<Option<IntegrationAttempt>> {
+        let transaction = self.connection.transaction()?;
+        let locked: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_integration_locks WHERE project_id = ?1)",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if locked {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let attempt = transaction
+            .query_row(
+                "SELECT attempts.id, attempts.task_id
+                 FROM integration_attempts AS attempts
+                 JOIN tasks ON tasks.id = attempts.task_id
+                 WHERE tasks.project_id = ?1 AND attempts.status = 'queued' AND tasks.status = 'approved'
+                 ORDER BY attempts.queue_position ASC, attempts.created_at ASC
+                 LIMIT 1",
+                [project_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((attempt_id, task_id)) = attempt else {
+            return Ok(None);
+        };
+        transaction.execute(
+            "INSERT INTO project_integration_locks (project_id, attempt_id) VALUES (?1, ?2)",
+            params![project_id, attempt_id],
+        )?;
+        transaction.execute(
+            "UPDATE integration_attempts SET status = 'integrating', started_at = CURRENT_TIMESTAMP,
+             completed_at = NULL, error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [&attempt_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            project_id,
+            TaskStatus::Approved,
+            TaskStatus::Integrating,
+            usize::MAX,
+        )?;
+        transaction.commit()?;
+        self.integration_attempt_by_id(&attempt_id)
+    }
+
+    pub fn block_integration(&mut self, attempt_id: &str, error: &str) -> Result<Option<Task>> {
+        self.finish_integration(
+            attempt_id,
+            IntegrationStatus::Conflict,
+            TaskStatus::Blocked,
+            None,
+            error,
+        )
+    }
+
+    pub fn fail_integration(&mut self, attempt_id: &str, error: &str) -> Result<Option<Task>> {
+        self.finish_integration(
+            attempt_id,
+            IntegrationStatus::Failed,
+            TaskStatus::Approved,
+            None,
+            error,
+        )
+    }
+
+    pub fn complete_integration(
+        &mut self,
+        attempt_id: &str,
+        merge_commit: &str,
+    ) -> Result<Option<Task>> {
+        self.finish_integration(
+            attempt_id,
+            IntegrationStatus::Merged,
+            TaskStatus::Done,
+            Some(merge_commit),
+            "",
+        )
+    }
+
+    pub fn record_integration_cleanup_error(
+        &mut self,
+        attempt_id: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE integration_attempts SET error = ?1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status = 'merged'",
+            params![error, attempt_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn retry_integration(
+        &mut self,
+        attempt_id: &str,
+        retry_attempt_id: &str,
+    ) -> Result<Option<Task>> {
+        let transaction = self.connection.transaction()?;
+        let attempt = transaction
+            .query_row(
+                "SELECT attempts.task_id, attempts.source_branch, attempts.target_branch, attempts.status,
+                        tasks.project_id, tasks.status
+                 FROM integration_attempts AS attempts
+                 JOIN tasks ON tasks.id = attempts.task_id
+                 WHERE attempts.id = ?1",
+                [attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((task_id, source_branch, target_branch, status, project_id, task_status)) =
+            attempt
+        else {
+            return Ok(None);
+        };
+        if !matches!(status.as_str(), "conflict" | "failed") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let queue_position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(queue_position) + 1, 0)
+             FROM integration_attempts
+             WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            [&project_id],
+            |row| row.get(0),
+        )?;
+        if task_status == TaskStatus::Blocked.as_str() {
+            move_task_in_transaction(
+                &transaction,
+                &task_id,
+                &project_id,
+                TaskStatus::Blocked,
+                TaskStatus::Approved,
+                usize::MAX,
+            )?;
+        } else if task_status != TaskStatus::Approved.as_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "INSERT INTO integration_attempts (id, task_id, source_branch, target_branch, status, queue_position)
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
+            params![retry_attempt_id, task_id, source_branch, target_branch, queue_position],
+        )?;
+        transaction.commit()?;
+        self.task_by_id(&task_id)
     }
 
     fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
@@ -817,6 +1124,77 @@ impl Database {
             .optional()
     }
 
+    fn integration_attempt_by_id(&self, id: &str) -> Result<Option<IntegrationAttempt>> {
+        self.connection
+            .query_row(
+                "SELECT id, task_id, source_branch, target_branch, status, queue_position, merge_commit,
+                        error, created_at, started_at, completed_at
+                 FROM integration_attempts WHERE id = ?1",
+                [id],
+                integration_attempt_from_row,
+            )
+            .optional()
+    }
+
+    fn finish_integration(
+        &mut self,
+        attempt_id: &str,
+        integration_status: IntegrationStatus,
+        task_status: TaskStatus,
+        merge_commit: Option<&str>,
+        error: &str,
+    ) -> Result<Option<Task>> {
+        let transaction = self.connection.transaction()?;
+        let attempt = transaction
+            .query_row(
+                "SELECT attempts.task_id, tasks.project_id, tasks.status
+                 FROM integration_attempts AS attempts
+                 JOIN tasks ON tasks.id = attempts.task_id
+                 WHERE attempts.id = ?1 AND attempts.status = 'integrating'",
+                [attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((task_id, project_id, current_task_status)) = attempt else {
+            return Ok(None);
+        };
+        if current_task_status != TaskStatus::Integrating.as_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "UPDATE integration_attempts
+             SET status = ?1, merge_commit = ?2, error = ?3, completed_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?4",
+            params![
+                integration_status.as_str(),
+                merge_commit,
+                (!error.is_empty()).then_some(error),
+                attempt_id
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM project_integration_locks WHERE attempt_id = ?1",
+            [attempt_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            &project_id,
+            TaskStatus::Integrating,
+            task_status,
+            usize::MAX,
+        )?;
+        transaction.commit()?;
+        self.task_by_id(&task_id)
+    }
+
     fn task_by_id(&self, id: &str) -> Result<Option<Task>> {
         self.connection
             .query_row(
@@ -829,7 +1207,7 @@ impl Database {
             .optional()
     }
 
-    fn run_by_id(&self, id: &str) -> Result<Option<Run>> {
+    pub fn get_run(&self, id: &str) -> Result<Option<Run>> {
         let mut run = self
             .connection
             .query_row(
@@ -935,6 +1313,22 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         position: row.get(12)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+    })
+}
+
+fn integration_attempt_from_row(row: &rusqlite::Row<'_>) -> Result<IntegrationAttempt> {
+    Ok(IntegrationAttempt {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        source_branch: row.get(2)?,
+        target_branch: row.get(3)?,
+        status: IntegrationStatus::from_database(row.get(4)?)?,
+        queue_position: row.get(5)?,
+        merge_commit: row.get(6)?,
+        error: row.get(7)?,
+        created_at: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
     })
 }
 
@@ -1071,8 +1465,8 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, ProjectDeletion, RunStatus,
-        TaskStatus, TaskUpdate,
+        AgentUpdate, Database, IntegrationStatus, NewAgent, NewProject, NewRun, NewTask,
+        ProjectDeletion, RunStatus, TaskStatus, TaskUpdate,
     };
     use std::{
         fs,
@@ -1358,6 +1752,13 @@ mod tests {
         database
             .move_task("task-1", TaskStatus::Todo, 0)
             .expect("task moves");
+        database
+            .assign_task_worktree(
+                "task-1",
+                "task/run",
+                "C:/work/.orchestr-worktrees/project-1/task-1",
+            )
+            .expect("task worktree assigns");
 
         let (run, started_task) = database
             .start_run(NewRun {
@@ -1402,12 +1803,50 @@ mod tests {
             .expect("task returns to review");
         assert_eq!(
             reopened
-                .approve_task_review("task-1")
+                .approve_task_review("task-1", "integration-1")
                 .expect("review approves")
                 .expect("task exists")
                 .status,
-            TaskStatus::Done
+            TaskStatus::Approved
         );
+        assert_eq!(
+            reopened
+                .list_integration_attempts("project-1")
+                .expect("integration attempts load")[0]
+                .status,
+            IntegrationStatus::Queued
+        );
+        let claimed = reopened
+            .claim_next_integration("project-1")
+            .expect("integration queue claims")
+            .expect("queued integration exists");
+        assert_eq!(claimed.status, IntegrationStatus::Integrating);
+        assert!(
+            reopened.claim_next_integration("project-1").is_err(),
+            "project integration lock rejects concurrent claim"
+        );
+        assert_eq!(
+            reopened
+                .block_integration(&claimed.id, "shared.txt")
+                .expect("integration conflict records")
+                .expect("task exists")
+                .status,
+            TaskStatus::Blocked
+        );
+        assert_eq!(
+            reopened
+                .retry_integration(&claimed.id, "integration-2")
+                .expect("integration retry queues")
+                .expect("task exists")
+                .status,
+            TaskStatus::Approved
+        );
+        let attempts = reopened
+            .list_integration_attempts("project-1")
+            .expect("integration history loads");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].status, IntegrationStatus::Queued);
+        assert_eq!(attempts[1].status, IntegrationStatus::Conflict);
         drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }
