@@ -8,6 +8,10 @@
 .task-detail-section h3 { display: flex; align-items: center; gap: 7px; margin: 0; color: #c9d0d4; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 600; letter-spacing: .035em; text-transform: uppercase; }
 .task-detail-section h3 span { color: #778289; }
 .task-detail-copy, .task-detail-empty, .task-detail-hint { margin: 0; color: #a8b2b7; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+.task-detail-copy code { display: block; margin-top: 4px; color: #9bc9e0; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-word; }
+.task-detail-label { display: block; color: #77828a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.task-worktree-path { color: #aebbc1 !important; }
+.task-worktree-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .task-detail-empty, .task-detail-hint { color: #77828a; font-size: 12px; }
 .criteria-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
 .criteria-list li { position: relative; padding: 9px 10px 9px 29px; border: 1px solid #30383d; background: #181c1f; color: #cbd3d7; font-size: 12px; line-height: 1.45; }
@@ -16,6 +20,7 @@
 .token-list li { max-width: 100%; padding: 5px 7px; border: 1px solid #344149; background: #171d20; }
 .token-list code { overflow: hidden; display: block; color: #9bc9e0; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .task-run-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 8px; }.task-detail-section h4 { margin: 8px 0 0; color: #88969d; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }.review-commit-list { margin: 0; padding: 0; border: 1px solid #2b3237; list-style: none; }.review-commit-list li { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; padding: 8px 9px; font-size: 11px; }.review-commit-list li + li { border-top: 1px solid #252b2f; }.review-commit-list code { color: #8dc4e1; font-family: "SFMono-Regular", Consolas, monospace; }.review-commit-list span { overflow: hidden; color: #bec8cd; text-overflow: ellipsis; white-space: nowrap; }.review-diff { max-height: 300px; overflow: auto; margin: 0; padding: 10px; border: 1px solid #2b3237; background: #101214; color: #bdc9cf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; line-height: 1.5; white-space: pre; }
 .task-run-summary { display: grid; gap: 9px; }
 .task-run-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: #77828a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
 .task-run-meta .run-status { padding: 4px 6px; border: 1px solid #4b5155; color: #aeb8bd; text-transform: uppercase; }

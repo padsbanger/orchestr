@@ -50,10 +50,27 @@ pub struct RepositoryDetails {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReview {
+    pub branch: String,
+    pub base_branch: String,
+    pub commits: Vec<CommitSummary>,
+    pub diff: String,
+    pub changed_files: Vec<ChangedFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FilePreview {
     Text { content: String, truncated: bool },
     Image { data: String, mime_type: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskWorktree {
+    pub branch: String,
+    pub path: PathBuf,
+    pub created_branch: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +95,37 @@ impl GitService {
         Self::inspect_repository(&path)
     }
 
+    pub fn create_initial_commit(path: &Path) -> Result<RepositorySummary> {
+        let root_path = repository_root(path)?;
+        if run_git_if_success(&root_path, ["rev-parse", "--verify", "HEAD"])?.is_some() {
+            return Err(GitError(
+                "The repository already has a commit and does not need initialization.".into(),
+            ));
+        }
+
+        let mut arguments: Vec<String> = Vec::new();
+        if run_git_if_success(&root_path, ["config", "--get", "user.name"])?
+            .and_then(non_empty)
+            .is_none()
+        {
+            arguments.extend(["-c".into(), "user.name=Orchestr".into()]);
+        }
+        if run_git_if_success(&root_path, ["config", "--get", "user.email"])?
+            .and_then(non_empty)
+            .is_none()
+        {
+            arguments.extend(["-c".into(), "user.email=orchestr@local".into()]);
+        }
+        arguments.extend([
+            "commit".into(),
+            "--allow-empty".into(),
+            "--message".into(),
+            "chore: initialize project".into(),
+        ]);
+        run_git(&root_path, arguments)?;
+        Self::inspect_repository(&root_path)
+    }
+
     pub fn inspect_repository(path: &Path) -> Result<RepositorySummary> {
         let root_path = repository_root(path)?;
         repository_summary(&root_path)
@@ -88,6 +136,44 @@ impl GitService {
         Ok(RepositoryDetails {
             summary: repository_summary(&root_path)?,
             recent_commits: recent_commits(&root_path)?,
+            changed_files: changed_files(&root_path)?,
+        })
+    }
+
+    pub fn task_review(path: &Path, base_branch: &str) -> Result<TaskReview> {
+        let root_path = repository_root(path)?;
+        let branch = run_git(&root_path, ["branch", "--show-current"])?;
+        let branch = non_empty(branch)
+            .ok_or_else(|| GitError("The task worktree is not on a branch.".into()))?;
+        run_git(&root_path, ["rev-parse", "--verify", base_branch])?;
+        let commits = commits_between(&root_path, base_branch)?;
+        let committed_diff = run_git(
+            &root_path,
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                &format!("{base_branch}...HEAD"),
+            ],
+        )?;
+        let working_diff = run_git(&root_path, ["diff", "--no-ext-diff", "--no-color", "HEAD"])?;
+        let mut diff = String::new();
+        if !committed_diff.is_empty() {
+            diff.push_str("# Committed branch changes\n\n");
+            diff.push_str(&committed_diff);
+        }
+        if !working_diff.is_empty() {
+            if !diff.is_empty() {
+                diff.push_str("\n\n");
+            }
+            diff.push_str("# Uncommitted worktree changes\n\n");
+            diff.push_str(&working_diff);
+        }
+        Ok(TaskReview {
+            branch,
+            base_branch: base_branch.to_owned(),
+            commits,
+            diff: truncate_diff(diff),
             changed_files: changed_files(&root_path)?,
         })
     }
@@ -168,6 +254,95 @@ impl GitService {
         }
         Ok(Some(FilePreview::Text { content, truncated }))
     }
+
+    pub fn create_task_worktree(
+        repository_path: &Path,
+        worktree_path: &Path,
+        branch: &str,
+        base_branch: &str,
+    ) -> Result<TaskWorktree> {
+        let root_path = repository_root(repository_path)?;
+        if run_git_if_success(&root_path, ["rev-parse", "--verify", "HEAD"])?.is_none() {
+            return Err(GitError(
+                "The repository has no commits yet. Create an initial commit before starting an isolated task run."
+                    .into(),
+            ));
+        }
+        if !worktree_path.is_absolute() {
+            return Err(GitError("The worktree path must be absolute.".into()));
+        }
+        if worktree_path.exists() {
+            return Err(GitError(format!(
+                "The task worktree path already exists: {}",
+                worktree_path.display()
+            )));
+        }
+        run_git(&root_path, ["check-ref-format", "--branch", branch])?;
+
+        let parent = worktree_path.parent().ok_or_else(|| {
+            GitError("The task worktree path must have a parent directory.".into())
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            GitError(format!(
+                "Unable to create the task worktree directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_exists = run_git_if_success(
+            &root_path,
+            ["show-ref", "--verify", "--quiet", branch_ref.as_str()],
+        )?
+        .is_some();
+        let mut arguments: Vec<std::ffi::OsString> = vec!["worktree".into(), "add".into()];
+        if !branch_exists {
+            arguments.extend(["-b".into(), branch.into()]);
+        }
+        arguments.push(git_argument_path(worktree_path).into());
+        arguments.push(if branch_exists {
+            branch.into()
+        } else {
+            base_branch.into()
+        });
+        run_git(&root_path, arguments)?;
+
+        Ok(TaskWorktree {
+            branch: branch.to_owned(),
+            path: canonical_directory(worktree_path)?,
+            created_branch: !branch_exists,
+        })
+    }
+
+    pub fn remove_task_worktree(repository_path: &Path, worktree_path: &Path) -> Result<()> {
+        let root_path = repository_root(repository_path)?;
+        let worktree_path = canonical_directory(worktree_path)?;
+        if worktree_path == root_path {
+            return Err(GitError(
+                "The primary repository checkout cannot be removed as a task worktree.".into(),
+            ));
+        }
+        let registered = run_git(&root_path, ["worktree", "list", "--porcelain"])?
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .filter_map(|path| path.canonicalize().ok())
+            .any(|path| path == worktree_path);
+        if !registered {
+            return Err(GitError(
+                "The path is not a registered worktree for this repository.".into(),
+            ));
+        }
+        run_git(
+            &root_path,
+            Vec::<std::ffi::OsString>::from([
+                "worktree".into(),
+                "remove".into(),
+                git_argument_path(&worktree_path),
+            ]),
+        )?;
+        Ok(())
+    }
 }
 
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
@@ -181,6 +356,22 @@ fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else {
         None
+    }
+}
+
+fn git_argument_path(path: &Path) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy();
+        if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{path}").into();
+        }
+        return path.strip_prefix(r"\\?\").unwrap_or(&path).into();
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.as_os_str().to_owned()
     }
 }
 
@@ -255,7 +446,26 @@ fn recent_commits(path: &Path) -> Result<Vec<CommitSummary>> {
         return Ok(Vec::new());
     };
 
-    Ok(output
+    Ok(parse_commits(&output))
+}
+
+fn commits_between(path: &Path, base_branch: &str) -> Result<Vec<CommitSummary>> {
+    let Some(output) = run_git_if_success(
+        path,
+        [
+            "log",
+            "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
+            &format!("{base_branch}..HEAD"),
+        ],
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_commits(&output))
+}
+
+fn parse_commits(output: &str) -> Vec<CommitSummary> {
+    output
         .lines()
         .filter_map(|line| {
             let mut fields = line.split('\u{1f}');
@@ -267,7 +477,7 @@ fn recent_commits(path: &Path) -> Result<Vec<CommitSummary>> {
                 subject: fields.next()?.to_owned(),
             })
         })
-        .collect())
+        .collect()
 }
 
 fn changed_files(path: &Path) -> Result<Vec<ChangedFile>> {
@@ -423,8 +633,39 @@ mod tests {
         );
         assert!(repository.is_clean);
         assert!(repository.latest_commit.is_none());
+        assert!(GitService::create_task_worktree(
+            &directory,
+            &std::env::temp_dir().join(format!("orchestr-git-empty-worktree-{nonce}")),
+            "task/empty-repository",
+            &repository.default_branch,
+        )
+        .expect_err("empty repository cannot create an isolated worktree")
+        .to_string()
+        .contains("no commits yet"));
+
+        let initialized =
+            GitService::create_initial_commit(&directory).expect("initial project commit creates");
+        assert_eq!(
+            initialized
+                .latest_commit
+                .as_ref()
+                .map(|commit| commit.subject.as_str()),
+            Some("chore: initialize project")
+        );
+        assert!(initialized.is_clean);
 
         fs::remove_dir_all(directory).expect("temporary directory removes");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_windows_extended_paths_before_passing_them_to_git() {
+        assert_eq!(
+            super::git_argument_path(std::path::Path::new(
+                r"\\?\C:\Users\konta\Projects\worktree"
+            )),
+            std::ffi::OsString::from(r"C:\Users\konta\Projects\worktree")
+        );
     }
 
     #[test]
@@ -490,6 +731,26 @@ mod tests {
             matches!(preview, FilePreview::Image { mime_type, .. } if mime_type == "image/png")
         );
         assert!(GitService::file_preview(&directory, "../outside.txt").is_err());
+
+        let worktree_path = std::env::temp_dir().join(format!("orchestr-git-worktree-{nonce}"));
+        let worktree = GitService::create_task_worktree(
+            &directory,
+            &worktree_path,
+            "task/test-worktree",
+            &details.summary.default_branch,
+        )
+        .expect("task worktree creates");
+        assert!(worktree.created_branch);
+        assert_eq!(
+            GitService::inspect_repository(&worktree.path)
+                .expect("worktree inspects")
+                .current_branch
+                .as_deref(),
+            Some("task/test-worktree")
+        );
+        GitService::remove_task_worktree(&directory, &worktree.path)
+            .expect("task worktree removes");
+        assert!(!worktree_path.exists());
 
         fs::remove_dir_all(directory).expect("temporary directory removes");
     }

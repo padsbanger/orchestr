@@ -10,7 +10,8 @@ import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
 import { cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
-import { createTask, deleteTask, listTasks, moveTask, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
+import { approveTaskReview, getTaskReview, requestTaskChanges, type TaskReview } from "../../services/reviews";
+import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
 
@@ -35,6 +36,12 @@ export function BoardPage() {
   const [activeTaskId, setActiveTaskId] = useState<string>();
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [isStartingRun, setIsStartingRun] = useState(false);
+  const [isCleaningWorktree, setIsCleaningWorktree] = useState(false);
+  const [isOpeningWorktree, setIsOpeningWorktree] = useState(false);
+  const [review, setReview] = useState<TaskReview>();
+  const [reviewError, setReviewError] = useState<string>();
+  const [isReviewLoading, setIsReviewLoading] = useState(false);
+  const [isReviewActionPending, setIsReviewActionPending] = useState(false);
   const runIds = useRef(new Set<string>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
@@ -88,6 +95,12 @@ export function BoardPage() {
       setError(loadError instanceof Error ? loadError.message : "Unable to load task runs.");
     });
   }, [inspectedTask?.id]);
+
+  useEffect(() => {
+    if (!inspectedTask || inspectedTask.status !== "review") { setReview(undefined); setReviewError(undefined); return; }
+    setIsReviewLoading(true); setReviewError(undefined);
+    void getTaskReview(inspectedTask.id).then(setReview).catch((error: unknown) => setReviewError(error instanceof Error ? error.message : "Unable to load task branch changes.")).finally(() => setIsReviewLoading(false));
+  }, [inspectedTask?.id, inspectedTask?.status]);
 
   useEffect(() => {
     runIds.current = new Set(runs.map((run) => run.id));
@@ -172,7 +185,7 @@ export function BoardPage() {
       setInspectedTask(started.task);
       await loadBoard();
     } catch (runError) {
-      setError(runError instanceof Error ? runError.message : "Unable to start the Codex task.");
+      setError(errorMessage(runError, "Unable to start the Codex task."));
     } finally {
       setIsStartingRun(false);
     }
@@ -185,6 +198,46 @@ export function BoardPage() {
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Unable to cancel the Codex task.");
     }
+  };
+
+  const cleanupWorktree = async () => {
+    if (!inspectedTask) return;
+    setError(undefined);
+    setIsCleaningWorktree(true);
+    try {
+      const updatedTask = await cleanupTaskWorktree(inspectedTask.id);
+      setTasks((current) => current.map((task) => task.id === updatedTask.id ? updatedTask : task));
+      setInspectedTask(updatedTask);
+    } catch (cleanupError) {
+      setError(cleanupError instanceof Error ? cleanupError.message : "Unable to remove the task worktree.");
+    } finally {
+      setIsCleaningWorktree(false);
+    }
+  };
+
+  const openWorktree = async () => {
+    if (!inspectedTask) return;
+    setError(undefined);
+    setIsOpeningWorktree(true);
+    try {
+      await openTaskWorktree(inspectedTask.id);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : "Unable to open the task worktree.");
+    } finally {
+      setIsOpeningWorktree(false);
+    }
+  };
+
+  const resolveReview = async (decision: "approve" | "changes") => {
+    if (!inspectedTask) return;
+    setIsReviewActionPending(true); setError(undefined);
+    try {
+      const updatedTask = decision === "approve" ? await approveTaskReview(inspectedTask.id) : await requestTaskChanges(inspectedTask.id);
+      setTasks((current) => current.map((task) => task.id === updatedTask.id ? updatedTask : task));
+      setInspectedTask(updatedTask);
+    } catch (reviewActionError) {
+      setError(reviewActionError instanceof Error ? reviewActionError.message : "Unable to update the review state.");
+    } finally { setIsReviewActionPending(false); }
   };
 
   if (isLoading) return <section className="page"><div className="empty-state"><span className="empty-index">SYNC</span><h2>Loading board</h2></div></section>;
@@ -227,7 +280,7 @@ export function BoardPage() {
         </DndContext>
       </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
     </section>
   );
@@ -297,4 +350,11 @@ function moveTaskLocally(tasks: Task[], id: string, status: TaskStatus, position
   if (active.status !== status) source.forEach((task, index) => updated.set(task.id, { ...task, position: index }));
   target.forEach((task, index) => updated.set(task.id, { ...task, position: index }));
   return tasks.map((task) => updated.get(task.id) ?? task);
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;
+  return fallback;
 }

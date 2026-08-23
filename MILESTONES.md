@@ -493,6 +493,10 @@ A run can be inspected after it finishes or fails, including after restarting Or
 
 ## M10 — Task Branches + Git Worktrees
 
+**Status:** Complete
+
+**Completed:** 2026-08-23
+
 ### Goal
 
 Isolate AI tasks so multiple tasks can safely modify the same project.
@@ -525,6 +529,10 @@ Two tasks can modify the same project concurrently without sharing a working dir
 ---
 
 ## M11 — Review Workflow
+
+**Status:** Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 

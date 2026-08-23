@@ -13,6 +13,8 @@ export type Task = {
   relevantPaths: string[];
   dependencyIds: string[];
   assignedAgentId: string | null;
+  branch: string | null;
+  worktreePath: string | null;
   status: TaskStatus;
   position: number;
   createdAt: string;
@@ -47,4 +49,12 @@ export function deleteTask(id: string): Promise<void> {
 
 export function moveTask(id: string, status: TaskStatus, position: number): Promise<Task> {
   return invoke<Task>("move_task", { input: { id, status, position } });
+}
+
+export function cleanupTaskWorktree(id: string): Promise<Task> {
+  return invoke<Task>("cleanup_task_worktree", { taskId: id });
+}
+
+export function openTaskWorktree(id: string): Promise<void> {
+  return invoke("open_task_worktree", { taskId: id });
 }

@@ -70,6 +70,10 @@ export function getProject(id: string): Promise<Project | null> {
   return invoke<Project | null>("get_project", { id });
 }
 
+export function deleteProject(id: string): Promise<void> {
+  return invoke<void>("delete_project", { id });
+}
+
 export function createProject(input: CreateProjectInput): Promise<Project> {
   return invoke<Project>("create_project", { input });
 }

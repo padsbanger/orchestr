@@ -29,7 +29,7 @@ export function NewProjectDialog({ onCreated, onClose }: NewProjectDialogProps) 
         else setRepositoryPath(selection);
       }
     } catch (dialogError) {
-      setError(dialogError instanceof Error ? dialogError.message : "Unable to open the directory picker.");
+      setError(errorMessage(dialogError, "Unable to open the directory picker."));
     }
   };
 
@@ -45,7 +45,7 @@ export function NewProjectDialog({ onCreated, onClose }: NewProjectDialogProps) 
       }
       onCreated();
     } catch (projectError) {
-      setError(projectError instanceof Error ? projectError.message : "Unable to save the project.");
+      setError(errorMessage(projectError, "Unable to save the project."));
     } finally {
       setIsSubmitting(false);
     }
@@ -118,4 +118,11 @@ function slugify(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;
+  return fallback;
 }

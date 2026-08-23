@@ -84,6 +84,29 @@ changed files and newly created commits. The event stream is migrated from the
 earlier raw output records, survives restart, and is rendered as a chronological
 timeline in the task inspector.
 
+## M10 task isolation
+
+Before a Codex run starts, the Tauri application layer asks `orchestr-git` to
+create a generated `task/...` branch and a separate checkout at a sibling
+`.orchestr-worktrees/<project>/<task>` path. The main workspace is never used
+as the agent working directory. Branch and worktree ownership are persisted on
+the task, and their creation is recorded as run events.
+
+An isolated worktree requires an existing commit to share as its base. Orchestr
+therefore rejects execution in an unborn repository branch and tells the user
+to create the initial commit first, rather than copying uncommitted files into
+an ambiguous agent workspace.
+
+Projects created by Orchestr receive that empty baseline commit automatically.
+When Git has no configured identity, only that generated commit uses the local
+`Orchestr <orchestr@local>` fallback; no global or repository Git configuration
+is changed. Registered repositories are never committed automatically.
+
+Worktree removal is an explicit user action. It uses `git worktree remove`
+without force, so uncommitted changes remain protected; the branch is retained
+for the subsequent review workflow. Tasks that still own a worktree cannot be
+deleted, preventing an untracked checkout from being orphaned.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

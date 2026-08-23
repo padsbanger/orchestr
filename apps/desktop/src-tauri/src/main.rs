@@ -2,13 +2,14 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
     thread,
 };
 
 use orchestr_db::{
-    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewRunEvent, NewTask, Project, Run,
-    RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
+    Agent, AgentUpdate, Database, NewAgent, NewProject, NewRun, NewRunEvent, NewTask, Project,
+    ProjectDeletion, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, Workspace,
 };
 use orchestr_git::{GitService, RepositoryDetails};
 use orchestr_provider::{
@@ -222,6 +223,8 @@ struct TaskResponse {
     relevant_paths: Vec<String>,
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
+    branch: Option<String>,
+    worktree_path: Option<String>,
     status: String,
     position: i64,
     created_at: String,
@@ -282,6 +285,10 @@ impl From<Task> for TaskResponse {
             relevant_paths: task.relevant_paths,
             dependency_ids: task.dependency_ids,
             assigned_agent_id: task.assigned_agent_id,
+            branch: task.branch,
+            worktree_path: task
+                .worktree_path
+                .map(|path| normalize_workspace_path(&path)),
             status: task.status.as_str().to_owned(),
             position: task.position,
             created_at: task.created_at,
@@ -392,14 +399,34 @@ fn get_project(id: String, state: State<'_, AppState>) -> Result<Option<ProjectR
 }
 
 #[tauri::command]
+fn delete_project(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    match state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .delete_project(&id)
+        .map_err(|error| format!("Unable to remove the project: {error}"))?
+    {
+        ProjectDeletion::Deleted => Ok(()),
+        ProjectDeletion::NotFound => Err("The project no longer exists.".into()),
+        ProjectDeletion::HasAttachedWorktrees => {
+            Err("Remove any task worktrees before deleting this project.".into())
+        }
+    }
+}
+
+#[tauri::command]
 fn create_project(
     input: CreateProjectInput,
     state: State<'_, AppState>,
 ) -> Result<ProjectResponse, String> {
     let name = validate_project_name(&input.name)?;
+    ensure_project_name_available(&state, &name)?;
     let directory = create_workspace_directory(&input.parent_path, &input.directory_name)?;
     let repository = GitService::initialize_repository(&directory)
         .map_err(|error| format!("Unable to initialize the Git repository: {error}"))?;
+    let repository = GitService::create_initial_commit(Path::new(&repository.root_path))
+        .map_err(|error| format!("Unable to create the initial Git commit: {error}"))?;
 
     save_project(
         &state,
@@ -419,6 +446,7 @@ fn register_project(
     state: State<'_, AppState>,
 ) -> Result<ProjectResponse, String> {
     let name = validate_project_name(&input.name)?;
+    ensure_project_name_available(&state, &name)?;
     let repository = GitService::inspect_repository(Path::new(&input.path)).map_err(|error| {
         format!("The selected directory is not a usable Git repository: {error}")
     })?;
@@ -637,12 +665,165 @@ fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<Run
 }
 
 #[tauri::command]
+fn get_task_review(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<orchestr_git::TaskReview, String> {
+    let (task, project) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&task_id)
+            .map_err(|error| format!("Unable to load the task review: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        let project = database
+            .get_project(&task.project_id)
+            .map_err(|error| format!("Unable to load the project review settings: {error}"))?
+            .ok_or_else(|| "The project no longer exists.".to_owned())?;
+        (task, project)
+    };
+    let worktree_path = task
+        .worktree_path
+        .ok_or_else(|| "This task has no isolated worktree to review.".to_owned())?;
+    GitService::task_review(Path::new(&worktree_path), &project.default_branch)
+        .map_err(|error| format!("Unable to inspect the task branch: {error}"))
+}
+
+#[tauri::command]
+fn approve_task_review(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .approve_task_review(&task_id)
+        .map_err(|_| "Only tasks in Review can be approved.".to_owned())?
+        .map(Into::into)
+        .ok_or_else(|| "The task no longer exists.".into())
+}
+
+#[tauri::command]
+fn request_task_changes(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .request_task_changes(&task_id)
+        .map_err(|_| "Only tasks in Review can be returned for changes.".to_owned())?
+        .map(Into::into)
+        .ok_or_else(|| "The task no longer exists.".into())
+}
+
+#[tauri::command]
+fn cleanup_task_worktree(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    let (task, workspace_path) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&task_id)
+            .map_err(|error| format!("Unable to load the task worktree: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        if database
+            .list_runs_for_task(&task_id)
+            .map_err(|error| format!("Unable to inspect task runs: {error}"))?
+            .iter()
+            .any(|run| run.status == RunStatus::Running)
+        {
+            return Err("Cancel or wait for the active run before removing its worktree.".into());
+        }
+        let workspace_path = database
+            .get_project(&task.project_id)
+            .map_err(|error| format!("Unable to load the task workspace: {error}"))?
+            .and_then(|project| {
+                project
+                    .workspaces
+                    .into_iter()
+                    .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+                    .map(|workspace| workspace.path)
+            })
+            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
+        (task, workspace_path)
+    };
+    let worktree_path = task
+        .worktree_path
+        .as_deref()
+        .ok_or_else(|| "This task does not own an isolated worktree.".to_owned())?;
+    GitService::remove_task_worktree(Path::new(&workspace_path), Path::new(worktree_path))
+        .map_err(|error| {
+            format!(
+                "Unable to remove the task worktree. Commit, stash, or discard its changes first: {error}"
+            )
+        })?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .release_task_worktree(&task_id)
+        .map_err(|error| format!("Unable to release the task worktree: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The task worktree was already released.".into())
+}
+
+#[tauri::command]
+fn open_task_worktree(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let (task, workspace_path) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&task_id)
+            .map_err(|error| format!("Unable to load the task worktree: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        let workspace_path = database
+            .get_project(&task.project_id)
+            .map_err(|error| format!("Unable to load the task workspace: {error}"))?
+            .and_then(|project| {
+                project
+                    .workspaces
+                    .into_iter()
+                    .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+                    .map(|workspace| workspace.path)
+            })
+            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
+        (task, workspace_path)
+    };
+
+    let recorded_path = task
+        .worktree_path
+        .ok_or_else(|| "This task does not own an isolated worktree.".to_owned())?;
+    let expected_path = task_worktree_path(&workspace_path, &task.project_id, &task.id)?;
+    let worktree_path = fs::canonicalize(&recorded_path)
+        .map_err(|error| format!("The task worktree is no longer available: {error}"))?;
+    let expected_path = fs::canonicalize(&expected_path).map_err(|_| {
+        "The task worktree is not in Orchestr's managed worktree location.".to_owned()
+    })?;
+    if worktree_path != expected_path || !worktree_path.is_dir() {
+        return Err("The task worktree is not in Orchestr's managed worktree location.".into());
+    }
+
+    open_directory(&worktree_path)
+}
+
+#[tauri::command]
 fn start_task_run(
     task_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartedTaskRunResponse, String> {
-    let (task, agent, workspace_path) = {
+    let (task, agent, workspace_path, default_branch) = {
         let database = state
             .database
             .lock()
@@ -668,18 +849,17 @@ fn start_task_run(
         if agent.provider != "codex" {
             return Err("Only Codex agents can run locally at this stage.".into());
         }
-        let workspace_path = database
+        let project = database
             .get_project(&task.project_id)
             .map_err(|error| format!("Unable to load the task workspace: {error}"))?
-            .and_then(|project| {
-                project
-                    .workspaces
-                    .into_iter()
-                    .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
-                    .map(|workspace| workspace.path)
-            })
             .ok_or_else(|| "This project has no local workspace.".to_owned())?;
-        (task, agent, workspace_path)
+        let workspace_path = project
+            .workspaces
+            .into_iter()
+            .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+            .map(|workspace| workspace.path)
+            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
+        (task, agent, workspace_path, project.default_branch)
     };
 
     let provider_status = CodexProvider
@@ -692,14 +872,45 @@ fn start_task_run(
         ));
     }
 
+    if task.worktree_path.is_some() {
+        return Err(
+            "This task already owns an isolated worktree. Remove it explicitly before starting a fresh run."
+                .into(),
+        );
+    }
+    let branch = task
+        .branch
+        .clone()
+        .unwrap_or_else(|| task_branch_name(&task.id, &task.title));
+    let target_worktree_path = task_worktree_path(&workspace_path, &task.project_id, &task.id)?;
+    let task_worktree = GitService::create_task_worktree(
+        Path::new(&workspace_path),
+        &target_worktree_path,
+        &branch,
+        &default_branch,
+    )
+    .map_err(|error| format!("Unable to create the isolated task worktree: {error}"))?;
+    let worktree_path = normalize_workspace_path(&task_worktree.path.to_string_lossy());
+    if state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .assign_task_worktree(&task.id, &branch, &worktree_path)
+        .map_err(|error| format!("Unable to record the task worktree: {error}"))?
+        .is_none()
+    {
+        let _ = GitService::remove_task_worktree(Path::new(&workspace_path), &task_worktree.path);
+        return Err("The task is no longer eligible to start.".into());
+    }
+
     let request = CodexProvider
         .execution_request(AgentRunInput {
             model: agent.model.clone(),
             prompt: build_task_prompt(&task, &agent),
-            working_directory: PathBuf::from(&workspace_path),
+            working_directory: PathBuf::from(&worktree_path),
         })
         .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
-    let repository_before = repository_observation(Path::new(&workspace_path));
+    let repository_before = repository_observation(Path::new(&worktree_path));
     let run_id = Uuid::new_v4().to_string();
     let (persisted_run, updated_task) = state
         .database
@@ -712,6 +923,30 @@ fn start_task_run(
             worker_id: LOCAL_WORKER_ID.to_owned(),
         })
         .map_err(|error| format!("Unable to start the task run: {error}"))?;
+    if let Ok(mut database) = state.database.lock() {
+        if task_worktree.created_branch {
+            let _ = database.append_run_event(
+                &run_id,
+                NewRunEvent {
+                    kind: "git.branch.created".into(),
+                    message: format!("Created task branch {branch}."),
+                    command: None,
+                    file_path: None,
+                    exit_code: None,
+                },
+            );
+        }
+        let _ = database.append_run_event(
+            &run_id,
+            NewRunEvent {
+                kind: "git.worktree.created".into(),
+                message: format!("Created isolated worktree at {worktree_path}."),
+                command: None,
+                file_path: None,
+                exit_code: None,
+            },
+        );
+    }
 
     let run = match LocalWorker::start(request) {
         Ok(run) => run,
@@ -795,7 +1030,7 @@ fn start_task_run(
             record_repository_events(
                 &mut database,
                 &event_run_id,
-                Path::new(&workspace_path),
+                Path::new(&worktree_path),
                 repository_before.as_ref(),
             );
             let _ = database.finish_run(&event_run_id, status, exit_code, text.as_deref());
@@ -988,10 +1223,18 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
 
 #[tauri::command]
 fn delete_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let deleted = state
+    let mut database = state
         .database
         .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    let task = database
+        .get_task(&id)
+        .map_err(|error| format!("Unable to load the task: {error}"))?
+        .ok_or_else(|| "The task no longer exists.".to_owned())?;
+    if task.worktree_path.is_some() {
+        return Err("Remove the task worktree before deleting this task.".into());
+    }
+    let deleted = database
         .delete_task(&id)
         .map_err(|error| format!("Unable to delete task: {error}"))?;
     deleted
@@ -1054,6 +1297,64 @@ fn workspace_path_for_project(
         .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
         .map(|workspace| workspace.path)
         .ok_or_else(|| "This project has no local workspace.".to_owned())
+}
+
+fn ensure_project_name_available(state: &State<'_, AppState>, name: &str) -> Result<(), String> {
+    let exists = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .project_name_exists(name)
+        .map_err(|error| format!("Unable to validate the project name: {error}"))?;
+    if exists {
+        return Err(format!("A project named \"{name}\" is already registered."));
+    }
+    Ok(())
+}
+
+fn task_worktree_path(
+    workspace_path: &str,
+    project_id: &str,
+    task_id: &str,
+) -> Result<PathBuf, String> {
+    let project_id = Uuid::parse_str(project_id)
+        .map_err(|_| "The project has an invalid identifier for a task worktree.")?
+        .to_string();
+    let task_id = Uuid::parse_str(task_id)
+        .map_err(|_| "The task has an invalid identifier for a task worktree.")?
+        .to_string();
+    let repository = GitService::inspect_repository(Path::new(workspace_path))
+        .map_err(|error| format!("Unable to resolve the project repository: {error}"))?;
+    let repository_root = PathBuf::from(normalize_workspace_path(&repository.root_path));
+    let parent = repository_root.parent().ok_or_else(|| {
+        "The project repository has no parent directory for task worktrees.".to_owned()
+    })?;
+    Ok(parent
+        .join(".orchestr-worktrees")
+        .join(project_id)
+        .join(task_id))
+}
+
+fn task_branch_name(task_id: &str, title: &str) -> String {
+    let slug = title
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = slug.chars().take(40).collect::<String>();
+    format!(
+        "task/{task_id}-{}",
+        if slug.is_empty() { "task" } else { &slug }
+    )
 }
 
 fn validate_project_name(name: &str) -> Result<String, String> {
@@ -1313,6 +1614,21 @@ fn create_workspace_directory(parent_path: &str, directory_name: &str) -> Result
     Ok(path)
 }
 
+fn open_directory(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command.arg(path);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Unable to open the task worktree in the file manager: {error}"))
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -1333,6 +1649,7 @@ fn main() {
             set_setting,
             list_projects,
             get_project,
+            delete_project,
             create_project,
             register_project,
             get_repository_details,
@@ -1346,6 +1663,11 @@ fn main() {
             test_codex_connection,
             cancel_local_worker_run,
             list_task_runs,
+            get_task_review,
+            approve_task_review,
+            request_task_changes,
+            cleanup_task_worktree,
+            open_task_worktree,
             start_task_run,
             list_agents,
             create_agent,

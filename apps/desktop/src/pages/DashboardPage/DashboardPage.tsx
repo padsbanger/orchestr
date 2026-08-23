@@ -1,8 +1,8 @@
-import { FolderGit2, Plus, RefreshCw } from "lucide-react";
+import { FolderGit2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { NewProjectDialog } from "../../components/NewProjectDialog/NewProjectDialog";
-import { listProjects, type Project } from "../../services/projects";
+import { deleteProject, listProjects, type Project } from "../../services/projects";
 import "./DashboardPage.css";
 
 export function DashboardPage() {
@@ -10,6 +10,7 @@ export function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [showProjectDialog, setShowProjectDialog] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string>();
 
   const loadProjects = useCallback(async () => {
     setIsLoading(true);
@@ -30,6 +31,20 @@ export function DashboardPage() {
   const handleCreated = () => {
     setShowProjectDialog(false);
     void loadProjects();
+  };
+
+  const removeProject = async (project: Project) => {
+    if (!window.confirm(`Remove ${project.name} from Orchestr? This deletes its tasks and run history from Orchestr only. The repository files and Git history will remain unchanged.`)) return;
+    setError(undefined);
+    setDeletingProjectId(project.id);
+    try {
+      await deleteProject(project.id);
+      await loadProjects();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to remove the project.");
+    } finally {
+      setDeletingProjectId(undefined);
+    }
   };
 
   return (
@@ -61,7 +76,7 @@ export function DashboardPage() {
         </div>
       ) : (
         <div className="project-grid">
-          {projects.map((project) => <ProjectCard key={project.id} project={project} />)}
+          {projects.map((project) => <ProjectCard key={project.id} project={project} isDeleting={deletingProjectId === project.id} onDelete={() => void removeProject(project)} />)}
         </div>
       )}
 
@@ -70,20 +85,23 @@ export function DashboardPage() {
   );
 }
 
-function ProjectCard({ project }: { project: Project }) {
+function ProjectCard({ project, isDeleting, onDelete }: { project: Project; isDeleting: boolean; onDelete: () => void }) {
   const workspace = project.workspaces[0];
   return (
-    <Link className="project-card" to={`/projects/${project.id}`}>
-      <div className="project-card-icon"><FolderGit2 size={18} /></div>
-      <div className="project-card-heading">
-        <h2>{project.name}</h2>
-        <span className="branch-chip">{project.defaultBranch}</span>
-      </div>
-      <p>{project.description || "No project description."}</p>
-      <div className="project-workspace" title={workspace?.path}>
-        <span>workspace</span>
-        <code>{workspace?.path || "No local workspace"}</code>
-      </div>
-    </Link>
+    <article className="project-card">
+      <Link className="project-card-link" to={`/projects/${project.id}`}>
+        <div className="project-card-icon"><FolderGit2 size={18} /></div>
+        <div className="project-card-heading">
+          <h2>{project.name}</h2>
+          <span className="branch-chip">{project.defaultBranch}</span>
+        </div>
+        <p>{project.description || "No project description."}</p>
+        <div className="project-workspace" title={workspace?.path}>
+          <span>workspace</span>
+          <code>{workspace?.path || "No local workspace"}</code>
+        </div>
+      </Link>
+      <button className="project-delete" type="button" onClick={onDelete} disabled={isDeleting} aria-label={`Remove ${project.name} from Orchestr`} title="Remove from Orchestr; repository files stay untouched"><Trash2 size={14} /></button>
+    </article>
   );
 }

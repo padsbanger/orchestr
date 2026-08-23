@@ -18,6 +18,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("../migrations/0005_agents.sql")),
     (6, include_str!("../migrations/0006_runs.sql")),
     (7, include_str!("../migrations/0007_run_events.sql")),
+    (8, include_str!("../migrations/0008_task_worktrees.sql")),
 ];
 
 pub struct Database {
@@ -53,6 +54,13 @@ pub struct NewProject {
     pub workspace_id: String,
     pub worker_id: String,
     pub workspace_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectDeletion {
+    Deleted,
+    NotFound,
+    HasAttachedWorktrees,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +116,8 @@ pub struct Task {
     pub relevant_paths: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
     pub status: TaskStatus,
     pub position: i64,
     pub created_at: String,
@@ -311,6 +321,14 @@ impl Database {
             .collect()
     }
 
+    pub fn project_name_exists(&self, name: &str) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE name = ?1 COLLATE NOCASE)",
+            [name],
+            |row| row.get(0),
+        )
+    }
+
     pub fn create_project(&mut self, new_project: NewProject) -> Result<Project> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -354,7 +372,7 @@ impl Database {
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                    relevant_paths, dependency_ids, assigned_agent_id, status, position, created_at, updated_at
+                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, status, position, created_at, updated_at
              FROM tasks WHERE project_id = ?1
              ORDER BY CASE status
                  WHEN 'backlog' THEN 0
@@ -485,6 +503,31 @@ impl Database {
         Ok(deleted > 0)
     }
 
+    pub fn delete_project(&mut self, id: &str) -> Result<ProjectDeletion> {
+        let transaction = self.connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(ProjectDeletion::NotFound);
+        }
+        let has_worktree: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ?1 AND worktree_path IS NOT NULL)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if has_worktree {
+            return Ok(ProjectDeletion::HasAttachedWorktrees);
+        }
+        transaction.execute("DELETE FROM tasks WHERE project_id = ?1", [id])?;
+        transaction.execute("DELETE FROM workspaces WHERE project_id = ?1", [id])?;
+        transaction.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        Ok(ProjectDeletion::Deleted)
+    }
+
     pub fn agent_exists(&self, id: &str) -> Result<bool> {
         self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE id = ?1)",
@@ -550,6 +593,51 @@ impl Database {
             .task_by_id(&new_run.task_id)?
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
         Ok((run, task))
+    }
+
+    pub fn assign_task_worktree(
+        &mut self,
+        id: &str,
+        branch: &str,
+        worktree_path: &str,
+    ) -> Result<Option<Task>> {
+        let changed = self.connection.execute(
+            "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?3 AND status = 'todo' AND worktree_path IS NULL",
+            params![branch, worktree_path, id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.task_by_id(id)
+    }
+
+    pub fn release_task_worktree(&mut self, id: &str) -> Result<Option<Task>> {
+        let transaction = self.connection.transaction()?;
+        let worktree_path: Option<String> = transaction
+            .query_row(
+                "SELECT worktree_path FROM tasks WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if worktree_path.is_none() {
+            return Ok(None);
+        }
+        let has_active_run: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ?1 AND status = 'running')",
+            [id],
+            |row| row.get(0),
+        )?;
+        if has_active_run {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "UPDATE tasks SET worktree_path = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [id],
+        )?;
+        transaction.commit()?;
+        self.task_by_id(id)
     }
 
     pub fn append_run_output(&mut self, run_id: &str, stream: &str, text: &str) -> Result<()> {
@@ -662,6 +750,14 @@ impl Database {
         self.task_by_id(id)
     }
 
+    pub fn approve_task_review(&mut self, id: &str) -> Result<Option<Task>> {
+        self.transition_task_from_review(id, TaskStatus::Done)
+    }
+
+    pub fn request_task_changes(&mut self, id: &str) -> Result<Option<Task>> {
+        self.transition_task_from_review(id, TaskStatus::InProgress)
+    }
+
     fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
         let project = self
             .connection
@@ -725,7 +821,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                        relevant_paths, dependency_ids, assigned_agent_id, status, position, created_at, updated_at
+                        relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, status, position, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -796,6 +892,30 @@ impl Database {
             )
             .optional()
     }
+
+    fn transition_task_from_review(
+        &mut self,
+        id: &str,
+        target_status: TaskStatus,
+    ) -> Result<Option<Task>> {
+        let Some((project_id, source_status)) = self.task_location(id)? else {
+            return Ok(None);
+        };
+        if source_status != TaskStatus::Review {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        move_task_in_transaction(
+            &transaction,
+            id,
+            &project_id,
+            TaskStatus::Review,
+            target_status,
+            usize::MAX,
+        )?;
+        transaction.commit()?;
+        self.task_by_id(id)
+    }
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
@@ -809,10 +929,12 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         relevant_paths: decode_string_list(row.get(6)?)?,
         dependency_ids: decode_string_list(row.get(7)?)?,
         assigned_agent_id: row.get(8)?,
-        status: TaskStatus::from_database(row.get(9)?)?,
-        position: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        branch: row.get(9)?,
+        worktree_path: row.get(10)?,
+        status: TaskStatus::from_database(row.get(11)?)?,
+        position: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -949,8 +1071,8 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, RunStatus, TaskStatus,
-        TaskUpdate,
+        AgentUpdate, Database, NewAgent, NewProject, NewRun, NewTask, ProjectDeletion, RunStatus,
+        TaskStatus, TaskUpdate,
     };
     use std::{
         fs,
@@ -1006,6 +1128,12 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "Repository monitor");
         assert_eq!(projects[0].workspaces[0].worker_id, "local");
+        assert!(reopened
+            .project_name_exists("repository MONITOR")
+            .expect("project name checks"));
+        assert!(!reopened
+            .project_name_exists("another project")
+            .expect("project name checks"));
         drop(reopened);
 
         fs::remove_file(database_path).expect("temporary database removes");
@@ -1251,7 +1379,7 @@ mod tests {
         assert_eq!(completed_task.status, TaskStatus::Review);
         drop(database);
 
-        let reopened = Database::open(&database_path).expect("database reopens");
+        let mut reopened = Database::open(&database_path).expect("database reopens");
         let runs = reopened.list_runs_for_task("task-1").expect("runs load");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, RunStatus::Completed);
@@ -1261,7 +1389,156 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == "run.completed"));
+        assert_eq!(
+            reopened
+                .request_task_changes("task-1")
+                .expect("review changes request")
+                .expect("task exists")
+                .status,
+            TaskStatus::InProgress
+        );
+        reopened
+            .move_task("task-1", TaskStatus::Review, 0)
+            .expect("task returns to review");
+        assert_eq!(
+            reopened
+                .approve_task_review("task-1")
+                .expect("review approves")
+                .expect("task exists")
+                .status,
+            TaskStatus::Done
+        );
         drop(reopened);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn task_worktree_ownership_persists_and_can_be_released() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Worktree project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/worktree-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Isolate implementation".into(),
+                description: None,
+                acceptance_criteria: Vec::new(),
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+            })
+            .expect("task saves");
+        database
+            .move_task("task-1", TaskStatus::Todo, 0)
+            .expect("task moves");
+
+        let assigned = database
+            .assign_task_worktree(
+                "task-1",
+                "task/task-1-isolate-implementation",
+                "C:/work/.orchestr-worktrees/project-1/task-1",
+            )
+            .expect("worktree assigns")
+            .expect("task exists");
+        assert_eq!(
+            assigned.branch.as_deref(),
+            Some("task/task-1-isolate-implementation")
+        );
+        assert_eq!(
+            assigned.worktree_path.as_deref(),
+            Some("C:/work/.orchestr-worktrees/project-1/task-1")
+        );
+        assert!(database
+            .assign_task_worktree("task-1", "task/another", "C:/work/another")
+            .expect("repeat assignment checks")
+            .is_none());
+
+        let released = database
+            .release_task_worktree("task-1")
+            .expect("worktree releases")
+            .expect("task exists");
+        assert_eq!(
+            released.branch.as_deref(),
+            Some("task/task-1-isolate-implementation")
+        );
+        assert!(released.worktree_path.is_none());
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn deleting_a_project_removes_metadata_but_rejects_attached_worktrees() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Disposable project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/disposable-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Attached task".into(),
+                description: None,
+                acceptance_criteria: Vec::new(),
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+            })
+            .expect("task saves");
+        database
+            .move_task("task-1", TaskStatus::Todo, 0)
+            .expect("task moves");
+        database
+            .assign_task_worktree("task-1", "task/attached", "C:/work/attached")
+            .expect("worktree assigns");
+        assert_eq!(
+            database
+                .delete_project("project-1")
+                .expect("project deletion checks"),
+            ProjectDeletion::HasAttachedWorktrees
+        );
+
+        database
+            .release_task_worktree("task-1")
+            .expect("worktree releases");
+        assert_eq!(
+            database
+                .delete_project("project-1")
+                .expect("project deletes"),
+            ProjectDeletion::Deleted
+        );
+        assert!(database
+            .get_project("project-1")
+            .expect("project loads")
+            .is_none());
+        assert!(database
+            .list_tasks("project-1")
+            .expect("tasks load")
+            .is_empty());
+
+        drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }
