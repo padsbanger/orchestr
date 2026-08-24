@@ -75,6 +75,9 @@ pub struct AgentRunInput {
     /// isolated task worktree. The desktop host derives these from Git rather
     /// than accepting them from task text or the UI.
     pub additional_writable_directories: Vec<PathBuf>,
+    /// Review agents use the provider's read-only sandbox so a reviewer cannot
+    /// alter the implementation it is evaluating.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,7 +298,11 @@ impl AgentProvider for CodexProvider {
             "--color".into(),
             "never".into(),
             "--sandbox".into(),
-            "workspace-write".into(),
+            if input.read_only {
+                "read-only".into()
+            } else {
+                "workspace-write".into()
+            },
         ];
         for directory in input.additional_writable_directories {
             arguments.push("--add-dir".into());
@@ -392,6 +399,7 @@ mod tests {
                 prompt: "Implement the task.".into(),
                 working_directory,
                 additional_writable_directories: additional_directories.clone(),
+                read_only: false,
             })
             .expect("request builds");
         assert_eq!(request.program, "codex");
@@ -419,6 +427,28 @@ mod tests {
             request.standard_input.as_deref(),
             Some("Implement the task.")
         );
+    }
+
+    #[test]
+    fn codex_review_execution_uses_a_read_only_sandbox() {
+        let working_directory = std::env::current_dir().expect("current directory");
+        let request = CodexProvider
+            .execution_request(AgentRunInput {
+                model: None,
+                prompt: "Review the implementation.".into(),
+                working_directory,
+                additional_writable_directories: Vec::new(),
+                read_only: true,
+            })
+            .expect("request builds");
+        assert!(request
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(!request
+            .arguments
+            .iter()
+            .any(|argument| argument == "--add-dir"));
     }
 
     #[test]

@@ -528,7 +528,9 @@ Tasks cannot enter successful Review without required implementation checks, can
 
 ---
 
-# M14 — Dependencies + Ready / Blocked Workflow
+# M14 — Dependencies + Ready / Blocked Workflow — Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 
@@ -613,7 +615,9 @@ Completing and integrating one task can automatically make the next task Ready.
 
 ---
 
-# M15 — Milestones, Epics + Project Progress
+# M15 — Milestones, Epics + Project Progress — Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 
@@ -692,7 +696,9 @@ The user can answer:
 
 ---
 
-# M16 — Architect / Reviewer Agent
+# M16 — Architect / Reviewer Agent — Complete
+
+**Completed:** 2026-08-23
 
 ### Goal
 
@@ -1300,18 +1306,11 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the current M13-complete state:
+Continue from the current M17 state:
 
 ```text
-1. Add project validation configuration
-2. Add implementation validation
-3. Add integration validation
-4. Add integration-branch health state
-5. Stop automatic integration when the integration branch is Broken
-6. Add recovery/re-run validation actions
-7. Add basic dependency persistence
-8. Add Ready/Blocked computation
-9. Unblock dependent tasks when prerequisites become Done
+1. Add bounded local concurrency and WIP limits
+2. Add recovery and revert workflows
 ```
 
 Do not optimize for maximum agent concurrency yet.

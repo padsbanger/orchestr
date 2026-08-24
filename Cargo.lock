@@ -2166,6 +2166,7 @@ dependencies = [
  "orchestr-provider",
  "orchestr-worker",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

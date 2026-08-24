@@ -26,6 +26,27 @@ cargo test -p orchestr-db
 cargo test -p orchestr-git
 ```
 
+## CRAP quality gates
+
+The Tauri workflow runs coverage-backed CRAP checks for both the desktop
+TypeScript service boundary and the Rust workspace:
+
+```bash
+npm run crap:ts
+npm run crap:rust
+# or both
+npm run crap
+```
+
+`crap4ts` currently covers `agentReviews.ts`, which has dedicated Vitest
+tests. The Rust gate compares against the checked-in baseline, failing for a
+regression or for a new function whose score exceeds 30. Refresh that baseline
+only after reviewing and intentionally accepting a report change:
+
+```bash
+npm run crap:rust:baseline
+```
+
 The first launch creates Orchestr's local SQLite database in the operating
 system application-data directory and applies its migrations automatically.
 

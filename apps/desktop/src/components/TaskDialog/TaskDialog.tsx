@@ -1,17 +1,20 @@
 import { X } from "lucide-react";
 import { FormEvent, useState } from "react";
-import type { Task, TaskInput } from "../../services/tasks";
+import { TASK_PRIORITIES, type Task, type TaskInput, type TaskPriority } from "../../services/tasks";
 import type { Agent } from "../../services/agents";
+import type { Epic, Milestone } from "../../services/outcomes";
 import "./TaskDialog.css";
 
 type TaskDialogProps = {
   task?: Task;
   agents: Agent[];
+  milestones: Milestone[];
+  epics: Epic[];
   onClose: () => void;
   onSave: (input: TaskInput) => Promise<void>;
 };
 
-export function TaskDialog({ task, agents, onClose, onSave }: TaskDialogProps) {
+export function TaskDialog({ task, agents, milestones, epics, onClose, onSave }: TaskDialogProps) {
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(task ? task.acceptanceCriteria.join("\n") : "");
@@ -19,6 +22,9 @@ export function TaskDialog({ task, agents, onClose, onSave }: TaskDialogProps) {
   const [relevantPaths, setRelevantPaths] = useState(task ? task.relevantPaths.join("\n") : "");
   const [dependencyIds, setDependencyIds] = useState(task ? task.dependencyIds.join("\n") : "");
   const [assignedAgentId, setAssignedAgentId] = useState(task?.assignedAgentId ?? "");
+  const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "normal");
+  const [milestoneId, setMilestoneId] = useState(task?.milestoneId ?? "");
+  const [epicId, setEpicId] = useState(task?.epicId ?? "");
   const [error, setError] = useState<string>();
   const [isSaving, setIsSaving] = useState(false);
 
@@ -35,6 +41,9 @@ export function TaskDialog({ task, agents, onClose, onSave }: TaskDialogProps) {
         relevantPaths: lines(relevantPaths),
         dependencyIds: lines(dependencyIds),
         assignedAgentId,
+        priority,
+        milestoneId,
+        epicId,
       });
       onClose();
     } catch (saveError) {
@@ -80,7 +89,30 @@ export function TaskDialog({ task, agents, onClose, onSave }: TaskDialogProps) {
             <label>
               Dependencies <span className="field-optional">task IDs, one per line</span>
               <textarea value={dependencyIds} onChange={(event) => setDependencyIds(event.target.value)} rows={2} placeholder="TASK-12 or task UUID" />
-              <span className="field-hint">Dependencies are recorded now; execution blocking arrives in a later milestone.</span>
+              <span className="field-hint">Every dependency must be Done before this task can become Ready.</span>
+            </label>
+          </fieldset>
+          <label>
+            Priority
+            <select value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)}>
+              {TASK_PRIORITIES.map((value) => <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>)}
+            </select>
+          </label>
+          <fieldset className="task-specification-fields">
+            <legend>Project outcome</legend>
+            <label>
+              Milestone <span className="field-optional">optional</span>
+              <select value={milestoneId} onChange={(event) => { setMilestoneId(event.target.value); if (epicId && !epics.find((epic) => epic.id === epicId && (!epic.milestoneId || epic.milestoneId === event.target.value))) setEpicId(""); }}>
+                <option value="">No milestone</option>
+                {milestones.map((milestone) => <option key={milestone.id} value={milestone.id}>{milestone.title}</option>)}
+              </select>
+            </label>
+            <label>
+              Epic <span className="field-optional">optional</span>
+              <select value={epicId} onChange={(event) => { const selectedEpic = epics.find((epic) => epic.id === event.target.value); setEpicId(event.target.value); if (selectedEpic?.milestoneId) setMilestoneId(selectedEpic.milestoneId); }}>
+                <option value="">No epic</option>
+                {epics.filter((epic) => epic.milestoneId === (milestoneId || null)).map((epic) => <option key={epic.id} value={epic.id}>{epic.title}</option>)}
+              </select>
             </label>
           </fieldset>
           <label>

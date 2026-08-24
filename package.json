@@ -7,6 +7,12 @@
     "dev": "npm run dev --workspace @orchestr/desktop",
     "build": "npm run build --workspace @orchestr/desktop",
     "check": "npm run check --workspace @orchestr/desktop",
+    "test": "npm run test --workspace @orchestr/desktop",
+    "test:coverage": "npm run test:coverage --workspace @orchestr/desktop",
+    "crap:ts": "npm run test:coverage && npm run crap --workspace @orchestr/desktop",
+    "crap:rust": "cargo llvm-cov --workspace --lcov --output-path target/crap/lcov.info && cargo crap --workspace --lcov target/crap/lcov.info --exclude build.rs --baseline .cargo-crap-baseline.json --format json --output target/crap/rust-crap.json && node scripts/check-rust-crap.mjs",
+    "crap:rust:baseline": "cargo llvm-cov --workspace --lcov --output-path target/crap/lcov.info && cargo crap --workspace --lcov target/crap/lcov.info --exclude build.rs --format json --sort file --output .cargo-crap-baseline.json",
+    "crap": "npm run crap:ts && npm run crap:rust",
     "tauri": "npm run tauri --workspace @orchestr/desktop"
   },
   "workspaces": [
@@ -14,5 +20,8 @@
   ],
   "engines": {
     "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "crap4ts": "^1.0.1"
   }
 }

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 apps/desktop/dist/
+apps/desktop/coverage/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/tauri.release.conf.json

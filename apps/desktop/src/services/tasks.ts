@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export const TASK_STATUSES = ["backlog", "todo", "in_progress", "review", "approved", "integrating", "blocked", "done"] as const;
+export const TASK_STATUSES = ["backlog", "ready", "in_progress", "review", "approved", "integrating", "blocked", "done"] as const;
 export type TaskStatus = typeof TASK_STATUSES[number];
+export const TASK_PRIORITIES = ["critical", "high", "normal", "low"] as const;
+export type TaskPriority = typeof TASK_PRIORITIES[number];
 
 export type Task = {
   id: string;
@@ -15,6 +17,10 @@ export type Task = {
   assignedAgentId: string | null;
   branch: string | null;
   worktreePath: string | null;
+  priority: TaskPriority;
+  blockedReason: string | null;
+  milestoneId: string | null;
+  epicId: string | null;
   status: TaskStatus;
   position: number;
   createdAt: string;
@@ -29,6 +35,9 @@ export type TaskInput = {
   relevantPaths: string[];
   dependencyIds: string[];
   assignedAgentId?: string;
+  priority: TaskPriority;
+  milestoneId?: string;
+  epicId?: string;
 };
 
 export function listTasks(projectId: string): Promise<Task[]> {

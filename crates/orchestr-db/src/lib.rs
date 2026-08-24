@@ -25,6 +25,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (9, include_str!("../migrations/0009_integration_queue.sql")),
     (10, include_str!("../migrations/0010_quality_gates.sql")),
     (11, include_str!("../migrations/0011_task_readiness.sql")),
+    (
+        12,
+        include_str!("../migrations/0012_readiness_block_flag.sql"),
+    ),
+    (13, include_str!("../migrations/0013_project_outcomes.sql")),
+    (14, include_str!("../migrations/0014_agent_reviews.sql")),
 ];
 
 pub struct Database {
@@ -388,6 +394,9 @@ pub struct Task {
     pub worktree_path: Option<String>,
     pub priority: TaskPriority,
     pub blocked_reason: Option<String>,
+    pub readiness_blocked: bool,
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
     pub status: TaskStatus,
     pub position: i64,
     pub created_at: String,
@@ -405,6 +414,8 @@ pub struct NewTask {
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
     pub priority: TaskPriority,
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
 }
 
 pub struct TaskUpdate {
@@ -416,6 +427,74 @@ pub struct TaskUpdate {
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
     pub priority: TaskPriority,
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Milestone {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub target_date: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewMilestone {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub target_date: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Epic {
+    pub id: String,
+    pub project_id: String,
+    pub milestone_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewEpic {
+    pub id: String,
+    pub project_id: String,
+    pub milestone_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskProgressCounts {
+    pub total: i64,
+    pub backlog: i64,
+    pub ready: i64,
+    pub in_progress: i64,
+    pub review: i64,
+    pub blocked: i64,
+    pub done: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MilestoneProgress {
+    pub milestone: Milestone,
+    pub counts: TaskProgressCounts,
+    pub epics: Vec<Epic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectProgress {
+    pub counts: TaskProgressCounts,
+    pub milestones: Vec<MilestoneProgress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +530,86 @@ pub struct AgentUpdate {
     pub system_prompt: Option<String>,
     pub skills: Vec<String>,
     pub max_concurrent_tasks: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentReviewStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl AgentReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                format!("Unknown agent review status: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentReviewDecision {
+    Approve,
+    RequestChanges,
+}
+
+impl AgentReviewDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::RequestChanges => "request_changes",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "approve" => Ok(Self::Approve),
+            "request_changes" => Ok(Self::RequestChanges),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                format!("Unknown agent review decision: {value}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReview {
+    pub id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub status: AgentReviewStatus,
+    pub decision: Option<AgentReviewDecision>,
+    pub notes: Option<String>,
+    pub raw_output: String,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+pub struct NewAgentReview {
+    pub id: String,
+    pub task_id: String,
+    pub agent_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,7 +701,9 @@ impl Database {
         let connection = Connection::open(database_path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&connection)?;
-        Ok(Self { connection })
+        let mut database = Self { connection };
+        database.recalculate_all_task_readiness()?;
+        Ok(database)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>> {
@@ -807,11 +968,11 @@ impl Database {
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, status, position, created_at, updated_at
+                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at
              FROM tasks WHERE project_id = ?1
              ORDER BY CASE status
                  WHEN 'backlog' THEN 0
-                 WHEN 'todo' THEN 1
+                 WHEN 'ready' THEN 1
                  WHEN 'in_progress' THEN 2
                  WHEN 'review' THEN 3
                  WHEN 'approved' THEN 4
@@ -826,7 +987,123 @@ impl Database {
         Ok(records)
     }
 
+    pub fn list_milestones(&self, project_id: &str) -> Result<Vec<Milestone>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, description, status, target_date, created_at, updated_at
+             FROM milestones WHERE project_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let milestones = statement
+            .query_map([project_id], milestone_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(milestones)
+    }
+
+    pub fn create_milestone(&mut self, milestone: NewMilestone) -> Result<Milestone> {
+        validate_outcome_status(&milestone.status)?;
+        self.connection.execute(
+            "INSERT INTO milestones (id, project_id, title, description, status, target_date)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                milestone.id,
+                milestone.project_id,
+                milestone.title,
+                milestone.description,
+                milestone.status,
+                milestone.target_date
+            ],
+        )?;
+        self.milestone_by_id(&milestone.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn update_milestone_status(&mut self, id: &str, status: &str) -> Result<Option<Milestone>> {
+        validate_outcome_status(status)?;
+        if self.connection.execute(
+            "UPDATE milestones SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![status, id],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        self.milestone_by_id(id)
+    }
+
+    pub fn list_epics(&self, project_id: &str) -> Result<Vec<Epic>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, milestone_id, title, description, status, created_at, updated_at
+             FROM epics WHERE project_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let epics = statement
+            .query_map([project_id], epic_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(epics)
+    }
+
+    pub fn create_epic(&mut self, epic: NewEpic) -> Result<Epic> {
+        validate_outcome_status(&epic.status)?;
+        self.validate_milestone_for_project(&epic.project_id, epic.milestone_id.as_deref())?;
+        self.connection.execute(
+            "INSERT INTO epics (id, project_id, milestone_id, title, description, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                epic.id,
+                epic.project_id,
+                epic.milestone_id,
+                epic.title,
+                epic.description,
+                epic.status
+            ],
+        )?;
+        self.epic_by_id(&epic.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn update_epic_status(&mut self, id: &str, status: &str) -> Result<Option<Epic>> {
+        validate_outcome_status(status)?;
+        if self.connection.execute(
+            "UPDATE epics SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![status, id],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        self.epic_by_id(id)
+    }
+
+    pub fn project_progress(&self, project_id: &str) -> Result<ProjectProgress> {
+        let milestones = self.list_milestones(project_id)?;
+        let epics = self.list_epics(project_id)?;
+        let milestone_progress = milestones
+            .into_iter()
+            .map(|milestone| {
+                Ok(MilestoneProgress {
+                    counts: self.task_progress_counts(project_id, Some(&milestone.id))?,
+                    epics: epics
+                        .iter()
+                        .filter(|epic| epic.milestone_id.as_deref() == Some(milestone.id.as_str()))
+                        .cloned()
+                        .collect(),
+                    milestone,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ProjectProgress {
+            counts: self.task_progress_counts(project_id, None)?,
+            milestones: milestone_progress,
+        })
+    }
+
     pub fn create_task(&mut self, new_task: NewTask) -> Result<Task> {
+        self.validate_task_dependencies(
+            &new_task.id,
+            &new_task.project_id,
+            &new_task.dependency_ids,
+        )?;
+        self.validate_task_hierarchy(
+            &new_task.project_id,
+            new_task.milestone_id.as_deref(),
+            new_task.epic_id.as_deref(),
+        )?;
         let transaction = self.connection.transaction()?;
         let position: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM tasks
@@ -839,8 +1116,8 @@ impl Database {
         let dependency_ids = encode_string_list(&new_task.dependency_ids)?;
         transaction.execute(
             "INSERT INTO tasks (id, project_id, title, description, acceptance_criteria,
-                                implementation_notes, relevant_paths, dependency_ids, assigned_agent_id, status, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'backlog', ?10)",
+                                implementation_notes, relevant_paths, dependency_ids, assigned_agent_id, priority, milestone_id, epic_id, status, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'backlog', ?13)",
             params![
                 new_task.id,
                 new_task.project_id,
@@ -851,6 +1128,9 @@ impl Database {
                 relevant_paths,
                 dependency_ids,
                 new_task.assigned_agent_id,
+                new_task.priority.as_str(),
+                new_task.milestone_id,
+                new_task.epic_id,
                 position
             ],
         )?;
@@ -860,13 +1140,23 @@ impl Database {
     }
 
     pub fn update_task(&mut self, id: &str, update: TaskUpdate) -> Result<Option<Task>> {
+        let project_id = self.task_location(id)?.map(|(project_id, _)| project_id);
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        self.validate_task_dependencies(id, &project_id, &update.dependency_ids)?;
+        self.validate_task_hierarchy(
+            &project_id,
+            update.milestone_id.as_deref(),
+            update.epic_id.as_deref(),
+        )?;
         let acceptance_criteria = encode_string_list(&update.acceptance_criteria)?;
         let relevant_paths = encode_string_list(&update.relevant_paths)?;
         let dependency_ids = encode_string_list(&update.dependency_ids)?;
         let changed = self.connection.execute(
             "UPDATE tasks SET title = ?1, description = ?2, acceptance_criteria = ?3,
                               implementation_notes = ?4, relevant_paths = ?5, dependency_ids = ?6,
-                              assigned_agent_id = ?7, updated_at = CURRENT_TIMESTAMP WHERE id = ?8",
+                              assigned_agent_id = ?7, priority = ?8, milestone_id = ?9, epic_id = ?10, updated_at = CURRENT_TIMESTAMP WHERE id = ?11",
             params![
                 update.title,
                 update.description,
@@ -875,12 +1165,16 @@ impl Database {
                 relevant_paths,
                 dependency_ids,
                 update.assigned_agent_id,
+                update.priority.as_str(),
+                update.milestone_id,
+                update.epic_id,
                 id
             ],
         )?;
         if changed == 0 {
             return Ok(None);
         }
+        self.recalculate_project_task_readiness(&project_id)?;
         self.task_by_id(id)
     }
 
@@ -888,6 +1182,11 @@ impl Database {
         let Some((project_id, status)) = self.task_location(id)? else {
             return Ok(false);
         };
+        if self.task_has_dependents(id)? {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Remove this task from its dependents before deleting it.".into(),
+            ));
+        }
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         normalize_positions(&transaction, &project_id, status)?;
@@ -928,6 +1227,80 @@ impl Database {
             return Ok(None);
         }
         self.agent_by_id(id)
+    }
+
+    pub fn list_agent_reviews(&self, task_id: &str) -> Result<Vec<AgentReview>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, task_id, agent_id, status, decision, notes, raw_output, error, started_at, completed_at
+             FROM agent_reviews WHERE task_id = ?1 ORDER BY started_at DESC, id DESC",
+        )?;
+        let reviews = statement
+            .query_map([task_id], agent_review_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(reviews)
+    }
+
+    pub fn get_agent_review(&self, id: &str) -> Result<Option<AgentReview>> {
+        self.agent_review_by_id(id)
+    }
+
+    pub fn start_agent_review(&mut self, review: NewAgentReview) -> Result<AgentReview> {
+        let (task_status, assigned_agent_id): (String, Option<String>) =
+            self.connection.query_row(
+                "SELECT status, assigned_agent_id FROM tasks WHERE id = ?1",
+                [&review.task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+        if task_status != TaskStatus::Review.as_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if assigned_agent_id.as_deref() == Some(review.agent_id.as_str()) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "An implementation agent cannot review its own task.".into(),
+            ));
+        }
+        if !self.agent_exists(&review.agent_id)? {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        self.connection.execute(
+            "INSERT INTO agent_reviews (id, task_id, agent_id, status) VALUES (?1, ?2, ?3, 'running')",
+            params![review.id, review.task_id, review.agent_id],
+        )?;
+        self.agent_review_by_id(&review.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn append_agent_review_output(&mut self, id: &str, output: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agent_reviews
+             SET raw_output = substr(raw_output || ?1, 1, 200000)
+             WHERE id = ?2 AND status = 'running'",
+            params![output, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_agent_review(
+        &mut self,
+        id: &str,
+        status: AgentReviewStatus,
+        decision: Option<AgentReviewDecision>,
+        notes: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<Option<AgentReview>> {
+        self.connection.execute(
+            "UPDATE agent_reviews
+             SET status = ?1, decision = ?2, notes = ?3, error = ?4, completed_at = CURRENT_TIMESTAMP
+             WHERE id = ?5 AND status = 'running'",
+            params![
+                status.as_str(),
+                decision.map(AgentReviewDecision::as_str),
+                notes,
+                error,
+                id
+            ],
+        )?;
+        self.agent_review_by_id(id)
     }
 
     pub fn delete_agent(&mut self, id: &str) -> Result<bool> {
@@ -1000,10 +1373,13 @@ impl Database {
                 [&new_run.task_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-        if task_status != TaskStatus::Todo.as_str()
+        if task_status != TaskStatus::Ready.as_str()
             || assigned_agent_id.as_deref() != Some(new_run.agent_id.as_str())
         {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(reason) = task_blocked_reason(&transaction, &new_run.task_id, &project_id)? {
+            return Err(rusqlite::Error::InvalidParameterName(reason));
         }
 
         transaction.execute(
@@ -1018,7 +1394,7 @@ impl Database {
             &transaction,
             &new_run.task_id,
             &project_id,
-            TaskStatus::Todo,
+            TaskStatus::Ready,
             TaskStatus::InProgress,
             usize::MAX,
         )?;
@@ -1041,7 +1417,7 @@ impl Database {
     ) -> Result<Option<Task>> {
         let changed = self.connection.execute(
             "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?3 AND status = 'todo' AND worktree_path IS NULL",
+             WHERE id = ?3 AND status = 'ready' AND worktree_path IS NULL",
             params![branch, worktree_path, id],
         )?;
         if changed == 0 {
@@ -1188,13 +1564,27 @@ impl Database {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let transaction = self.connection.transaction()?;
+        let blocked_reason = if target_status == TaskStatus::Ready {
+            task_blocked_reason(&transaction, id, &project_id)?
+        } else {
+            None
+        };
+        let resulting_status = if blocked_reason.is_some() {
+            TaskStatus::Blocked
+        } else {
+            target_status
+        };
         move_task_in_transaction(
             &transaction,
             id,
             &project_id,
             source_status,
-            target_status,
+            resulting_status,
             target_position,
+        )?;
+        transaction.execute(
+            "UPDATE tasks SET blocked_reason = ?1, readiness_blocked = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+            params![blocked_reason, blocked_reason.is_some(), id],
         )?;
         transaction.commit()?;
         self.task_by_id(id)
@@ -1498,6 +1888,118 @@ impl Database {
             .optional()
     }
 
+    fn milestone_by_id(&self, id: &str) -> Result<Option<Milestone>> {
+        self.connection.query_row(
+            "SELECT id, project_id, title, description, status, target_date, created_at, updated_at
+             FROM milestones WHERE id = ?1",
+            [id],
+            milestone_from_row,
+        ).optional()
+    }
+
+    fn epic_by_id(&self, id: &str) -> Result<Option<Epic>> {
+        self.connection.query_row(
+            "SELECT id, project_id, milestone_id, title, description, status, created_at, updated_at
+             FROM epics WHERE id = ?1",
+            [id],
+            epic_from_row,
+        ).optional()
+    }
+
+    fn validate_milestone_for_project(
+        &self,
+        project_id: &str,
+        milestone_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(milestone_id) = milestone_id else {
+            return Ok(());
+        };
+        let milestone_project = self
+            .connection
+            .query_row(
+                "SELECT project_id FROM milestones WHERE id = ?1",
+                [milestone_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if milestone_project.as_deref() == Some(project_id) {
+            Ok(())
+        } else {
+            Err(rusqlite::Error::InvalidParameterName(
+                "The selected milestone does not belong to this project.".into(),
+            ))
+        }
+    }
+
+    fn validate_task_hierarchy(
+        &self,
+        project_id: &str,
+        milestone_id: Option<&str>,
+        epic_id: Option<&str>,
+    ) -> Result<()> {
+        self.validate_milestone_for_project(project_id, milestone_id)?;
+        let Some(epic_id) = epic_id else {
+            return Ok(());
+        };
+        let epic = self
+            .connection
+            .query_row(
+                "SELECT project_id, milestone_id FROM epics WHERE id = ?1",
+                [epic_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((epic_project_id, epic_milestone_id)) = epic else {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "The selected epic does not exist.".into(),
+            ));
+        };
+        if epic_project_id != project_id {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "The selected epic does not belong to this project.".into(),
+            ));
+        }
+        if let (Some(task_milestone_id), Some(epic_milestone_id)) =
+            (milestone_id, epic_milestone_id.as_deref())
+        {
+            if task_milestone_id != epic_milestone_id {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "A task's milestone must match its epic's milestone.".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn task_progress_counts(
+        &self,
+        project_id: &str,
+        milestone_id: Option<&str>,
+    ) -> Result<TaskProgressCounts> {
+        let mut statement = self.connection.prepare(
+            "SELECT status, COUNT(*) FROM tasks WHERE project_id = ?1
+             AND (?2 IS NULL OR milestone_id = ?2) GROUP BY status",
+        )?;
+        let mut counts = TaskProgressCounts::default();
+        let rows = statement.query_map(params![project_id, milestone_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (status, count) = row?;
+            counts.total += count;
+            match status.as_str() {
+                "backlog" => counts.backlog = count,
+                "ready" => counts.ready = count,
+                "in_progress" => counts.in_progress = count,
+                "review" => counts.review = count,
+                "blocked" => counts.blocked = count,
+                "done" => counts.done = count,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
+
     fn integration_attempt_by_id(&self, id: &str) -> Result<Option<IntegrationAttempt>> {
         self.connection
             .query_row(
@@ -1506,6 +2008,17 @@ impl Database {
                  FROM integration_attempts WHERE id = ?1",
                 [id],
                 integration_attempt_from_row,
+            )
+            .optional()
+    }
+
+    fn agent_review_by_id(&self, id: &str) -> Result<Option<AgentReview>> {
+        self.connection
+            .query_row(
+                "SELECT id, task_id, agent_id, status, decision, notes, raw_output, error, started_at, completed_at
+                 FROM agent_reviews WHERE id = ?1",
+                [id],
+                agent_review_from_row,
             )
             .optional()
     }
@@ -1600,7 +2113,17 @@ impl Database {
             task_status,
             usize::MAX,
         )?;
+        transaction.execute(
+            "UPDATE tasks SET blocked_reason = ?1, readiness_blocked = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![
+                (task_status == TaskStatus::Blocked).then_some(error),
+                task_id
+            ],
+        )?;
         transaction.commit()?;
+        if task_status == TaskStatus::Done {
+            self.recalculate_project_task_readiness(&project_id)?;
+        }
         self.task_by_id(&task_id)
     }
 
@@ -1608,7 +2131,7 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                        relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, status, position, created_at, updated_at
+                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
@@ -1680,6 +2203,146 @@ impl Database {
             .optional()
     }
 
+    fn validate_task_dependencies(
+        &self,
+        task_id: &str,
+        project_id: &str,
+        dependency_ids: &[String],
+    ) -> Result<()> {
+        let unique_ids = dependency_ids.iter().collect::<HashSet<_>>();
+        if unique_ids.len() != dependency_ids.len() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "A task cannot list the same dependency more than once.".into(),
+            ));
+        }
+        if dependency_ids
+            .iter()
+            .any(|dependency_id| dependency_id == task_id)
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "A task cannot depend on itself.".into(),
+            ));
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, project_id, dependency_ids FROM tasks")?;
+        let tasks = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    decode_string_list(row.get(2)?)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        let task_dependencies = tasks
+            .into_iter()
+            .map(|(id, task_project_id, dependencies)| (id, (task_project_id, dependencies)))
+            .collect::<HashMap<_, _>>();
+        for dependency_id in dependency_ids {
+            match task_dependencies.get(dependency_id) {
+                Some((dependency_project_id, _)) if dependency_project_id == project_id => {}
+                Some(_) => {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "Dependencies must belong to the same project.".into(),
+                    ))
+                }
+                None => {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "Dependency {dependency_id} does not exist in this project."
+                    )))
+                }
+            }
+        }
+        let mut visited = HashSet::new();
+        let mut pending = dependency_ids.to_vec();
+        while let Some(current_id) = pending.pop() {
+            if current_id == task_id {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "This dependency would create a cycle.".into(),
+                ));
+            }
+            if !visited.insert(current_id.clone()) {
+                continue;
+            }
+            if let Some((_, dependencies)) = task_dependencies.get(&current_id) {
+                pending.extend(dependencies.iter().cloned());
+            }
+        }
+        Ok(())
+    }
+
+    fn task_has_dependents(&self, id: &str) -> Result<bool> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT dependency_ids FROM tasks WHERE id <> ?1")?;
+        let dependencies = statement
+            .query_map([id], |row| decode_string_list(row.get(0)?))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(dependencies.iter().any(|dependency_ids| {
+            dependency_ids
+                .iter()
+                .any(|dependency_id| dependency_id == id)
+        }))
+    }
+
+    fn recalculate_all_task_readiness(&mut self) -> Result<()> {
+        let project_ids = {
+            let mut statement = self.connection.prepare("SELECT id FROM projects")?;
+            let project_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>>>()?;
+            project_ids
+        };
+        for project_id in project_ids {
+            self.recalculate_project_task_readiness(&project_id)?;
+        }
+        Ok(())
+    }
+
+    fn recalculate_project_task_readiness(&mut self, project_id: &str) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT id, status, readiness_blocked FROM tasks
+                 WHERE project_id = ?1 AND (status = 'ready' OR (status = 'blocked' AND readiness_blocked = 1))",
+            )?;
+            let candidates = statement
+                .query_map([project_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        TaskStatus::from_database(row.get(1)?)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            candidates
+        };
+        for (task_id, status, _) in candidates {
+            let reason = task_blocked_reason(&transaction, &task_id, project_id)?;
+            let target_status = if reason.is_some() {
+                TaskStatus::Blocked
+            } else {
+                TaskStatus::Ready
+            };
+            if status != target_status {
+                move_task_in_transaction(
+                    &transaction,
+                    &task_id,
+                    project_id,
+                    status,
+                    target_status,
+                    usize::MAX,
+                )?;
+            }
+            transaction.execute(
+                "UPDATE tasks SET blocked_reason = ?1, readiness_blocked = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                params![reason, reason.is_some(), task_id],
+            )?;
+        }
+        transaction.commit()
+    }
+
     fn transition_task_from_review(
         &mut self,
         id: &str,
@@ -1718,10 +2381,15 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         assigned_agent_id: row.get(8)?,
         branch: row.get(9)?,
         worktree_path: row.get(10)?,
-        status: TaskStatus::from_database(row.get(11)?)?,
-        position: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        priority: TaskPriority::from_database(row.get(11)?)?,
+        blocked_reason: row.get(12)?,
+        readiness_blocked: row.get(13)?,
+        milestone_id: row.get(14)?,
+        epic_id: row.get(15)?,
+        status: TaskStatus::from_database(row.get(16)?)?,
+        position: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
     })
 }
 
@@ -1810,6 +2478,50 @@ fn agent_from_row(row: &rusqlite::Row<'_>) -> Result<Agent> {
     })
 }
 
+fn agent_review_from_row(row: &rusqlite::Row<'_>) -> Result<AgentReview> {
+    Ok(AgentReview {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        status: AgentReviewStatus::from_database(row.get(3)?)?,
+        decision: row
+            .get::<_, Option<String>>(4)?
+            .map(AgentReviewDecision::from_database)
+            .transpose()?,
+        notes: row.get(5)?,
+        raw_output: row.get(6)?,
+        error: row.get(7)?,
+        started_at: row.get(8)?,
+        completed_at: row.get(9)?,
+    })
+}
+
+fn milestone_from_row(row: &rusqlite::Row<'_>) -> Result<Milestone> {
+    Ok(Milestone {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        status: row.get(4)?,
+        target_date: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn epic_from_row(row: &rusqlite::Row<'_>) -> Result<Epic> {
+    Ok(Epic {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        milestone_id: row.get(2)?,
+        title: row.get(3)?,
+        description: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
 fn run_from_row(row: &rusqlite::Row<'_>) -> Result<Run> {
     Ok(Run {
         id: row.get(0)?,
@@ -1835,6 +2547,61 @@ fn decode_string_list(value: String) -> Result<Vec<String>> {
     serde_json::from_str(&value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error.into())
     })
+}
+
+fn validate_outcome_status(status: &str) -> Result<()> {
+    if matches!(status, "planned" | "active" | "completed" | "blocked") {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidParameterName(
+            "Unknown milestone or epic status.".into(),
+        ))
+    }
+}
+
+fn task_blocked_reason(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    project_id: &str,
+) -> Result<Option<String>> {
+    let (criteria, dependency_ids): (String, String) = transaction.query_row(
+        "SELECT acceptance_criteria, dependency_ids FROM tasks WHERE id = ?1 AND project_id = ?2",
+        params![task_id, project_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if decode_string_list(criteria)?.is_empty() {
+        return Ok(Some(
+            "Add at least one acceptance criterion before starting work.".into(),
+        ));
+    }
+    let dependencies = decode_string_list(dependency_ids)?;
+    let mut waiting = Vec::new();
+    for dependency_id in dependencies {
+        let dependency = transaction
+            .query_row(
+                "SELECT title, status FROM tasks WHERE id = ?1 AND project_id = ?2",
+                params![dependency_id, project_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match dependency {
+            Some((_, status)) if status == TaskStatus::Done.as_str() => {}
+            Some((title, _)) => waiting.push(title),
+            None => {
+                return Ok(Some(format!(
+                    "Dependency {dependency_id} no longer exists."
+                )))
+            }
+        }
+    }
+    if waiting.is_empty() {
+        Ok(None)
+    } else {
+        let display = waiting.into_iter().take(3).collect::<Vec<_>>().join(", ");
+        Ok(Some(format!(
+            "Waiting for completed dependencies: {display}."
+        )))
+    }
 }
 
 fn task_ids_for_status(
@@ -1928,9 +2695,10 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentUpdate, Database, IntegrationStatus, NewAgent, NewProject, NewRun, NewTask,
-        NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RunStatus, TaskStatus,
-        TaskUpdate, ValidationStage, ValidationStatus,
+        AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, IntegrationStatus, NewAgent,
+        NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun, NewTask, NewValidationCommand,
+        ProjectDeletion, ProjectHealthStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
+        ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -2096,17 +2864,20 @@ mod tests {
                     project_id: "project-1".into(),
                     title: title.into(),
                     description: None,
-                    acceptance_criteria: Vec::new(),
+                    acceptance_criteria: vec!["Complete task".into()],
                     implementation_notes: None,
                     relevant_paths: Vec::new(),
                     dependency_ids: Vec::new(),
                     assigned_agent_id: None,
+                    priority: TaskPriority::Normal,
+                    milestone_id: None,
+                    epic_id: None,
                 })
                 .expect("task saves");
         }
 
         database
-            .move_task("task-1", TaskStatus::Todo, 0)
+            .move_task("task-1", TaskStatus::Ready, 0)
             .expect("task moves")
             .expect("task exists");
         database
@@ -2136,7 +2907,7 @@ mod tests {
                 .find(|task| task.id == "task-1")
                 .expect("task exists")
                 .status,
-            TaskStatus::Todo
+            TaskStatus::Ready
         );
 
         let updated = database
@@ -2150,6 +2921,9 @@ mod tests {
                     relevant_paths: vec!["src/tasks.rs".into()],
                     dependency_ids: vec!["task-2".into()],
                     assigned_agent_id: None,
+                    priority: TaskPriority::Normal,
+                    milestone_id: None,
+                    epic_id: None,
                 },
             )
             .expect("task updates")
@@ -2172,6 +2946,233 @@ mod tests {
                 .position,
             0
         );
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn task_readiness_requires_criteria_and_done_dependencies_without_cycles() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Readiness project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/readiness-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_task(NewTask {
+                id: "foundation".into(),
+                project_id: "project-1".into(),
+                title: "Foundation".into(),
+                description: None,
+                acceptance_criteria: vec!["Foundation works".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+                priority: TaskPriority::High,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("foundation saves");
+        database
+            .create_task(NewTask {
+                id: "dependent".into(),
+                project_id: "project-1".into(),
+                title: "Dependent".into(),
+                description: None,
+                acceptance_criteria: vec!["Dependent works".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: vec!["foundation".into()],
+                assigned_agent_id: None,
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("dependent saves");
+
+        let blocked = database
+            .move_task("dependent", TaskStatus::Ready, 0)
+            .expect("move evaluates")
+            .expect("task exists");
+        assert_eq!(blocked.status, TaskStatus::Blocked);
+        assert!(blocked
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Foundation")));
+
+        let ready = database
+            .move_task("foundation", TaskStatus::Ready, 0)
+            .expect("foundation moves")
+            .expect("task exists");
+        assert_eq!(ready.status, TaskStatus::Ready);
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET status = 'done' WHERE id = 'foundation'",
+                [],
+            )
+            .expect("foundation completes");
+        database
+            .recalculate_project_task_readiness("project-1")
+            .expect("readiness recalculates");
+        assert_eq!(
+            database
+                .get_task("dependent")
+                .expect("task loads")
+                .expect("task exists")
+                .status,
+            TaskStatus::Ready
+        );
+
+        let cycle = database.update_task(
+            "foundation",
+            TaskUpdate {
+                title: "Foundation".into(),
+                description: None,
+                acceptance_criteria: vec!["Foundation works".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: vec!["dependent".into()],
+                assigned_agent_id: None,
+                priority: TaskPriority::Critical,
+                milestone_id: None,
+                epic_id: None,
+            },
+        );
+        assert!(cycle.is_err());
+        database.connection.execute("UPDATE tasks SET status = 'blocked', blocked_reason = 'Integration conflict: src/app.ts', readiness_blocked = 0 WHERE id = 'foundation'", []).expect("conflict records");
+        database
+            .recalculate_project_task_readiness("project-1")
+            .expect("readiness recalculates");
+        let conflict = database
+            .get_task("foundation")
+            .expect("task loads")
+            .expect("task exists");
+        assert_eq!(conflict.status, TaskStatus::Blocked);
+        assert_eq!(
+            conflict.blocked_reason.as_deref(),
+            Some("Integration conflict: src/app.ts")
+        );
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn milestones_epics_and_project_progress_track_integrated_outcomes() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Outcome project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/outcome-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_milestone(NewMilestone {
+                id: "milestone-1".into(),
+                project_id: "project-1".into(),
+                title: "First usable release".into(),
+                description: None,
+                status: "active".into(),
+                target_date: None,
+            })
+            .expect("milestone saves");
+        database
+            .create_milestone(NewMilestone {
+                id: "milestone-2".into(),
+                project_id: "project-1".into(),
+                title: "Later release".into(),
+                description: None,
+                status: "planned".into(),
+                target_date: None,
+            })
+            .expect("second milestone saves");
+        database
+            .create_epic(NewEpic {
+                id: "epic-1".into(),
+                project_id: "project-1".into(),
+                milestone_id: Some("milestone-1".into()),
+                title: "Project outcomes".into(),
+                description: None,
+                status: "active".into(),
+            })
+            .expect("epic saves");
+        assert_eq!(
+            database
+                .update_milestone_status("milestone-1", "completed")
+                .expect("milestone status updates")
+                .expect("milestone exists")
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            database
+                .update_epic_status("epic-1", "completed")
+                .expect("epic status updates")
+                .expect("epic exists")
+                .status,
+            "completed"
+        );
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Ship the outcome".into(),
+                description: None,
+                acceptance_criteria: vec!["Available to users".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+                priority: TaskPriority::High,
+                milestone_id: Some("milestone-1".into()),
+                epic_id: Some("epic-1".into()),
+            })
+            .expect("linked task saves");
+
+        let invalid_link = database.create_task(NewTask {
+            id: "task-2".into(),
+            project_id: "project-1".into(),
+            title: "Mismatched hierarchy".into(),
+            description: None,
+            acceptance_criteria: vec!["Never saved".into()],
+            implementation_notes: None,
+            relevant_paths: Vec::new(),
+            dependency_ids: Vec::new(),
+            assigned_agent_id: None,
+            priority: TaskPriority::Normal,
+            milestone_id: Some("milestone-2".into()),
+            epic_id: Some("epic-1".into()),
+        });
+        assert!(invalid_link.is_err());
+
+        database
+            .connection
+            .execute("UPDATE tasks SET status = 'done' WHERE id = 'task-1'", [])
+            .expect("task completes after integration");
+        let progress = database
+            .project_progress("project-1")
+            .expect("project progress loads");
+        assert_eq!(progress.counts.total, 1);
+        assert_eq!(progress.counts.done, 1);
+        assert_eq!(progress.milestones.len(), 2);
+        assert_eq!(progress.milestones[0].counts.done, 1);
+        assert_eq!(progress.milestones[0].epics[0].id, "epic-1");
+        assert_eq!(progress.milestones[1].counts.total, 0);
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
@@ -2210,11 +3211,14 @@ mod tests {
                 project_id: "project-1".into(),
                 title: "Build dashboard".into(),
                 description: None,
-                acceptance_criteria: Vec::new(),
+                acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-1".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
             })
             .expect("task saves");
 
@@ -2241,6 +3245,103 @@ mod tests {
             .assigned_agent_id
             .is_none());
 
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn architect_reviews_are_persisted_and_reject_self_review() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Review project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/review-project".into(),
+            })
+            .expect("project saves");
+        for (id, name) in [("implementer", "Implementer"), ("architect", "Architect")] {
+            database
+                .create_agent(NewAgent {
+                    id: id.into(),
+                    name: name.into(),
+                    provider: "codex".into(),
+                    role: "Engineer".into(),
+                    model: None,
+                    system_prompt: None,
+                    skills: Vec::new(),
+                    max_concurrent_tasks: 1,
+                })
+                .expect("agent saves");
+        }
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Reviewable work".into(),
+                description: None,
+                acceptance_criteria: vec!["Works".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("implementer".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("task saves");
+        database
+            .move_task("task-1", TaskStatus::Review, 0)
+            .expect("task enters review");
+        assert!(database
+            .start_agent_review(NewAgentReview {
+                id: "self-review".into(),
+                task_id: "task-1".into(),
+                agent_id: "implementer".into(),
+            })
+            .is_err());
+        database
+            .start_agent_review(NewAgentReview {
+                id: "review-1".into(),
+                task_id: "task-1".into(),
+                agent_id: "architect".into(),
+            })
+            .expect("separate reviewer starts");
+        database
+            .append_agent_review_output("review-1", "Review evidence")
+            .expect("output saves");
+        let completed = database
+            .finish_agent_review(
+                "review-1",
+                AgentReviewStatus::Completed,
+                Some(AgentReviewDecision::Approve),
+                Some("Acceptance criteria are covered."),
+                None,
+            )
+            .expect("review completes")
+            .expect("review exists");
+        assert_eq!(completed.decision, Some(AgentReviewDecision::Approve));
+        assert_eq!(completed.raw_output, "Review evidence");
+        assert_eq!(
+            database
+                .list_agent_reviews("task-1")
+                .expect("reviews load")
+                .len(),
+            1
+        );
+        assert_eq!(
+            database
+                .get_agent_review("review-1")
+                .expect("review loads by id")
+                .expect("review exists")
+                .notes
+                .as_deref(),
+            Some("Acceptance criteria are covered.")
+        );
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
@@ -2278,15 +3379,18 @@ mod tests {
                 project_id: "project-1".into(),
                 title: "Implement run".into(),
                 description: None,
-                acceptance_criteria: Vec::new(),
+                acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-1".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
             })
             .expect("task saves");
         database
-            .move_task("task-1", TaskStatus::Todo, 0)
+            .move_task("task-1", TaskStatus::Ready, 0)
             .expect("task moves");
         database
             .assign_task_worktree(
@@ -2408,15 +3512,18 @@ mod tests {
                 project_id: "project-1".into(),
                 title: "Isolate implementation".into(),
                 description: None,
-                acceptance_criteria: Vec::new(),
+                acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
             })
             .expect("task saves");
         database
-            .move_task("task-1", TaskStatus::Todo, 0)
+            .move_task("task-1", TaskStatus::Ready, 0)
             .expect("task moves");
 
         let assigned = database
@@ -2475,15 +3582,18 @@ mod tests {
                 project_id: "project-1".into(),
                 title: "Attached task".into(),
                 description: None,
-                acceptance_criteria: Vec::new(),
+                acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
             })
             .expect("task saves");
         database
-            .move_task("task-1", TaskStatus::Todo, 0)
+            .move_task("task-1", TaskStatus::Ready, 0)
             .expect("task moves");
         database
             .assign_task_worktree("task-1", "task/attached", "C:/work/attached")

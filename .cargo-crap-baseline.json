@@ -1,0 +1,2629 @@
+{
+  "$schema": "https://raw.githubusercontent.com/minikin/cargo-crap/main/schemas/report-v1.json",
+  "version": "0.4.3",
+  "entries": [
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "AgentResponse::from",
+      "line": 668,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "AgentReviewResponse::from",
+      "line": 685,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "EpicResponse::from",
+      "line": 542,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "IntegrationAttemptResponse::from",
+      "line": 588,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "MilestoneResponse::from",
+      "line": 527,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ProjectHealthResponse::from",
+      "line": 654,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ProjectProgressResponse::from",
+      "line": 571,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ProjectResponse::from",
+      "line": 472,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "RunEventResponse::from",
+      "line": 712,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "RunOutputResponse::from",
+      "line": 702,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "RunResponse::from",
+      "line": 726,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "TaskProgressCountsResponse::from",
+      "line": 557,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "TaskResponse::from",
+      "line": 499,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ValidationAttemptResponse::from",
+      "line": 637,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ValidationCommandResponse::from",
+      "line": 606,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ValidationEventResponse::from",
+      "line": 623,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "WorkspaceResponse::from",
+      "line": 486,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "append_validation_event",
+      "line": 1798,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "approve_task_review",
+      "line": 1396,
+      "cyclomatic": 10.0,
+      "coverage": 0.0,
+      "crap": 110.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "build_agent_review_prompt",
+      "line": 3100,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "build_task_prompt",
+      "line": 3049,
+      "cyclomatic": 12.0,
+      "coverage": 54.761904761904766,
+      "crap": 25.331389698736636,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "cancel_local_worker_run",
+      "line": 1029,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "cleanup_integrated_task",
+      "line": 2075,
+      "cyclomatic": 5.0,
+      "coverage": 0.0,
+      "crap": 30.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "cleanup_task_worktree",
+      "line": 2113,
+      "cyclomatic": 12.0,
+      "coverage": 0.0,
+      "crap": 156.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_agent",
+      "line": 2515,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_epic",
+      "line": 2660,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_milestone",
+      "line": 2612,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_project",
+      "line": 803,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_task",
+      "line": 2708,
+      "cyclomatic": 8.0,
+      "coverage": 0.0,
+      "crap": 72.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_validation_command",
+      "line": 1495,
+      "cyclomatic": 5.0,
+      "coverage": 0.0,
+      "crap": 30.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "create_workspace_directory",
+      "line": 3293,
+      "cyclomatic": 8.0,
+      "coverage": 0.0,
+      "crap": 72.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "default_task_priority",
+      "line": 2947,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "delete_agent",
+      "line": 2575,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "delete_project",
+      "line": 786,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "delete_task",
+      "line": 2790,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "delete_validation_command",
+      "line": 1527,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "display_validation_command",
+      "line": 1832,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "ensure_project_name_available",
+      "line": 2867,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "export_task_run_log",
+      "line": 1056,
+      "cyclomatic": 7.0,
+      "coverage": 0.0,
+      "crap": 56.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "finish_failed_integration",
+      "line": 2051,
+      "cyclomatic": 5.0,
+      "coverage": 0.0,
+      "crap": 30.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "format_run_log",
+      "line": 1083,
+      "cyclomatic": 7.0,
+      "coverage": 90.625,
+      "crap": 7.040374755859375,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_codex_provider_status",
+      "line": 910,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_local_worker_profile",
+      "line": 878,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_project",
+      "line": 775,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_project_health",
+      "line": 1556,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_project_progress",
+      "line": 2694,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_repository_details",
+      "line": 848,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_repository_diff",
+      "line": 858,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_repository_file_preview",
+      "line": 868,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_setting",
+      "line": 744,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "get_task_review",
+      "line": 1126,
+      "cyclomatic": 7.0,
+      "coverage": 0.0,
+      "crap": 56.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "integrate_next_task",
+      "line": 1840,
+      "cyclomatic": 38.0,
+      "coverage": 0.0,
+      "crap": 1482.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "integration_attempt",
+      "line": 2041,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "integration_context",
+      "line": 2015,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_agent_reviews",
+      "line": 1153,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_agents",
+      "line": 2504,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_epics",
+      "line": 2649,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_integration_attempts",
+      "line": 1450,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_milestones",
+      "line": 2598,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_projects",
+      "line": 764,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_task_runs",
+      "line": 1045,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_tasks",
+      "line": 2587,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_validation_attempts",
+      "line": 1542,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "list_validation_commands",
+      "line": 1479,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "logout_codex",
+      "line": 930,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "main",
+      "line": 3332,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "move_task",
+      "line": 2811,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "normalize_optional_text",
+      "line": 2955,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "normalize_task_list",
+      "line": 2962,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "normalize_workspace_path",
+      "line": 3278,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "open_directory",
+      "line": 3317,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "open_task_worktree",
+      "line": 2168,
+      "cyclomatic": 12.0,
+      "coverage": 0.0,
+      "crap": 156.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "parse_agent_review_decision",
+      "line": 3172,
+      "cyclomatic": 7.0,
+      "coverage": 97.05882352941177,
+      "crap": 7.001246692448606,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "parse_task_priority",
+      "line": 2951,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "parse_validation_stage",
+      "line": 1602,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "record_repository_events",
+      "line": 3235,
+      "cyclomatic": 5.0,
+      "coverage": 0.0,
+      "crap": 30.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "register_project",
+      "line": 828,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "repository_observation",
+      "line": 3222,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "request_task_changes",
+      "line": 1435,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "rerun_integration_validation",
+      "line": 1570,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "retry_integration_attempt",
+      "line": 1464,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "review_protocol_field",
+      "line": 3208,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "run_local_diagnostic",
+      "line": 892,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "run_validation",
+      "line": 1610,
+      "cyclomatic": 27.0,
+      "coverage": 0.0,
+      "crap": 756.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "save_project",
+      "line": 2824,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "set_setting",
+      "line": 754,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "start_agent_review",
+      "line": 1167,
+      "cyclomatic": 24.0,
+      "coverage": 0.0,
+      "crap": 600.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "start_codex_login",
+      "line": 917,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "start_local_worker_run",
+      "line": 952,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "start_task_run",
+      "line": 2209,
+      "cyclomatic": 29.0,
+      "coverage": 0.0,
+      "crap": 870.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "task_branch_name",
+      "line": 2903,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "task_worktree_path",
+      "line": 2880,
+      "cyclomatic": 5.0,
+      "coverage": 0.0,
+      "crap": 30.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "test_codex_connection",
+      "line": 940,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "update_agent",
+      "line": 2539,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "update_epic_status",
+      "line": 2679,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "update_milestone_status",
+      "line": 2634,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "update_task",
+      "line": 2742,
+      "cyclomatic": 10.0,
+      "coverage": 0.0,
+      "crap": 110.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "validate_agent_input",
+      "line": 2999,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "validate_assigned_agent",
+      "line": 3037,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "validate_project_name",
+      "line": 2925,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "validate_required_field",
+      "line": 3020,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "validate_task_title",
+      "line": 2936,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\apps\\desktop\\src-tauri\\src\\main.rs",
+      "function": "workspace_path_for_project",
+      "line": 2848,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-desktop"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "AgentReviewDecision::as_str",
+      "line": 575,
+      "cyclomatic": 3.0,
+      "coverage": 80.0,
+      "crap": 3.072,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "AgentReviewDecision::from_database",
+      "line": 582,
+      "cyclomatic": 4.0,
+      "coverage": 40.0,
+      "crap": 7.4559999999999995,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "AgentReviewStatus::as_str",
+      "line": 544,
+      "cyclomatic": 5.0,
+      "coverage": 57.14285714285714,
+      "crap": 6.96793002915452,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "AgentReviewStatus::from_database",
+      "line": 553,
+      "cyclomatic": 6.0,
+      "coverage": 41.66666666666667,
+      "crap": 13.14583333333333,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::agent_by_id",
+      "line": 1880,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::agent_exists",
+      "line": 1342,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::agent_review_by_id",
+      "line": 2015,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::append_agent_review_output",
+      "line": 1273,
+      "cyclomatic": 2.0,
+      "coverage": 88.88888888888889,
+      "crap": 2.0054869684499312,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::append_run_event",
+      "line": 1465,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::append_run_output",
+      "line": 1457,
+      "cyclomatic": 2.0,
+      "coverage": 85.71428571428571,
+      "crap": 2.011661807580175,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::append_validation_event",
+      "line": 890,
+      "cyclomatic": 2.0,
+      "coverage": 91.66666666666666,
+      "crap": 2.002314814814815,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::approve_task_review",
+      "line": 1593,
+      "cyclomatic": 10.0,
+      "coverage": 88.88888888888889,
+      "crap": 10.137174211248286,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::assign_task_worktree",
+      "line": 1412,
+      "cyclomatic": 3.0,
+      "coverage": 93.75,
+      "crap": 3.002197265625,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::block_integration",
+      "line": 1723,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::claim_next_integration",
+      "line": 1674,
+      "cyclomatic": 9.0,
+      "coverage": 93.33333333333333,
+      "crap": 9.024000000000001,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::complete_integration",
+      "line": 1743,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_agent",
+      "line": 1208,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_epic",
+      "line": 1042,
+      "cyclomatic": 5.0,
+      "coverage": 90.9090909090909,
+      "crap": 5.018782870022539,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_milestone",
+      "line": 1001,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_project",
+      "line": 765,
+      "cyclomatic": 7.0,
+      "coverage": 100.0,
+      "crap": 7.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_task",
+      "line": 1096,
+      "cyclomatic": 11.0,
+      "coverage": 95.55555555555556,
+      "crap": 11.010622770919067,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::create_validation_command",
+      "line": 828,
+      "cyclomatic": 5.0,
+      "coverage": 90.0,
+      "crap": 5.025,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::delete_agent",
+      "line": 1306,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::delete_project",
+      "line": 1317,
+      "cyclomatic": 10.0,
+      "coverage": 87.5,
+      "crap": 10.1953125,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::delete_task",
+      "line": 1181,
+      "cyclomatic": 8.0,
+      "coverage": 71.42857142857143,
+      "crap": 9.492711370262391,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::delete_validation_command",
+      "line": 856,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::epic_by_id",
+      "line": 1900,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::fail_integration",
+      "line": 1733,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::finish_agent_review",
+      "line": 1283,
+      "cyclomatic": 2.0,
+      "coverage": 94.44444444444444,
+      "crap": 2.0006858710562416,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::finish_integration",
+      "line": 2061,
+      "cyclomatic": 11.0,
+      "coverage": 93.65079365079364,
+      "crap": 11.03097017760661,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::finish_run",
+      "line": 1481,
+      "cyclomatic": 19.0,
+      "coverage": 84.21052631578947,
+      "crap": 20.42105263157895,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::finish_validation_attempt",
+      "line": 903,
+      "cyclomatic": 2.0,
+      "coverage": 91.66666666666666,
+      "crap": 2.002314814814815,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get",
+      "line": 709,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_agent",
+      "line": 805,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_agent_review",
+      "line": 1243,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_integration_attempt",
+      "line": 1670,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_project",
+      "line": 797,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_project_health",
+      "line": 863,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_run",
+      "line": 2142,
+      "cyclomatic": 5.0,
+      "coverage": 92.85714285714286,
+      "crap": 5.009110787172012,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::get_task",
+      "line": 801,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::integration_attempt_by_id",
+      "line": 2003,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_agent_reviews",
+      "line": 1232,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_agents",
+      "line": 1197,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_epics",
+      "line": 1031,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_integration_attempts",
+      "line": 1648,
+      "cyclomatic": 4.0,
+      "coverage": 95.23809523809523,
+      "crap": 4.001727675197063,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_milestones",
+      "line": 990,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_projects",
+      "line": 726,
+      "cyclomatic": 4.0,
+      "coverage": 96.15384615384616,
+      "crap": 4.000910332271279,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_run_events",
+      "line": 2175,
+      "cyclomatic": 3.0,
+      "coverage": 94.44444444444444,
+      "crap": 3.001543209876543,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_run_output",
+      "line": 2159,
+      "cyclomatic": 3.0,
+      "coverage": 92.3076923076923,
+      "crap": 3.0040964952207556,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_runs_for_task",
+      "line": 1350,
+      "cyclomatic": 4.0,
+      "coverage": 94.11764705882352,
+      "crap": 4.003256665988195,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_tasks",
+      "line": 968,
+      "cyclomatic": 4.0,
+      "coverage": 95.23809523809523,
+      "crap": 4.001727675197063,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_validation_attempts",
+      "line": 916,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_validation_commands",
+      "line": 809,
+      "cyclomatic": 4.0,
+      "coverage": 0.0,
+      "crap": 20.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_validation_events",
+      "line": 2050,
+      "cyclomatic": 4.0,
+      "coverage": 90.0,
+      "crap": 4.016,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::list_workspaces",
+      "line": 1860,
+      "cyclomatic": 4.0,
+      "coverage": 94.11764705882352,
+      "crap": 4.003256665988195,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::milestone_by_id",
+      "line": 1891,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::move_task",
+      "line": 1545,
+      "cyclomatic": 11.0,
+      "coverage": 89.47368421052632,
+      "crap": 11.141128444379648,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::open",
+      "line": 700,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::project_by_id",
+      "line": 1832,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::project_name_exists",
+      "line": 757,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::project_progress",
+      "line": 1073,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::recalculate_all_task_readiness",
+      "line": 2289,
+      "cyclomatic": 6.0,
+      "coverage": 100.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::recalculate_project_task_readiness",
+      "line": 2303,
+      "cyclomatic": 11.0,
+      "coverage": 94.28571428571428,
+      "crap": 11.022577259475218,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::record_integration_cleanup_error",
+      "line": 1757,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::record_project_validation",
+      "line": 938,
+      "cyclomatic": 5.0,
+      "coverage": 89.28571428571429,
+      "crap": 5.030748906705539,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::release_task_worktree",
+      "line": 1429,
+      "cyclomatic": 8.0,
+      "coverage": 88.46153846153845,
+      "crap": 8.098315885298135,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::request_task_changes",
+      "line": 1644,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::retry_integration",
+      "line": 1770,
+      "cyclomatic": 10.0,
+      "coverage": 87.27272727272727,
+      "crap": 10.206160781367393,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::set",
+      "line": 717,
+      "cyclomatic": 2.0,
+      "coverage": 87.5,
+      "crap": 2.0078125,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::start_agent_review",
+      "line": 1247,
+      "cyclomatic": 8.0,
+      "coverage": 84.0,
+      "crap": 8.262144,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::start_run",
+      "line": 1368,
+      "cyclomatic": 15.0,
+      "coverage": 89.74358974358975,
+      "crap": 15.242755272341071,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::start_validation_attempt",
+      "line": 873,
+      "cyclomatic": 3.0,
+      "coverage": 93.75,
+      "crap": 3.002197265625,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::task_by_id",
+      "line": 2130,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::task_has_dependents",
+      "line": 2275,
+      "cyclomatic": 4.0,
+      "coverage": 100.0,
+      "crap": 4.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::task_location",
+      "line": 2196,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::task_progress_counts",
+      "line": 1974,
+      "cyclomatic": 12.0,
+      "coverage": 92.3076923076923,
+      "crap": 12.06554392353209,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::transition_task_from_review",
+      "line": 2346,
+      "cyclomatic": 6.0,
+      "coverage": 85.71428571428571,
+      "crap": 6.104956268221574,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::update_agent",
+      "line": 1219,
+      "cyclomatic": 4.0,
+      "coverage": 83.33333333333334,
+      "crap": 4.0740740740740735,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::update_epic_status",
+      "line": 1061,
+      "cyclomatic": 4.0,
+      "coverage": 80.0,
+      "crap": 4.128,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::update_milestone_status",
+      "line": 1019,
+      "cyclomatic": 4.0,
+      "coverage": 80.0,
+      "crap": 4.128,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::update_task",
+      "line": 1142,
+      "cyclomatic": 10.0,
+      "coverage": 84.61538461538461,
+      "crap": 10.364132908511607,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::validate_milestone_for_project",
+      "line": 1909,
+      "cyclomatic": 3.0,
+      "coverage": 85.0,
+      "crap": 3.030375,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::validate_task_dependencies",
+      "line": 2206,
+      "cyclomatic": 14.0,
+      "coverage": 77.58620689655173,
+      "crap": 16.2069990569519,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::validate_task_hierarchy",
+      "line": 1934,
+      "cyclomatic": 6.0,
+      "coverage": 80.0,
+      "crap": 6.288,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::validation_attempt_by_id",
+      "line": 2037,
+      "cyclomatic": 4.0,
+      "coverage": 90.9090909090909,
+      "crap": 4.012021036814425,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "Database::validation_command_by_id",
+      "line": 2026,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "IntegrationStatus::as_str",
+      "line": 341,
+      "cyclomatic": 6.0,
+      "coverage": 50.0,
+      "crap": 10.5,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "IntegrationStatus::from_database",
+      "line": 351,
+      "cyclomatic": 7.0,
+      "coverage": 46.15384615384615,
+      "crap": 14.649977241693222,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ProjectHealthStatus::as_str",
+      "line": 249,
+      "cyclomatic": 5.0,
+      "coverage": 57.14285714285714,
+      "crap": 6.96793002915452,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ProjectHealthStatus::from_database",
+      "line": 258,
+      "cyclomatic": 6.0,
+      "coverage": 41.66666666666667,
+      "crap": 13.14583333333333,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "RunStatus::as_str",
+      "line": 625,
+      "cyclomatic": 6.0,
+      "coverage": 75.0,
+      "crap": 6.5625,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "RunStatus::from_database",
+      "line": 635,
+      "cyclomatic": 7.0,
+      "coverage": 53.84615384615385,
+      "crap": 11.81747837960856,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskPriority::as_str",
+      "line": 148,
+      "cyclomatic": 5.0,
+      "coverage": 71.42857142857143,
+      "crap": 5.5830903790087465,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskPriority::from_database",
+      "line": 157,
+      "cyclomatic": 1.0,
+      "coverage": 33.33333333333333,
+      "crap": 1.2962962962962963,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskPriority::parse",
+      "line": 138,
+      "cyclomatic": 6.0,
+      "coverage": 75.0,
+      "crap": 6.5625,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskStatus::as_str",
+      "line": 105,
+      "cyclomatic": 9.0,
+      "coverage": 100.0,
+      "crap": 9.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskStatus::from_database",
+      "line": 118,
+      "cyclomatic": 1.0,
+      "coverage": 33.33333333333333,
+      "crap": 1.2962962962962963,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "TaskStatus::parse",
+      "line": 91,
+      "cyclomatic": 10.0,
+      "coverage": 91.66666666666666,
+      "crap": 10.05787037037037,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ValidationStage::as_str",
+      "line": 187,
+      "cyclomatic": 3.0,
+      "coverage": 80.0,
+      "crap": 3.072,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ValidationStage::from_database",
+      "line": 194,
+      "cyclomatic": 4.0,
+      "coverage": 50.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ValidationStatus::as_str",
+      "line": 216,
+      "cyclomatic": 5.0,
+      "coverage": 57.14285714285714,
+      "crap": 6.96793002915452,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "ValidationStatus::from_database",
+      "line": 225,
+      "cyclomatic": 6.0,
+      "coverage": 41.66666666666667,
+      "crap": 13.14583333333333,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "agent_from_row",
+      "line": 2466,
+      "cyclomatic": 12.0,
+      "coverage": 100.0,
+      "crap": 12.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "agent_review_from_row",
+      "line": 2481,
+      "cyclomatic": 13.0,
+      "coverage": 100.0,
+      "crap": 13.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "decode_string_list",
+      "line": 2546,
+      "cyclomatic": 1.0,
+      "coverage": 60.0,
+      "crap": 1.064,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "encode_string_list",
+      "line": 2541,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "epic_from_row",
+      "line": 2512,
+      "cyclomatic": 9.0,
+      "coverage": 100.0,
+      "crap": 9.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "integration_attempt_from_row",
+      "line": 2396,
+      "cyclomatic": 13.0,
+      "coverage": 100.0,
+      "crap": 13.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "migrate",
+      "line": 2668,
+      "cyclomatic": 7.0,
+      "coverage": 91.30434782608695,
+      "crap": 7.032218295389168,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "milestone_from_row",
+      "line": 2499,
+      "cyclomatic": 9.0,
+      "coverage": 100.0,
+      "crap": 9.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "move_task_in_transaction",
+      "line": 2621,
+      "cyclomatic": 6.0,
+      "coverage": 100.0,
+      "crap": 6.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "normalize_positions",
+      "line": 2649,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "project_health_from_row",
+      "line": 2454,
+      "cyclomatic": 9.0,
+      "coverage": 100.0,
+      "crap": 9.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "run_from_row",
+      "line": 2525,
+      "cyclomatic": 11.0,
+      "coverage": 100.0,
+      "crap": 11.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "set_positions",
+      "line": 2658,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "task_blocked_reason",
+      "line": 2562,
+      "cyclomatic": 11.0,
+      "coverage": 81.08108108108108,
+      "crap": 11.8193591692496,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "task_from_row",
+      "line": 2371,
+      "cyclomatic": 26.0,
+      "coverage": 100.0,
+      "crap": 26.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "task_ids_for_status",
+      "line": 2607,
+      "cyclomatic": 4.0,
+      "coverage": 100.0,
+      "crap": 4.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "validate_outcome_status",
+      "line": 2552,
+      "cyclomatic": 2.0,
+      "coverage": 57.14285714285714,
+      "crap": 2.314868804664723,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "validation_attempt_from_row",
+      "line": 2427,
+      "cyclomatic": 12.0,
+      "coverage": 100.0,
+      "crap": 12.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "validation_command_from_row",
+      "line": 2412,
+      "cyclomatic": 13.0,
+      "coverage": 100.0,
+      "crap": 13.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-db\\src\\lib.rs",
+      "function": "validation_event_from_row",
+      "line": 2442,
+      "cyclomatic": 8.0,
+      "coverage": 100.0,
+      "crap": 8.0,
+      "crate": "orchestr-db"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitError::fmt",
+      "line": 92,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::create_initial_commit",
+      "line": 110,
+      "cyclomatic": 5.0,
+      "coverage": 70.0,
+      "crap": 5.675000000000001,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::create_task_worktree",
+      "line": 269,
+      "cyclomatic": 14.0,
+      "coverage": 72.54901960784314,
+      "crap": 18.05442853804344,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::delete_integrated_task_branch",
+      "line": 446,
+      "cyclomatic": 6.0,
+      "coverage": 75.0,
+      "crap": 6.5625,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::file_diff",
+      "line": 192,
+      "cyclomatic": 8.0,
+      "coverage": 80.76923076923077,
+      "crap": 8.455166135639509,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::file_preview",
+      "line": 221,
+      "cyclomatic": 14.0,
+      "coverage": 73.80952380952381,
+      "crap": 17.52116402116402,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::initialize_repository",
+      "line": 104,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::inspect_repository",
+      "line": 122,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::prepare_task_for_integration",
+      "line": 406,
+      "cyclomatic": 13.0,
+      "coverage": 76.31578947368422,
+      "crap": 15.245243475725323,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::remove_task_worktree",
+      "line": 328,
+      "cyclomatic": 7.0,
+      "coverage": 75.86206896551724,
+      "crap": 7.689122145229407,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::repository_details",
+      "line": 145,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::squash_integrate_task",
+      "line": 358,
+      "cyclomatic": 14.0,
+      "coverage": 69.76744186046511,
+      "crap": 19.416026261838585,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::task_review",
+      "line": 154,
+      "cyclomatic": 12.0,
+      "coverage": 0.0,
+      "crap": 156.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "GitService::writable_git_directories",
+      "line": 134,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "canonical_directory",
+      "line": 575,
+      "cyclomatic": 2.0,
+      "coverage": 35.714285714285715,
+      "crap": 3.0626822157434397,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "changed_files",
+      "line": 679,
+      "cyclomatic": 8.0,
+      "coverage": 95.65217391304348,
+      "crap": 8.005260129859456,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "command_error",
+      "line": 779,
+      "cyclomatic": 2.0,
+      "coverage": 83.33333333333334,
+      "crap": 2.0185185185185186,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "commit_with_fallback_identity",
+      "line": 521,
+      "cyclomatic": 6.0,
+      "coverage": 80.95238095238095,
+      "crap": 6.248785228377065,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "commits_between",
+      "line": 648,
+      "cyclomatic": 2.0,
+      "coverage": 0.0,
+      "crap": 6.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "conflicted_paths",
+      "line": 512,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "default_branch",
+      "line": 612,
+      "cyclomatic": 4.0,
+      "coverage": 77.77777777777779,
+      "crap": 4.175582990397805,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "ensure_clean_integration_workspace",
+      "line": 474,
+      "cyclomatic": 5.0,
+      "coverage": 58.82352941176471,
+      "crap": 6.745369428048035,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "ensure_task_worktree_ready",
+      "line": 493,
+      "cyclomatic": 5.0,
+      "coverage": 58.82352941176471,
+      "crap": 6.745369428048035,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "execute_git",
+      "line": 767,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "git_argument_path",
+      "line": 543,
+      "cyclomatic": 2.0,
+      "coverage": 85.71428571428571,
+      "crap": 2.011661807580175,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "image_mime_type",
+      "line": 460,
+      "cyclomatic": 8.0,
+      "coverage": 72.72727272727273,
+      "crap": 9.298271975957926,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "latest_commit",
+      "line": 632,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "non_empty",
+      "line": 788,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "parse_commits",
+      "line": 663,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "recent_commits",
+      "line": 636,
+      "cyclomatic": 2.0,
+      "coverage": 87.5,
+      "crap": 2.0078125,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "repository_root",
+      "line": 590,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "repository_summary",
+      "line": 559,
+      "cyclomatic": 5.0,
+      "coverage": 100.0,
+      "crap": 5.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "resolve_git_directory",
+      "line": 597,
+      "cyclomatic": 4.0,
+      "coverage": 58.333333333333336,
+      "crap": 5.1574074074074066,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "run_git",
+      "line": 741,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "run_git_if_success",
+      "line": 754,
+      "cyclomatic": 3.0,
+      "coverage": 100.0,
+      "crap": 3.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "truncate_diff",
+      "line": 725,
+      "cyclomatic": 2.0,
+      "coverage": 28.57142857142857,
+      "crap": 3.4577259475218662,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-git\\src\\lib.rs",
+      "function": "validate_repository_relative_path",
+      "line": 705,
+      "cyclomatic": 4.0,
+      "coverage": 100.0,
+      "crap": 4.0,
+      "crate": "orchestr-git"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::action_request",
+      "line": 261,
+      "cyclomatic": 4.0,
+      "coverage": 91.66666666666666,
+      "crap": 4.0092592592592595,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::execution_event",
+      "line": 100,
+      "cyclomatic": 8.0,
+      "coverage": 33.33333333333333,
+      "crap": 26.96296296296297,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::execution_request",
+      "line": 275,
+      "cyclomatic": 8.0,
+      "coverage": 74.0,
+      "crap": 9.124864,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::format_execution_output",
+      "line": 96,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::id",
+      "line": 211,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "CodexProvider::inspect",
+      "line": 215,
+      "cyclomatic": 7.0,
+      "coverage": 0.0,
+      "crap": 56.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "ProviderError::fmt",
+      "line": 53,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "classify_authentication",
+      "line": 349,
+      "cyclomatic": 5.0,
+      "coverage": 87.5,
+      "crap": 5.048828125,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "codex_item_event",
+      "line": 147,
+      "cyclomatic": 11.0,
+      "coverage": 86.36363636363636,
+      "crap": 11.306818181818182,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "event_record",
+      "line": 138,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "is_validation_command",
+      "line": 195,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-provider\\src\\lib.rs",
+      "function": "run_codex_status",
+      "line": 332,
+      "cyclomatic": 3.0,
+      "coverage": 0.0,
+      "crap": 12.0,
+      "crate": "orchestr-provider"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "LocalWorker::inspect_tool",
+      "line": 155,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "LocalWorker::profile",
+      "line": 92,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "LocalWorker::start",
+      "line": 106,
+      "cyclomatic": 9.0,
+      "coverage": 93.18181818181817,
+      "crap": 9.025673835462058,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "WorkerError::fmt",
+      "line": 80,
+      "cyclomatic": 1.0,
+      "coverage": 0.0,
+      "crap": 2.0,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "WorkerHandle::cancel",
+      "line": 179,
+      "cyclomatic": 5.0,
+      "coverage": 71.42857142857143,
+      "crap": 5.5830903790087465,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "WorkerHandle::wait",
+      "line": 171,
+      "cyclomatic": 2.0,
+      "coverage": 100.0,
+      "crap": 2.0,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "detect_tool",
+      "line": 299,
+      "cyclomatic": 1.0,
+      "coverage": 96.0,
+      "crap": 1.000064,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "find_program_on_path",
+      "line": 345,
+      "cyclomatic": 1.0,
+      "coverage": 100.0,
+      "crap": 1.0,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "platform_architecture",
+      "line": 416,
+      "cyclomatic": 4.0,
+      "coverage": 66.66666666666666,
+      "crap": 4.5925925925925934,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "platform_os",
+      "line": 407,
+      "cyclomatic": 5.0,
+      "coverage": 57.14285714285714,
+      "crap": 6.96793002915452,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "resolve_program",
+      "line": 328,
+      "cyclomatic": 5.0,
+      "coverage": 90.9090909090909,
+      "crap": 5.018782870022539,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "spawn_output_reader",
+      "line": 270,
+      "cyclomatic": 1.0,
+      "coverage": 87.5,
+      "crap": 1.001953125,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "strip_terminal_control_sequences",
+      "line": 372,
+      "cyclomatic": 12.0,
+      "coverage": 87.5,
+      "crap": 12.28125,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "terminate_process_tree",
+      "line": 213,
+      "cyclomatic": 7.0,
+      "coverage": 36.36363636363637,
+      "crap": 19.627347858752813,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "truncate_output_line",
+      "line": 353,
+      "cyclomatic": 2.0,
+      "coverage": 28.57142857142857,
+      "crap": 3.4577259475218662,
+      "crate": "orchestr-worker"
+    },
+    {
+      "file": "C:\\Users\\konta\\Projects\\orchestr\\crates\\orchestr-worker\\src\\lib.rs",
+      "function": "validate_request",
+      "line": 244,
+      "cyclomatic": 6.0,
+      "coverage": 66.66666666666666,
+      "crap": 7.333333333333336,
+      "crate": "orchestr-worker"
+    }
+  ],
+  "diagnostics": {
+    "analyzed_files": 5,
+    "lcov_files": 5,
+    "matched_files": 5,
+    "source_only": {
+      "count": 0,
+      "examples": []
+    },
+    "lcov_only": {
+      "count": 0,
+      "examples": []
+    }
+  }
+}

@@ -31,6 +31,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
+          components: llvm-tools-preview
 
       - name: Restore Rust build cache
         uses: swatinem/rust-cache@v2
@@ -40,11 +41,32 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install CRAP tools
+        shell: bash
+        run: |
+          cargo install cargo-llvm-cov --version 0.9.0 --locked
+          cargo install cargo-crap --version 0.4.3 --locked
+
       - name: Check frontend
         run: npm run check
 
-      - name: Test persistence crate
-        run: cargo test -p orchestr-db
+      - name: Run TypeScript CRAP gate
+        run: npm run crap:ts
+
+      - name: Run Rust CRAP gate
+        run: npm run crap:rust
+
+      - name: Upload CRAP reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: crap-reports
+          if-no-files-found: warn
+          path: |
+            apps/desktop/coverage/coverage-final.json
+            apps/desktop/coverage/coverage-final.normalized.json
+            target/crap/lcov.info
+            target/crap/rust-crap.json
 
       - name: Set release version from tag
         if: ${{ github.ref_type == 'tag' }}

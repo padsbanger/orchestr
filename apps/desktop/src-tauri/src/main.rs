@@ -8,10 +8,12 @@ use std::{
 };
 
 use orchestr_db::{
-    Agent, AgentUpdate, Database, IntegrationAttempt, NewAgent, NewProject, NewRun, NewRunEvent,
-    NewTask, NewValidationCommand, NewValidationEvent, Project, ProjectDeletion, ProjectHealth,
-    Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus, TaskUpdate, ValidationAttempt,
-    ValidationCommand, ValidationStage, ValidationStatus, Workspace,
+    Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, Epic,
+    IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject,
+    NewRun, NewRunEvent, NewTask, NewValidationCommand, NewValidationEvent, Project,
+    ProjectDeletion, ProjectHealth, ProjectProgress, Run, RunEvent, RunOutput, RunStatus, Task,
+    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
+    ValidationStatus, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -71,6 +73,10 @@ struct CreateTaskInput {
     #[serde(default)]
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
+    #[serde(default = "default_task_priority")]
+    priority: String,
+    milestone_id: Option<String>,
+    epic_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +93,10 @@ struct UpdateTaskInput {
     #[serde(default)]
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
+    #[serde(default = "default_task_priority")]
+    priority: String,
+    milestone_id: Option<String>,
+    epic_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +202,28 @@ struct StartedTaskRunResponse {
     task: TaskResponse,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartAgentReviewInput {
+    task_id: String,
+    agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentReviewResponse {
+    id: String,
+    task_id: String,
+    agent_id: String,
+    status: String,
+    decision: Option<String>,
+    notes: Option<String>,
+    raw_output: String,
+    error: Option<String>,
+    started_at: String,
+    completed_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectResponse {
@@ -229,10 +261,94 @@ struct TaskResponse {
     assigned_agent_id: Option<String>,
     branch: Option<String>,
     worktree_path: Option<String>,
+    priority: String,
+    blocked_reason: Option<String>,
+    milestone_id: Option<String>,
+    epic_id: Option<String>,
     status: String,
     position: i64,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateMilestoneInput {
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    target_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateEpicInput {
+    project_id: String,
+    milestone_id: Option<String>,
+    title: String,
+    description: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateOutcomeStatusInput {
+    id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MilestoneResponse {
+    id: String,
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    target_date: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EpicResponse {
+    id: String,
+    project_id: String,
+    milestone_id: Option<String>,
+    title: String,
+    description: Option<String>,
+    status: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskProgressCountsResponse {
+    total: i64,
+    backlog: i64,
+    ready: i64,
+    in_progress: i64,
+    review: i64,
+    blocked: i64,
+    done: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MilestoneProgressResponse {
+    milestone: MilestoneResponse,
+    counts: TaskProgressCountsResponse,
+    epics: Vec<EpicResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectProgressResponse {
+    counts: TaskProgressCountsResponse,
+    milestones: Vec<MilestoneProgressResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -395,10 +511,75 @@ impl From<Task> for TaskResponse {
             worktree_path: task
                 .worktree_path
                 .map(|path| normalize_workspace_path(&path)),
+            priority: task.priority.as_str().to_owned(),
+            blocked_reason: task.blocked_reason,
+            milestone_id: task.milestone_id,
+            epic_id: task.epic_id,
             status: task.status.as_str().to_owned(),
             position: task.position,
             created_at: task.created_at,
             updated_at: task.updated_at,
+        }
+    }
+}
+
+impl From<Milestone> for MilestoneResponse {
+    fn from(value: Milestone) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            title: value.title,
+            description: value.description,
+            status: value.status,
+            target_date: value.target_date,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<Epic> for EpicResponse {
+    fn from(value: Epic) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            milestone_id: value.milestone_id,
+            title: value.title,
+            description: value.description,
+            status: value.status,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<orchestr_db::TaskProgressCounts> for TaskProgressCountsResponse {
+    fn from(value: orchestr_db::TaskProgressCounts) -> Self {
+        Self {
+            total: value.total,
+            backlog: value.backlog,
+            ready: value.ready,
+            in_progress: value.in_progress,
+            review: value.review,
+            blocked: value.blocked,
+            done: value.done,
+        }
+    }
+}
+
+impl From<ProjectProgress> for ProjectProgressResponse {
+    fn from(value: ProjectProgress) -> Self {
+        Self {
+            counts: value.counts.into(),
+            milestones: value
+                .milestones
+                .into_iter()
+                .map(|entry| MilestoneProgressResponse {
+                    milestone: entry.milestone.into(),
+                    counts: entry.counts.into(),
+                    epics: entry.epics.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -496,6 +677,23 @@ impl From<Agent> for AgentResponse {
             max_concurrent_tasks: agent.max_concurrent_tasks,
             created_at: agent.created_at,
             updated_at: agent.updated_at,
+        }
+    }
+}
+
+impl From<AgentReview> for AgentReviewResponse {
+    fn from(review: AgentReview) -> Self {
+        Self {
+            id: review.id,
+            task_id: review.task_id,
+            agent_id: review.agent_id,
+            status: review.status.as_str().into(),
+            decision: review.decision.map(|decision| decision.as_str().into()),
+            notes: review.notes,
+            raw_output: review.raw_output,
+            error: review.error,
+            started_at: review.started_at,
+            completed_at: review.completed_at,
         }
     }
 }
@@ -949,6 +1147,249 @@ fn get_task_review(
         .ok_or_else(|| "This task has no isolated worktree to review.".to_owned())?;
     GitService::task_review(Path::new(&worktree_path), &project.default_branch)
         .map_err(|error| format!("Unable to inspect the task branch: {error}"))
+}
+
+#[tauri::command]
+fn list_agent_reviews(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<AgentReviewResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local review store is unavailable.".to_owned())?
+        .list_agent_reviews(&task_id)
+        .map(|reviews| reviews.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load agent reviews: {error}"))
+}
+
+#[tauri::command]
+fn start_agent_review(
+    input: StartAgentReviewInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentReviewResponse, String> {
+    let (task, reviewer, default_branch, recent_runs, validation_attempts) = {
+        let database = state
+            .database
+            .lock()
+            .map_err(|_| "The local review store is unavailable.".to_owned())?;
+        let task = database
+            .get_task(&input.task_id)
+            .map_err(|error| format!("Unable to load task for review: {error}"))?
+            .ok_or_else(|| "The task no longer exists.".to_owned())?;
+        if task.status != TaskStatus::Review {
+            return Err("Only Review tasks can be evaluated by an architect agent.".into());
+        }
+        if task.assigned_agent_id.as_deref() == Some(input.agent_id.as_str()) {
+            return Err("An implementation agent cannot review its own task.".into());
+        }
+        let reviewer = database
+            .get_agent(&input.agent_id)
+            .map_err(|error| format!("Unable to load reviewer agent: {error}"))?
+            .ok_or_else(|| "The selected reviewer agent no longer exists.".to_owned())?;
+        if reviewer.provider != "codex" {
+            return Err(
+                "Only Codex agents can perform local architect reviews at this stage.".into(),
+            );
+        }
+        let project = database
+            .get_project(&task.project_id)
+            .map_err(|error| format!("Unable to load the project for review: {error}"))?
+            .ok_or_else(|| "The task project no longer exists.".to_owned())?;
+        let recent_runs = database
+            .list_runs_for_task(&task.id)
+            .map_err(|error| format!("Unable to load the implementation run summary: {error}"))?;
+        let validation_attempts = database
+            .list_validation_attempts(&task.project_id, 20)
+            .map_err(|error| format!("Unable to load implementation validation: {error}"))?
+            .into_iter()
+            .filter(|attempt| attempt.task_id.as_deref() == Some(task.id.as_str()))
+            .collect::<Vec<_>>();
+        (
+            task,
+            reviewer,
+            project.default_branch,
+            recent_runs,
+            validation_attempts,
+        )
+    };
+    let worktree_path = task
+        .worktree_path
+        .clone()
+        .ok_or_else(|| "This task has no isolated worktree to review.".to_owned())?;
+    let task_review = GitService::task_review(Path::new(&worktree_path), &default_branch)
+        .map_err(|error| format!("Unable to inspect the task branch: {error}"))?;
+    let provider_status = CodexProvider
+        .inspect()
+        .map_err(|error| format!("Unable to inspect Codex before starting the review: {error}"))?;
+    if !matches!(provider_status.readiness, ProviderReadiness::Ready) {
+        return Err(format!(
+            "Codex is not ready to review this task. {}",
+            provider_status.detail
+        ));
+    }
+    let review_id = Uuid::new_v4().to_string();
+    let persisted_review = state
+        .database
+        .lock()
+        .map_err(|_| "The local review store is unavailable.".to_owned())?
+        .start_agent_review(NewAgentReview {
+            id: review_id.clone(),
+            task_id: task.id.clone(),
+            agent_id: reviewer.id.clone(),
+        })
+        .map_err(|error| format!("Unable to start the architect review: {error}"))?;
+    let request = match CodexProvider.execution_request(AgentRunInput {
+        model: reviewer.model.clone(),
+        prompt: build_agent_review_prompt(
+            &task,
+            &reviewer,
+            &task_review,
+            &recent_runs,
+            &validation_attempts,
+        ),
+        working_directory: PathBuf::from(&worktree_path),
+        additional_writable_directories: Vec::new(),
+        read_only: true,
+    }) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = state.database.lock().ok().and_then(|mut database| {
+                database
+                    .finish_agent_review(
+                        &review_id,
+                        AgentReviewStatus::Failed,
+                        None,
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .ok()
+            });
+            return Err(format!("Unable to prepare the architect review: {error}"));
+        }
+    };
+    let run = match LocalWorker::start(request) {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = state.database.lock().ok().and_then(|mut database| {
+                database
+                    .finish_agent_review(
+                        &review_id,
+                        AgentReviewStatus::Failed,
+                        None,
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .ok()
+            });
+            return Err(format!(
+                "Unable to start Codex for architect review: {error}"
+            ));
+        }
+    };
+    let handle = run.handle;
+    let active_runs = Arc::clone(&state.local_worker_runs);
+    active_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?
+        .insert(
+            review_id.clone(),
+            ActiveLocalRun {
+                handle: handle.clone(),
+                cancel_requested: false,
+            },
+        );
+    let database = Arc::clone(&state.database);
+    let event_review_id = review_id.clone();
+    let task_id = task.id.clone();
+    thread::spawn(move || {
+        for output in run.output {
+            if let Ok(mut database) = database.lock() {
+                let _ = database.append_agent_review_output(&event_review_id, &output.text);
+                let _ = database.append_agent_review_output(&event_review_id, "\n");
+            }
+            let _ = app.emit("agent-review://event", event_review_id.clone());
+        }
+        let result = handle.wait();
+        let cancelled = active_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(&event_review_id))
+            .is_some_and(|run| run.cancel_requested);
+        let finish = |status, decision, notes: Option<String>, error: Option<String>| {
+            if let Ok(mut database) = database.lock() {
+                let _ = database.finish_agent_review(
+                    &event_review_id,
+                    status,
+                    decision,
+                    notes.as_deref(),
+                    error.as_deref(),
+                );
+                if status == AgentReviewStatus::Completed {
+                    let transition = match decision {
+                        Some(AgentReviewDecision::Approve) => {
+                            database.approve_task_review(&task_id, &Uuid::new_v4().to_string())
+                        }
+                        Some(AgentReviewDecision::RequestChanges) => {
+                            database.request_task_changes(&task_id)
+                        }
+                        None => Ok(None),
+                    };
+                    let _ = transition;
+                }
+            }
+        };
+        match result {
+            Ok(_exit_status) if cancelled => finish(
+                AgentReviewStatus::Cancelled,
+                None,
+                None,
+                Some("Architect review cancelled.".into()),
+            ),
+            Ok(exit_status) if exit_status.success() => {
+                let output = database
+                    .lock()
+                    .ok()
+                    .and_then(|database| {
+                        database
+                            .get_agent_review(&event_review_id)
+                            .ok()
+                            .flatten()
+                            .map(|review| review.raw_output)
+                    })
+                    .unwrap_or_default();
+                match parse_agent_review_decision(&output) {
+                    Some((decision, notes)) => finish(
+                        AgentReviewStatus::Completed,
+                        Some(decision),
+                        Some(notes),
+                        None,
+                    ),
+                    None => finish(
+                        AgentReviewStatus::Failed,
+                        None,
+                        None,
+                        Some("Codex did not return the required review decision format.".into()),
+                    ),
+                }
+            }
+            Ok(_) => finish(
+                AgentReviewStatus::Failed,
+                None,
+                None,
+                Some("Codex exited with an error while reviewing the task.".into()),
+            ),
+            Err(error) => finish(
+                AgentReviewStatus::Failed,
+                None,
+                None,
+                Some(error.to_string()),
+            ),
+        }
+        let _ = app.emit("agent-review://event", event_review_id);
+    });
+    Ok(persisted_review.into())
 }
 
 #[tauri::command]
@@ -1779,9 +2220,9 @@ fn start_task_run(
             .get_task(&task_id)
             .map_err(|error| format!("Unable to load task for execution: {error}"))?
             .ok_or_else(|| "The task no longer exists.".to_owned())?;
-        if task.status != TaskStatus::Todo {
+        if task.status != TaskStatus::Ready {
             return Err(
-                "Only Todo tasks can be started. Move the task back to Todo to run it again."
+                "Only Ready tasks can be started. Resolve any blocked requirements before running it again."
                     .into(),
             );
         }
@@ -1861,6 +2302,7 @@ fn start_task_run(
             .map_err(|error| {
                 format!("Unable to prepare Git metadata access for the task worktree: {error}")
             })?,
+            read_only: false,
         })
         .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
     let repository_before = repository_observation(Path::new(&worktree_path));
@@ -2153,9 +2595,120 @@ fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<Task
 }
 
 #[tauri::command]
+fn list_milestones(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<MilestoneResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_milestones(&project_id)
+        .map(|items| items.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load milestones: {error}"))
+}
+
+#[tauri::command]
+fn create_milestone(
+    input: CreateMilestoneInput,
+    state: State<'_, AppState>,
+) -> Result<MilestoneResponse, String> {
+    let title = validate_task_title(&input.title)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_milestone(NewMilestone {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            title,
+            description: normalize_optional_text(input.description),
+            status: input.status,
+            target_date: normalize_optional_text(input.target_date),
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to create milestone: {error}"))
+}
+
+#[tauri::command]
+fn update_milestone_status(
+    input: UpdateOutcomeStatusInput,
+    state: State<'_, AppState>,
+) -> Result<MilestoneResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .update_milestone_status(&input.id, &input.status)
+        .map_err(|error| format!("Unable to update milestone: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The milestone no longer exists.".into())
+}
+
+#[tauri::command]
+fn list_epics(project_id: String, state: State<'_, AppState>) -> Result<Vec<EpicResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_epics(&project_id)
+        .map(|items| items.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load epics: {error}"))
+}
+
+#[tauri::command]
+fn create_epic(input: CreateEpicInput, state: State<'_, AppState>) -> Result<EpicResponse, String> {
+    let title = validate_task_title(&input.title)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_epic(NewEpic {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            milestone_id: normalize_optional_text(input.milestone_id),
+            title,
+            description: normalize_optional_text(input.description),
+            status: input.status,
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to create epic: {error}"))
+}
+
+#[tauri::command]
+fn update_epic_status(
+    input: UpdateOutcomeStatusInput,
+    state: State<'_, AppState>,
+) -> Result<EpicResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .update_epic_status(&input.id, &input.status)
+        .map_err(|error| format!("Unable to update epic: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The epic no longer exists.".into())
+}
+
+#[tauri::command]
+fn get_project_progress(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectProgressResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .project_progress(&project_id)
+        .map(Into::into)
+        .map_err(|error| format!("Unable to calculate project progress: {error}"))
+}
+
+#[tauri::command]
 fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
     let title = validate_task_title(&input.title)?;
     let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
+    let priority = parse_task_priority(&input.priority)?;
     let mut database = state
         .database
         .lock()
@@ -2177,6 +2730,9 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
             relevant_paths: normalize_task_list(input.relevant_paths, "Relevant paths", 50, 500)?,
             dependency_ids: normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?,
             assigned_agent_id,
+            priority,
+            milestone_id: normalize_optional_text(input.milestone_id),
+            epic_id: normalize_optional_text(input.epic_id),
         })
         .map(Into::into)
         .map_err(|error| format!("Unable to create task: {error}"))
@@ -2193,6 +2749,7 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
         return Err("A task cannot depend on itself.".into());
     }
     let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
+    let priority = parse_task_priority(&input.priority)?;
     let mut database = state
         .database
         .lock()
@@ -2219,6 +2776,9 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
                 )?,
                 dependency_ids,
                 assigned_agent_id,
+                priority,
+                milestone_id: normalize_optional_text(input.milestone_id),
+                epic_id: normalize_optional_text(input.epic_id),
             },
         )
         .map_err(|error| format!("Unable to update task: {error}"))?
@@ -2384,6 +2944,14 @@ fn validate_task_title(title: &str) -> Result<String, String> {
     Ok(title.to_owned())
 }
 
+fn default_task_priority() -> String {
+    "normal".into()
+}
+
+fn parse_task_priority(value: &str) -> Result<TaskPriority, String> {
+    TaskPriority::parse(value).ok_or_else(|| "Unknown task priority.".into())
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|text| {
         let text = text.trim();
@@ -2527,6 +3095,128 @@ fn build_task_prompt(task: &Task, agent: &Agent) -> String {
          When finished, summarize the changes, validation performed, and the commit hash.",
     );
     prompt
+}
+
+fn build_agent_review_prompt(
+    task: &Task,
+    reviewer: &Agent,
+    review: &orchestr_git::TaskReview,
+    runs: &[Run],
+    validations: &[ValidationAttempt],
+) -> String {
+    let acceptance_criteria = if task.acceptance_criteria.is_empty() {
+        "- No acceptance criteria recorded.".to_owned()
+    } else {
+        task.acceptance_criteria
+            .iter()
+            .map(|criterion| format!("- {criterion}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let commits = if review.commits.is_empty() {
+        "- No task-branch commits found.".to_owned()
+    } else {
+        review
+            .commits
+            .iter()
+            .map(|commit| format!("- {} {}", commit.short_hash, commit.subject))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let run_summary = runs
+        .first()
+        .map(|run| {
+            format!(
+                "Latest implementation run: {} (exit {:?}).",
+                run.status.as_str(),
+                run.exit_code
+            )
+        })
+        .unwrap_or_else(|| "No implementation run is recorded.".into());
+    let validation_summary = if validations.is_empty() {
+        "No implementation validation attempts are recorded.".to_owned()
+    } else {
+        validations
+            .iter()
+            .map(|attempt| {
+                format!(
+                    "- {}: {}{}",
+                    attempt.stage.as_str(),
+                    attempt.status.as_str(),
+                    attempt
+                        .error
+                        .as_deref()
+                        .map(|error| format!(" ({error})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "You are {name}, a logically separate technical reviewer. You must not change files, run destructive commands, or approve your own implementation. Review this task only from the supplied evidence.\n\n# Task\n{title}\n{description}\n\n# Acceptance criteria\n{acceptance_criteria}\n\n# Relevant paths\n{paths}\n\n# Project decisions\nNo persisted architecture-decision registry is available yet. Treat the task specification and repository instructions as authoritative.\n\n# Implementation run\n{run_summary}\n\n# Implementation validation\n{validation_summary}\n\n# Branch evidence\nBranch: {branch}\nBase: {base}\nCommits:\n{commits}\n\n# Diff\n{diff}\n\nDecide whether the implementation satisfies the acceptance criteria and is safe to send to normal integration. Return exactly these two single-line fields, with no alternative decision wording:\nORCHESTR_REVIEW_DECISION: approve | request_changes\nORCHESTR_REVIEW_NOTES: concise evidence-based review notes",
+        name = reviewer.name,
+        title = task.title,
+        description = task.description.as_deref().unwrap_or("No description provided."),
+        paths = if task.relevant_paths.is_empty() {
+            "No relevant paths recorded.".to_owned()
+        } else {
+            task.relevant_paths.join("\n")
+        },
+        branch = review.branch,
+        base = review.base_branch,
+        diff = if review.diff.is_empty() { "No diff available." } else { &review.diff },
+    )
+}
+
+fn parse_agent_review_decision(output: &str) -> Option<(AgentReviewDecision, String)> {
+    let messages = output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| {
+            event
+                .get("item")
+                .filter(|item| {
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("agent_message")
+                })
+                .and_then(|item| item.get("text").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let source = messages.join("\n");
+    if source.is_empty() {
+        return None;
+    }
+    let decision = review_protocol_field(&source, "ORCHESTR_REVIEW_DECISION")?;
+    let decision = decision
+        .trim_matches(|character: char| matches!(character, '*' | '`' | '_' | '.' | ';'))
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_");
+    let decision = match decision.as_str() {
+        "approve" => AgentReviewDecision::Approve,
+        "request_changes" | "changes_requested" => AgentReviewDecision::RequestChanges,
+        _ => return None,
+    };
+    let notes = review_protocol_field(&source, "ORCHESTR_REVIEW_NOTES")
+        .filter(|notes| !notes.is_empty())?
+        .chars()
+        .take(4000)
+        .collect();
+    Some((decision, notes))
+}
+
+fn review_protocol_field(source: &str, field: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        let normalized = line.trim();
+        let position = normalized.to_ascii_uppercase().find(field)?;
+        let value = normalized[position + field.len()..]
+            .trim_start_matches(|character: char| {
+                character.is_whitespace() || matches!(character, ':' | '*' | '`' | '_' | '|')
+            })
+            .trim_end_matches(['*', '`', '|'])
+            .trim();
+        (!value.is_empty()).then_some(value.to_owned())
+    })
 }
 
 fn repository_observation(path: &Path) -> Option<RepositoryObservation> {
@@ -2675,6 +3365,8 @@ fn main() {
             list_task_runs,
             export_task_run_log,
             get_task_review,
+            list_agent_reviews,
+            start_agent_review,
             approve_task_review,
             request_task_changes,
             list_integration_attempts,
@@ -2694,6 +3386,13 @@ fn main() {
             update_agent,
             delete_agent,
             list_tasks,
+            list_milestones,
+            create_milestone,
+            update_milestone_status,
+            list_epics,
+            create_epic,
+            update_epic_status,
+            get_project_progress,
             create_task,
             update_task,
             delete_task,
@@ -2705,8 +3404,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_task_prompt, format_run_log, normalize_workspace_path};
-    use orchestr_db::{Agent, Run, RunEvent, RunOutput, RunStatus, Task, TaskStatus};
+    use super::{
+        build_task_prompt, format_run_log, normalize_workspace_path, parse_agent_review_decision,
+    };
+    use orchestr_db::{
+        Agent, AgentReviewDecision, Run, RunEvent, RunOutput, RunStatus, Task, TaskPriority,
+        TaskStatus,
+    };
 
     #[cfg(windows)]
     #[test]
@@ -2736,6 +3440,11 @@ mod tests {
                 assigned_agent_id: None,
                 branch: Some("task/commit-task-work".into()),
                 worktree_path: Some("C:/work/task-1".into()),
+                priority: TaskPriority::Normal,
+                blocked_reason: None,
+                readiness_blocked: false,
+                milestone_id: None,
+                epic_id: None,
                 status: TaskStatus::InProgress,
                 position: 0,
                 created_at: String::new(),
@@ -2758,6 +3467,27 @@ mod tests {
         assert!(prompt.contains("Do not leave staged or unstaged task changes behind"));
         assert!(prompt.contains("Do not modify filesystem permissions"));
         assert!(prompt.contains("low-level Git plumbing"));
+    }
+
+    #[test]
+    fn parses_a_structured_architect_decision_from_codex_output() {
+        let output = r#"{"type":"item.completed","item":{"type":"agent_message","text":"ORCHESTR_REVIEW_DECISION: request_changes\nORCHESTR_REVIEW_NOTES: The empty state has no accessible label."}}"#;
+        assert_eq!(
+            parse_agent_review_decision(output),
+            Some((
+                AgentReviewDecision::RequestChanges,
+                "The empty state has no accessible label.".into()
+            ))
+        );
+        let markdown_output = r#"{"type":"item.completed","item":{"type":"agent_message","text":"**ORCHESTR_REVIEW_DECISION:** changes requested\n**ORCHESTR_REVIEW_NOTES:** Add an accessible empty-state label."}}"#;
+        assert_eq!(
+            parse_agent_review_decision(markdown_output),
+            Some((
+                AgentReviewDecision::RequestChanges,
+                "Add an accessible empty-state label.".into()
+            ))
+        );
+        assert!(parse_agent_review_decision("ORCHESTR_REVIEW_DECISION: maybe").is_none());
     }
 
     #[test]

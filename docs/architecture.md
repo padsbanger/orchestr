@@ -39,8 +39,7 @@ opening an arbitrary command console before task/run authorization exists.
 
 Task specifications are persisted with the task in SQLite: acceptance criteria,
 implementation notes, relevant paths, and dependency IDs. Dependency IDs are
-validated and retained as structured references, but do not yet alter task
-workflow or execution eligibility; that behavior belongs to M14. The board's
+validated and retained as structured references. The board's
 task inspector is read-focused, while the task dialog is the sole editing
 surface for the specification.
 
@@ -64,7 +63,7 @@ assignments safely.
 
 Runs are persisted by `orchestr-db` with their task, agent, worker, lifecycle
 timestamps, terminal status, exit code, and streamed stdout/stderr records.
-Starting a run is an atomic application-layer transition: the assigned Todo
+Starting a run is an atomic application-layer transition: the assigned Ready
 task moves to In Progress as its running record is created. A successfully
 completed run moves that task to Review; failed and cancelled runs deliberately
 remain In Progress for human follow-up.
@@ -224,13 +223,82 @@ and `broken`, plus the last validation, last known-good timestamp, last
 integration timestamp, and failing gate. The board header exposes the current
 state; the Quality Gates panel owns configuration, output history, and the
 manual recovery action. Only a successful validation and merge can mark a task
-Done. Dependency unblocking remains M14 work.
+Done.
+
+## M14 readiness, dependencies, and priority
+
+Migration `0011_task_readiness` replaces the ambiguous persisted `todo` state
+with `ready`, adds a priority (`critical`, `high`, `normal`, or `low`), and
+adds an operator-facing blocked reason. Existing Todo tasks migrate to Ready
+and are immediately re-evaluated when the database opens.
+
+`orchestr-db` owns the readiness policy. It validates that dependencies are
+unique, refer to tasks in the same project, and cannot create a cycle. A task
+is eligible for Ready when it has at least one acceptance criterion and all
+its dependencies are truly Done. Moving a task to Ready evaluates that policy;
+an ineligible task is placed in Blocked with the specific unmet requirement.
+Agent execution independently re-checks the policy, so a direct API call
+cannot bypass it.
+
+Blocked and Ready tasks are recalculated after task edits, on database open,
+and when a successful integration makes a task Done. The last case moves newly
+eligible dependents from Blocked to Ready. Tasks remain in Backlog until an
+operator intentionally promotes them for evaluation; priority guides the
+operator and later scheduler but never bypasses eligibility. The React board
+only renders the resulting status and reason through typed task services.
+
+## M15 outcomes and project progress
+
+`milestones` and `epics` are project-owned records in `orchestr-db`.
+Milestones carry a title, optional description and target date, and a compact
+outcome status (`planned`, `active`, `completed`, or `blocked`). Epics may
+belong to one milestone and use the same outcome status. Task records retain
+optional foreign-key links to both levels, so a task can be grouped directly
+under a milestone or under a milestone's epic without moving repository data
+into SQLite.
+
+The database validates that all selected outcome records belong to the task's
+project and that an epic's milestone agrees with the task's selected milestone.
+That keeps hierarchy rules in the domain layer rather than trusting form state.
+The `ProjectProgress` read model derives task counts from persisted workflow
+status: Done, Ready, In Progress, Review, Blocked, Backlog, and total. It also
+produces the same counts per milestone and its contained epics. An integrated
+task is therefore reflected as Done only through the existing integration
+workflow; milestones never infer completion from agent activity.
+
+The React outcome service is a typed Tauri boundary for milestones, epics, and
+the derived project-progress read model. The Progress route combines those
+outcome metrics with the existing integration-branch health and queue state.
+It supports creating milestones and epics, while task editing assigns work to
+the applicable outcome hierarchy. React does not calculate progress locally or
+make integration-health decisions.
+
+## M16 architect review
+
+An architect review is a durable `agent_reviews` record, not an implementation
+run and not a hidden prompt-side state transition. It stores the separate
+reviewer agent, lifecycle status, machine-readable decision, concise notes,
+bounded raw provider output, failure detail, and timestamps. The database
+accepts a review only while its task is in Review and rejects the task's
+assigned implementation agent as reviewer.
+
+The desktop prepares the reviewer with task context, acceptance criteria,
+relevant paths, the branch diff and commits, the latest implementation-run
+summary, and implementation-validation history. Project decision records are
+not introduced until M20, so the prompt explicitly identifies that absence
+rather than fabricating policy. Codex runs in its `read-only` sandbox with no
+additional writable Git directories. Only an `agent_message` containing the
+strict `ORCHESTR_REVIEW_DECISION` and `ORCHESTR_REVIEW_NOTES` protocol is
+accepted; command output or repository content cannot impersonate a decision.
+
+On a valid recommendation, the application layer performs the existing Review
+transition: `approve` creates the ordinary serialized integration attempt, and
+`request_changes` returns the task to In Progress. Neither path merges code or
+marks a task Done. The Review inspector shows status, reviewer, notes, bounded
+raw output, and cancellation while refreshing task state through its typed
+agent-review service.
 
 ### Planning, blockers, and durable project context
-
-Milestones and epics will sit above tasks to express outcomes rather than only
-activity. Project progress views will emphasize integrated Done work, Ready
-work, blockers, queue depth, priority, and integration-branch health.
 
 Project-level blockers and task-level `NEEDS_INPUT` records will stop unsafe
 or speculative execution. An input request retains its question, requesting

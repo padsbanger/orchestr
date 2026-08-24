@@ -28,10 +28,13 @@ Completed milestones:
 - M11 — Review Workflow
 - M12 — Integration Queue
 - M13 — Quality Gates + Project Health
+- M14 — Dependencies + Ready / Blocked Workflow
+- M15 — Milestones, Epics + Project Progress
+- M16 — Architect / Reviewer Agent
 
 Immediate next milestone:
 
-**M14 — Dependencies + Ready / Blocked Workflow**
+**M17 — Parallel Local Agents + WIP Limits**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1251,11 +1254,27 @@ Git/integration tests should use temporary repositories.
 
 ---
 
+# Mandatory milestone quality gate
+
+Before marking any milestone complete:
+
+1. Run `npm run crap` to collect the repository's TypeScript and Rust CRAP reports.
+2. Review the CRAP results for functions added or materially modified by the milestone; report their complexity, coverage, and score.
+3. Do not mark the milestone complete when new or materially changed code has a CRAP score of 30 or higher, unless the user explicitly accepts that risk.
+4. Run the normal typecheck and relevant test suite, and report their outcome.
+
+The Rust CRAP baseline must represent the target integration branch before
+milestone implementation begins. Never generate or refresh that baseline after
+the milestone's implementation merely to make its quality gate pass. Refresh a
+baseline only after an intentional, reviewed decision to accept existing debt.
+
+---
+
 # Scope discipline
 
 Current next milestone:
 
-**M14 — Dependencies + Ready / Blocked Workflow**
+**M17 — Parallel Local Agents + WIP Limits**
 
 Do not prioritize:
 
@@ -1269,12 +1288,8 @@ before accepted work can reliably land on a healthy integration branch.
 
 Immediately after integration correctness, prioritize:
 
-1. quality gates + project health
-2. dependencies + Ready/Blocked
-3. milestones/epics + project progress
-4. architect agent
-5. parallel scheduling + WIP/backpressure
-6. failure recovery
+1. parallel scheduling + WIP/backpressure
+2. failure recovery
 
 ---
 

@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, ChartNoAxesCombined, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -13,15 +13,17 @@ import { listAgents, type Agent } from "../../services/agents";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
 import { cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
 import { approveTaskReview, getTaskReview, requestTaskChanges, type TaskReview } from "../../services/reviews";
+import { listAgentReviews, listenToAgentReviewEvents, startAgentReview, type AgentReview } from "../../services/agentReviews";
 import { integrateNextTask, listIntegrationAttempts, retryIntegrationAttempt, type IntegrationAttempt } from "../../services/integrations";
 import { createValidationCommand, deleteValidationCommand, getProjectHealth, listValidationAttempts, listValidationCommands, listenToValidationEvents, rerunIntegrationValidation, type ProjectHealth, type ValidationAttempt, type ValidationCommand, type ValidationStage } from "../../services/quality";
+import { listEpics, listMilestones, type Epic, type Milestone } from "../../services/outcomes";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
 
 const columns: Record<TaskStatus, { label: string; tone: string }> = {
   backlog: { label: "Backlog", tone: "neutral" },
-  todo: { label: "Todo", tone: "blue" },
+  ready: { label: "Ready", tone: "blue" },
   in_progress: { label: "In Progress", tone: "amber" },
   review: { label: "Review", tone: "violet" },
   approved: { label: "Approved", tone: "indigo" },
@@ -47,6 +49,8 @@ export function BoardPage() {
   const [isCleaningWorktree, setIsCleaningWorktree] = useState(false);
   const [isOpeningWorktree, setIsOpeningWorktree] = useState(false);
   const [review, setReview] = useState<TaskReview>();
+  const [agentReviews, setAgentReviews] = useState<AgentReview[]>([]);
+  const [isAgentReviewStarting, setIsAgentReviewStarting] = useState(false);
   const [reviewError, setReviewError] = useState<string>();
   const [isReviewLoading, setIsReviewLoading] = useState(false);
   const [isReviewActionPending, setIsReviewActionPending] = useState(false);
@@ -61,6 +65,8 @@ export function BoardPage() {
   const [isQualityGatesOpen, setIsQualityGatesOpen] = useState(false);
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [isRerunningIntegrationValidation, setIsRerunningIntegrationValidation] = useState(false);
+  const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [epics, setEpics] = useState<Epic[]>([]);
   const runIds = useRef(new Set<string>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
@@ -117,6 +123,14 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadOutcomes = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const [loadedMilestones, loadedEpics] = await Promise.all([listMilestones(projectId), listEpics(projectId)]);
+      setMilestones(loadedMilestones); setEpics(loadedEpics);
+    } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load project outcomes."); }
+  }, [projectId]);
+
   const loadBoard = useCallback(async () => {
     if (!projectId) return;
     setIsLoading(true);
@@ -129,12 +143,13 @@ export function BoardPage() {
       void loadRepository();
       void loadIntegrationQueue();
       void loadQualityGates();
+      void loadOutcomes();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       setIsLoading(false);
     }
-  }, [loadIntegrationQueue, loadQualityGates, loadRepository, projectId]);
+  }, [loadIntegrationQueue, loadOutcomes, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard();
@@ -155,6 +170,38 @@ export function BoardPage() {
     setIsReviewLoading(true); setReviewError(undefined);
     void getTaskReview(inspectedTask.id).then(setReview).catch((error: unknown) => setReviewError(error instanceof Error ? error.message : "Unable to load task branch changes.")).finally(() => setIsReviewLoading(false));
   }, [inspectedTask?.id, inspectedTask?.status]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listenToAgentReviewEvents(() => {
+      if (!inspectedTask) return;
+      void Promise.all([listAgentReviews(inspectedTask.id), loadBoard()]).then(([reviews]) => {
+        if (!disposed) setAgentReviews(reviews);
+      });
+    }).then((stopListening) => { if (disposed) stopListening(); else unlisten = stopListening; });
+    return () => { disposed = true; unlisten?.(); };
+  }, [inspectedTask?.id, loadBoard]);
+
+  useEffect(() => {
+    if (!inspectedTask || inspectedTask.status !== "review") { setAgentReviews([]); return; }
+    let disposed = false;
+    void listAgentReviews(inspectedTask.id).then((reviews) => {
+      if (disposed) return;
+      setAgentReviews(reviews);
+    }).catch((loadError: unknown) => {
+      if (!disposed) setError(loadError instanceof Error ? loadError.message : "Unable to load architect reviews.");
+    });
+    return () => { disposed = true; };
+  }, [inspectedTask?.id, inspectedTask?.status]);
+
+  useEffect(() => {
+    if (!inspectedTask || inspectedTask.status !== "review" || !agentReviews.some((review) => review.status === "running")) return;
+    const interval = window.setInterval(() => {
+      void listAgentReviews(inspectedTask.id).then(setAgentReviews).catch(() => undefined);
+    }, 1_500);
+    return () => window.clearInterval(interval);
+  }, [agentReviews, inspectedTask?.id, inspectedTask?.status]);
 
   useEffect(() => {
     runIds.current = new Set(runs.map((run) => run.id));
@@ -221,7 +268,7 @@ export function BoardPage() {
     const destinationStatus = statusForDropTarget(String(over.id), tasks);
     if (!destinationStatus) return;
     if (isSystemManagedStatus(destinationStatus)) {
-      setError("Approved, Integrating, Blocked, and Done are managed by review and integration actions.");
+      setError("Ready is calculated from task requirements. Approved, Integrating, Blocked, and Done are workflow-managed.");
       return;
     }
     const destinationTasks = tasksByStatus[destinationStatus];
@@ -325,6 +372,17 @@ export function BoardPage() {
     } finally { setIsReviewActionPending(false); }
   };
 
+  const runArchitectReview = async (agentId: string) => {
+    if (!inspectedTask) return;
+    setError(undefined); setIsAgentReviewStarting(true);
+    try {
+      const reviewRun = await startAgentReview(inspectedTask.id, agentId);
+      setAgentReviews((current) => [reviewRun, ...current]);
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : "Unable to start the architect review.");
+    } finally { setIsAgentReviewStarting(false); }
+  };
+
   const integrateNext = async () => {
     if (!projectId) return;
     setError(undefined);
@@ -395,6 +453,7 @@ export function BoardPage() {
         <div className="board-title-row">
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
+            <Link className="secondary-button" to={`/projects/${project.id}/progress`}><ChartNoAxesCombined size={15} /> Progress</Link>
             <button className={`secondary-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => setIsQualityGatesOpen(true)}><Activity size={15} /> {health?.status ?? "unknown"}</button>
             <button className="secondary-button" type="button" onClick={() => setIsIntegrationQueueOpen(true)}><GitMerge size={16} />Integrate <span>{integrationAttempts.filter((attempt) => attempt.status === "queued").length}</span></button>
             <button className="repository-status" type="button" onClick={() => setIsRepositoryInspectorOpen(true)} title="Inspect repository activity">
@@ -425,8 +484,8 @@ export function BoardPage() {
           </DragOverlay>
         </DndContext>
       </div>
-      {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} runs={runs} isStartingRun={isStartingRun} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} />}
+      {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} milestones={milestones} epics={epics} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
+      {inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={() => setInspectedTask(null)} onEdit={(task) => { setInspectedTask(null); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
       {isRepositoryInspectorOpen && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={() => setIsRepositoryInspectorOpen(false)} onRefresh={() => void loadRepository()} />}
       {isIntegrationQueueOpen && <IntegrationQueuePanel attempts={integrationAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} onClose={() => setIsIntegrationQueueOpen(false)} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} />}
       {isQualityGatesOpen && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={() => setIsQualityGatesOpen(false)} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
@@ -455,8 +514,9 @@ function TaskCard({ task, onInspect, onEdit, onDelete }: { task: Task; onInspect
     <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${task.status === "in_progress" ? "is-running" : ""} ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
       <span className="drag-handle" aria-hidden="true"><GripVertical size={15} /></span>
       <div className="task-card-copy" onClick={() => onInspect(task)}>
-        <h3>{task.title}</h3>
+        <div className="task-card-title"><h3>{task.title}</h3><span className={`task-card-priority ${task.priority}`}>{task.priority}</span></div>
         {task.description && <p>{task.description}</p>}
+        {task.status === "blocked" && task.blockedReason && <p className="task-card-blocked">{task.blockedReason}</p>}
       </div>
       <div className="task-card-actions">
         <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onEdit(task); }} aria-label={`Edit ${task.title}`}><Pencil size={13} /></button>
@@ -471,7 +531,7 @@ function TaskDragPreview({ task }: { task?: Task }) {
   return (
     <article className="task-card task-drag-overlay">
       <span className="drag-handle" aria-hidden="true"><GripVertical size={15} /></span>
-      <div className="task-card-copy"><h3>{task.title}</h3>{task.description && <p>{task.description}</p>}</div>
+      <div className="task-card-copy"><div className="task-card-title"><h3>{task.title}</h3><span className={`task-card-priority ${task.priority}`}>{task.priority}</span></div>{task.description && <p>{task.description}</p>}</div>
     </article>
   );
 }
