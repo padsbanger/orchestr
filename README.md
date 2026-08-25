@@ -1,7 +1,9 @@
 # Orchestr
 
 Orchestr is a local-first engineering control room for Git-backed projects,
-Kanban work, and eventually human-supervised AI workers.
+Kanban work, and human-supervised AI workers. The current workflow includes
+bounded parallel execution, durable run and integration recovery, and
+traceable Git reverts for integrated regressions.
 
 ## M0 development
 
@@ -38,9 +40,10 @@ npm run crap:rust
 npm run crap
 ```
 
-`crap4ts` currently covers the agent-review and flow-control service boundaries,
-which have dedicated Vitest tests. The Rust gate compares against the checked-in
-baseline, failing for a regression or for a new function whose score exceeds 30.
+`crap4ts` currently covers the agent-review, flow-control, and recovery service
+boundaries, which have dedicated Vitest tests. The Rust gate compares against
+the checked-in baseline, failing for a regression or for a new function whose
+score reaches 30.
 Refresh that baseline only after reviewing and intentionally accepting a report
 change:
 

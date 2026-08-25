@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 const threshold = 30;
 const report = JSON.parse(await readFile("target/crap/rust-crap.json", "utf8"));
 const failures = report.entries.filter(
-  (entry) => entry.status === "regressed" || (entry.status === "new" && entry.crap > threshold),
+  (entry) => entry.status === "regressed" || (entry.status === "new" && entry.crap >= threshold),
 );
 
 if (failures.length === 0) {
-  console.log(`Rust CRAP gate passed: no regressions or new functions above ${threshold}.`);
+  console.log(`Rust CRAP gate passed: no regressions or new functions at or above ${threshold}.`);
   process.exit(0);
 }
 

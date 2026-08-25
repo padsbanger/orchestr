@@ -32,6 +32,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("../migrations/0013_project_outcomes.sql")),
     (14, include_str!("../migrations/0014_agent_reviews.sql")),
     (15, include_str!("../migrations/0015_flow_control.sql")),
+    (16, include_str!("../migrations/0016_failure_recovery.sql")),
 ];
 
 pub struct Database {
@@ -377,6 +378,50 @@ pub struct IntegrationAttempt {
     pub error: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevertStatus {
+    Running,
+    Reverted,
+    ValidationFailed,
+    Failed,
+}
+
+impl RevertStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Reverted => "reverted",
+            Self::ValidationFailed => "validation_failed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        match value.as_str() {
+            "running" => Ok(Self::Running),
+            "reverted" => Ok(Self::Reverted),
+            "validation_failed" => Ok(Self::ValidationFailed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertAttempt {
+    pub id: String,
+    pub project_id: String,
+    pub original_task_id: String,
+    pub integration_attempt_id: String,
+    pub original_commit: String,
+    pub status: RevertStatus,
+    pub revert_commit: Option<String>,
+    pub repair_task_id: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
     pub completed_at: Option<String>,
 }
 
@@ -995,6 +1040,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn mark_project_health_broken(&mut self, project_id: &str, reason: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO project_health (project_id, status, failing_gate) VALUES (?1, 'broken', ?2)
+             ON CONFLICT(project_id) DO UPDATE SET status = 'broken', failing_gate = excluded.failing_gate, updated_at = CURRENT_TIMESTAMP",
+            params![project_id, reason],
+        )?;
+        Ok(())
+    }
+
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
@@ -1559,6 +1613,179 @@ impl Database {
         Ok(changed > 0)
     }
 
+    pub fn queue_run_recovery(
+        &mut self,
+        source_run_id: &str,
+        replacement_run_id: &str,
+        recovery_id: &str,
+        agent_id: &str,
+        action: &str,
+    ) -> Result<Option<(Run, Task)>> {
+        if !matches!(action, "resume" | "restart_clean" | "reassign") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        let source = transaction
+            .query_row(
+                "SELECT runs.task_id, runs.status, tasks.project_id, tasks.status
+             FROM runs JOIN tasks ON tasks.id = runs.task_id WHERE runs.id = ?1",
+                [source_run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((task_id, run_status, project_id, task_status)) = source else {
+            return Ok(None);
+        };
+        if !matches!(run_status.as_str(), "failed" | "cancelled")
+            || task_status != TaskStatus::InProgress.as_str()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let valid_agent: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE id = ?1 AND provider = 'codex')",
+            [agent_id],
+            |row| row.get(0),
+        )?;
+        if !valid_agent {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let active_run: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ?1 AND status IN ('queued', 'running'))",
+            [&task_id],
+            |row| row.get(0),
+        )?;
+        if active_run {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "UPDATE tasks SET assigned_agent_id = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![agent_id, task_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            &project_id,
+            TaskStatus::InProgress,
+            TaskStatus::Ready,
+            usize::MAX,
+        )?;
+        transaction.execute(
+            "INSERT INTO runs (id, task_id, agent_id, worker_id, status, queued_at)
+             VALUES (?1, ?2, ?3, 'local', 'queued', CURRENT_TIMESTAMP)",
+            params![replacement_run_id, task_id, agent_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO run_recoveries (id, task_id, source_run_id, replacement_run_id, agent_id, action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![recovery_id, task_id, source_run_id, replacement_run_id, agent_id, action],
+        )?;
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message)
+             VALUES (?1, 'recovery.queued', ?2)",
+            params![
+                replacement_run_id,
+                format!("Recovery queued from run {source_run_id} using {action}.")
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message)
+             VALUES (?1, 'recovery.replaced', ?2)",
+            params![
+                source_run_id,
+                format!("Recovery continued as run {replacement_run_id}.")
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Some((
+            self.get_run(replacement_run_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+            self.task_by_id(&task_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+        )))
+    }
+
+    pub fn resolve_failed_run(
+        &mut self,
+        source_run_id: &str,
+        recovery_id: &str,
+        action: &str,
+        note: Option<&str>,
+    ) -> Result<Option<Task>> {
+        if !matches!(action, "abandon" | "escalate") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        let source = transaction
+            .query_row(
+                "SELECT runs.task_id, runs.agent_id, runs.status, tasks.project_id, tasks.status
+             FROM runs JOIN tasks ON tasks.id = runs.task_id WHERE runs.id = ?1",
+                [source_run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((task_id, agent_id, run_status, project_id, task_status)) = source else {
+            return Ok(None);
+        };
+        if !matches!(run_status.as_str(), "failed" | "cancelled")
+            || task_status != TaskStatus::InProgress.as_str()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let target_status = if action == "abandon" {
+            TaskStatus::Backlog
+        } else {
+            TaskStatus::Blocked
+        };
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            &project_id,
+            TaskStatus::InProgress,
+            target_status,
+            usize::MAX,
+        )?;
+        if action == "escalate" {
+            transaction.execute(
+                "UPDATE tasks SET blocked_reason = ?1, readiness_blocked = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+                params![note.unwrap_or("A failed agent run requires human recovery."), task_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO run_recoveries (id, task_id, source_run_id, agent_id, action, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![recovery_id, task_id, source_run_id, agent_id, action, note],
+        )?;
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, ?2, ?3)",
+            params![
+                source_run_id,
+                format!("recovery.{action}"),
+                note.unwrap_or(if action == "abandon" {
+                    "Run recovery abandoned; worktree preserved."
+                } else {
+                    "Run escalated for human recovery."
+                })
+            ],
+        )?;
+        transaction.commit()?;
+        self.task_by_id(&task_id)
+    }
+
     pub fn flow_state(&self, project_id: &str, worker_id: &str) -> Result<FlowState> {
         flow_state_for_connection(&self.connection, project_id, worker_id)
     }
@@ -1965,6 +2192,118 @@ impl Database {
         Ok(())
     }
 
+    pub fn clear_integration_cleanup_error(&mut self, attempt_id: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE integration_attempts SET error = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'merged'",
+            [attempt_id],
+        )? > 0)
+    }
+
+    pub fn recover_interrupted_integrations(&mut self) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let interrupted = {
+            let mut statement = transaction.prepare(
+                "SELECT attempts.id, attempts.task_id, tasks.project_id
+                 FROM integration_attempts AS attempts
+                 JOIN tasks ON tasks.id = attempts.task_id
+                 JOIN project_integration_locks AS locks ON locks.attempt_id = attempts.id
+                 WHERE attempts.status = 'integrating' AND tasks.status = 'integrating'",
+            )?;
+            let records = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            records
+        };
+        for (attempt_id, task_id, project_id) in &interrupted {
+            transaction.execute(
+                "UPDATE integration_attempts SET status = 'failed', error = 'Integration was interrupted when Orchestr stopped. Repository state was preserved for inspection and retry.', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                [attempt_id],
+            )?;
+            move_task_in_transaction(
+                &transaction,
+                task_id,
+                project_id,
+                TaskStatus::Integrating,
+                TaskStatus::Approved,
+                usize::MAX,
+            )?;
+        }
+        transaction.execute("DELETE FROM project_integration_locks", [])?;
+        transaction.commit()?;
+        Ok(interrupted.len())
+    }
+
+    pub fn list_revert_attempts(&self, project_id: &str) -> Result<Vec<RevertAttempt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, original_task_id, integration_attempt_id, original_commit,
+                    status, revert_commit, repair_task_id, error, started_at, completed_at
+             FROM revert_attempts WHERE project_id = ?1 ORDER BY started_at DESC",
+        )?;
+        let records = statement
+            .query_map([project_id], revert_attempt_from_row)?
+            .collect();
+        records
+    }
+
+    pub fn begin_revert(
+        &mut self,
+        id: &str,
+        integration_attempt_id: &str,
+    ) -> Result<Option<RevertAttempt>> {
+        let transaction = self.connection.transaction()?;
+        let integration = transaction.query_row(
+            "SELECT tasks.project_id, attempts.task_id, attempts.merge_commit
+             FROM integration_attempts AS attempts JOIN tasks ON tasks.id = attempts.task_id
+             WHERE attempts.id = ?1 AND attempts.status = 'merged' AND attempts.merge_commit IS NOT NULL",
+            [integration_attempt_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+        ).optional()?;
+        let Some((project_id, task_id, commit)) = integration else {
+            return Ok(None);
+        };
+        let already_reverted: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM revert_attempts WHERE integration_attempt_id = ?1 AND status IN ('reverted', 'validation_failed'))",
+            [integration_attempt_id],
+            |row| row.get(0),
+        )?;
+        if already_reverted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "INSERT INTO revert_attempts (id, project_id, original_task_id, integration_attempt_id, original_commit, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running')",
+            params![id, project_id, task_id, integration_attempt_id, commit],
+        )?;
+        transaction.commit()?;
+        self.revert_attempt_by_id(id)
+    }
+
+    pub fn finish_revert(
+        &mut self,
+        id: &str,
+        status: RevertStatus,
+        revert_commit: Option<&str>,
+        error: Option<&str>,
+        repair_task_id: Option<&str>,
+    ) -> Result<Option<RevertAttempt>> {
+        if status == RevertStatus::Running {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "UPDATE revert_attempts SET status = ?1, revert_commit = ?2, error = ?3,
+             repair_task_id = ?4, completed_at = CURRENT_TIMESTAMP WHERE id = ?5 AND status = 'running'",
+            params![status.as_str(), revert_commit, error, repair_task_id, id],
+        )?;
+        self.revert_attempt_by_id(id)
+    }
+
     pub fn retry_integration(
         &mut self,
         attempt_id: &str,
@@ -2206,6 +2545,18 @@ impl Database {
                  FROM integration_attempts WHERE id = ?1",
                 [id],
                 integration_attempt_from_row,
+            )
+            .optional()
+    }
+
+    fn revert_attempt_by_id(&self, id: &str) -> Result<Option<RevertAttempt>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, original_task_id, integration_attempt_id, original_commit,
+                    status, revert_commit, repair_task_id, error, started_at, completed_at
+             FROM revert_attempts WHERE id = ?1",
+                [id],
+                revert_attempt_from_row,
             )
             .optional()
     }
@@ -2736,6 +3087,22 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> Result<Run> {
     })
 }
 
+fn revert_attempt_from_row(row: &rusqlite::Row<'_>) -> Result<RevertAttempt> {
+    Ok(RevertAttempt {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        original_task_id: row.get(2)?,
+        integration_attempt_id: row.get(3)?,
+        original_commit: row.get(4)?,
+        status: RevertStatus::from_database(row.get(5)?)?,
+        revert_commit: row.get(6)?,
+        repair_task_id: row.get(7)?,
+        error: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
 fn encode_string_list(values: &[String]) -> Result<String> {
     serde_json::to_string(values)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
@@ -3026,8 +3393,8 @@ mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, FlowLimitUpdate,
         IntegrationStatus, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun,
-        NewTask, NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RunStatus,
-        TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
+        NewTask, NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RevertStatus,
+        RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -4121,6 +4488,206 @@ mod tests {
             .expect("cancelled queued task can move")
             .is_some());
 
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn failed_runs_can_resume_reassign_escalate_and_preserve_history() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Recovery".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/recovery".into(),
+            })
+            .expect("project saves");
+        for (id, name) in [("agent-1", "Implementer"), ("agent-2", "Recovery agent")] {
+            database
+                .create_agent(NewAgent {
+                    id: id.into(),
+                    name: name.into(),
+                    provider: "codex".into(),
+                    role: "Engineer".into(),
+                    model: None,
+                    system_prompt: None,
+                    skills: Vec::new(),
+                    max_concurrent_tasks: 1,
+                })
+                .expect("agent saves");
+        }
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Recover me".into(),
+                description: None,
+                acceptance_criteria: vec!["Recovered".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-1".into()),
+                priority: TaskPriority::High,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("task saves");
+        database
+            .move_task("task-1", TaskStatus::Ready, 0)
+            .expect("task readies");
+        database
+            .start_run(NewRun {
+                id: "run-1".into(),
+                task_id: "task-1".into(),
+                agent_id: "agent-1".into(),
+                worker_id: "local".into(),
+            })
+            .expect("run starts");
+        database
+            .finish_run("run-1", RunStatus::Failed, Some(1), Some("provider failed"))
+            .expect("run fails");
+
+        let (replacement, ready_task) = database
+            .queue_run_recovery("run-1", "run-2", "recovery-1", "agent-2", "reassign")
+            .expect("recovery queues")
+            .expect("run exists");
+        assert_eq!(replacement.status, RunStatus::Queued);
+        assert_eq!(ready_task.status, TaskStatus::Ready);
+        assert_eq!(ready_task.assigned_agent_id.as_deref(), Some("agent-2"));
+        assert!(database
+            .get_run("run-1")
+            .expect("source loads")
+            .expect("source exists")
+            .events
+            .iter()
+            .any(|event| event.kind == "recovery.replaced"));
+        let (recovery_run, _) = database
+            .claim_next_run("local")
+            .expect("recovery claims")
+            .expect("run available");
+        database
+            .finish_run(
+                &recovery_run.id,
+                RunStatus::Failed,
+                Some(2),
+                Some("still failing"),
+            )
+            .expect("recovery fails");
+        let escalated = database
+            .resolve_failed_run(
+                "run-2",
+                "recovery-2",
+                "escalate",
+                Some("Human decision required"),
+            )
+            .expect("run escalates")
+            .expect("task exists");
+        assert_eq!(escalated.status, TaskStatus::Blocked);
+        assert_eq!(
+            escalated.blocked_reason.as_deref(),
+            Some("Human decision required")
+        );
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn interrupted_integration_recovers_and_reverts_remain_traceable() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Integration recovery".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/recovery".into(),
+            })
+            .expect("project saves");
+        database
+            .create_task(NewTask {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                title: "Integrated task".into(),
+                description: None,
+                acceptance_criteria: vec!["Integrated".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: None,
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("task saves");
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET status = 'review', branch = 'task/recovery' WHERE id = 'task-1'",
+                [],
+            )
+            .expect("task enters review");
+        database
+            .approve_task_review("task-1", "integration-1")
+            .expect("task approves");
+        database
+            .claim_next_integration("project-1")
+            .expect("integration claims");
+        assert_eq!(
+            database
+                .recover_interrupted_integrations()
+                .expect("lock recovers"),
+            1
+        );
+        let interrupted = database
+            .get_integration_attempt("integration-1")
+            .expect("attempt loads")
+            .expect("attempt exists");
+        assert_eq!(interrupted.status, IntegrationStatus::Failed);
+        assert_eq!(
+            database
+                .get_task("task-1")
+                .expect("task loads")
+                .expect("task exists")
+                .status,
+            TaskStatus::Approved
+        );
+        database
+            .retry_integration("integration-1", "integration-2")
+            .expect("retry queues");
+        database
+            .claim_next_integration("project-1")
+            .expect("retry claims");
+        database
+            .complete_integration("integration-2", "abc123")
+            .expect("integration completes");
+        let revert = database
+            .begin_revert("revert-1", "integration-2")
+            .expect("revert starts")
+            .expect("revert exists");
+        assert_eq!(revert.original_commit, "abc123");
+        database
+            .finish_revert(
+                "revert-1",
+                RevertStatus::Reverted,
+                Some("def456"),
+                None,
+                None,
+            )
+            .expect("revert completes");
+        let history = database
+            .list_revert_attempts("project-1")
+            .expect("history loads");
+        assert_eq!(history[0].status, RevertStatus::Reverted);
+        assert_eq!(history[0].revert_commit.as_deref(), Some("def456"));
+        assert!(database.begin_revert("revert-2", "integration-2").is_err());
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }

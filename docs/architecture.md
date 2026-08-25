@@ -339,15 +339,28 @@ agent/run, answer, and resolution timestamps. Architecture decisions and other
 durable project memory will be stored as ADR-style records so relevant,
 accepted context can be inspected and supplied to future agent runs.
 
-### Recovery and cleanup
+## M18 failure recovery and revert
 
+Run recovery is a persisted workflow rather than an ephemeral retry button.
+Failed and cancelled implementation runs can resume their validated managed
+worktree, restart from a clean task branch, retry with another agent, return to
+Backlog while preserving artifacts, or escalate to Blocked. Each action links
+the source and replacement runs in `run_recoveries` and emits timeline events,
+so recovery never erases the original failure.
+
+At startup, interrupted integration attempts are returned to Approved with a
+failed attempt record and stale project locks are released. Integration retry
+creates a new attempt. A merge whose cleanup failed remains merged and Done;
+its worktree and branch cleanup can be retried independently and idempotently.
 Before successful integration, branches, worktrees, review history, run logs,
-and integration attempts remain recoverable. Conflicts move work to an
-actionable blocked state; infrastructure failures are retryable. Cleanup is
-best-effort maintenance after an integrated, healthy result—its failure must
-not rewrite history or claim that an already successful merge failed. Future
-reverts will create normal Git history, retain the link to the original
-integration, and update project health rather than resetting shared history.
+and integration attempts remain recoverable.
+
+Integrated regressions use normal `git revert` history on the configured
+integration branch. `revert_attempts` links the original task, integration
+attempt, original commit, revert commit, validation outcome, and optional
+repair task. Integration validation runs after the revert and updates project
+health. Orchestr never resets or rewrites the shared integration branch to
+undo accepted work.
 
 ## Planned extraction points
 

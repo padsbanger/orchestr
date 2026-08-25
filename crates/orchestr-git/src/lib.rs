@@ -455,6 +455,52 @@ impl GitService {
         run_git(&repository_path, ["branch", "--delete", "--force", branch])?;
         Ok(())
     }
+
+    pub fn delete_task_branch_if_exists(repository_path: &Path, branch: &str) -> Result<()> {
+        let repository_path = repository_root(repository_path)?;
+        let branch_ref = format!("refs/heads/{branch}");
+        if run_git_if_success(
+            &repository_path,
+            ["show-ref", "--verify", "--quiet", branch_ref.as_str()],
+        )?
+        .is_none()
+        {
+            return Ok(());
+        }
+        Self::delete_integrated_task_branch(&repository_path, branch)
+    }
+
+    pub fn revert_integration_commit(
+        repository_path: &Path,
+        target_branch: &str,
+        commit: &str,
+    ) -> Result<String> {
+        let repository_path = repository_root(repository_path)?;
+        ensure_clean_integration_workspace(&repository_path, target_branch)?;
+        run_git(
+            &repository_path,
+            ["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+        )?;
+        if run_git_if_success(
+            &repository_path,
+            ["merge-base", "--is-ancestor", commit, target_branch],
+        )?
+        .is_none()
+        {
+            return Err(GitError(
+                "The integration commit is not part of the configured integration branch.".into(),
+            ));
+        }
+        let mut arguments = git_identity_arguments(&repository_path)?;
+        arguments.extend(["revert".into(), "--no-edit".into(), commit.into()]);
+        if let Err(error) = run_git(&repository_path, arguments) {
+            let _ = run_git(&repository_path, ["revert", "--abort"]);
+            return Err(error);
+        }
+        Ok(run_git(&repository_path, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned())
+    }
 }
 
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
@@ -519,7 +565,17 @@ fn conflicted_paths(path: &Path) -> Result<Vec<String>> {
 }
 
 fn commit_with_fallback_identity(path: &Path, message: &str, allow_empty: bool) -> Result<()> {
-    let mut arguments: Vec<String> = Vec::new();
+    let mut arguments = git_identity_arguments(path)?;
+    arguments.push("commit".into());
+    if allow_empty {
+        arguments.push("--allow-empty".into());
+    }
+    arguments.extend(["--message".into(), message.into()]);
+    run_git(path, arguments).map(|_| ())
+}
+
+fn git_identity_arguments(path: &Path) -> Result<Vec<String>> {
+    let mut arguments = Vec::new();
     if run_git_if_success(path, ["config", "--get", "user.name"])?
         .and_then(non_empty)
         .is_none()
@@ -532,12 +588,7 @@ fn commit_with_fallback_identity(path: &Path, message: &str, allow_empty: bool) 
     {
         arguments.extend(["-c".into(), "user.email=orchestr@local".into()]);
     }
-    arguments.push("commit".into());
-    if allow_empty {
-        arguments.push("--allow-empty".into());
-    }
-    arguments.extend(["--message".into(), message.into()]);
-    run_git(path, arguments).map(|_| ())
+    Ok(arguments)
 }
 
 fn git_argument_path(path: &Path) -> std::ffi::OsString {
@@ -1024,6 +1075,56 @@ mod tests {
             .expect("task worktree removes");
         GitService::delete_integrated_task_branch(&directory, "task/integration-test")
             .expect("task branch removes");
+        GitService::delete_task_branch_if_exists(&directory, "task/integration-test")
+            .expect("already removed task branch is safe to clean again");
+        fs::remove_dir_all(directory).expect("temporary directory removes");
+    }
+
+    #[test]
+    fn revert_integration_commit_creates_normal_history() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("orchestr-git-revert-{nonce}"));
+        fs::create_dir(&directory).expect("temporary directory creates");
+        let repository =
+            GitService::initialize_repository(&directory).expect("repository initializes");
+        GitService::create_initial_commit(&directory).expect("initial commit creates");
+        fs::write(directory.join("regression.txt"), "bad change\n").expect("regression writes");
+        run_git(&directory, &["add", "regression.txt"]);
+        run_git(
+            &directory,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "Regressing integration",
+            ],
+        );
+        let original_commit = GitService::repository_details(&directory)
+            .expect("details load")
+            .recent_commits[0]
+            .hash
+            .clone();
+
+        let revert_commit = GitService::revert_integration_commit(
+            &directory,
+            &repository.default_branch,
+            &original_commit,
+        )
+        .expect("integration reverts");
+
+        assert!(!directory.join("regression.txt").exists());
+        assert_ne!(revert_commit, original_commit);
+        let history = GitService::repository_details(&directory)
+            .expect("history loads")
+            .recent_commits;
+        assert_eq!(history.len(), 3);
+        assert!(history[0].subject.starts_with("Revert"));
         fs::remove_dir_all(directory).expect("temporary directory removes");
     }
 

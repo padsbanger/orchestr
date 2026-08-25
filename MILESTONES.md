@@ -746,7 +746,9 @@ A logically separate reviewer agent can approve or reject work, but approved wor
 
 ---
 
-# M17 — Parallel Local Agents + WIP Limits
+# M17 — Parallel Local Agents + WIP Limits — Complete
+
+**Completed:** 2026-08-25
 
 ### Goal
 
@@ -783,7 +785,9 @@ Multiple agents can work concurrently while Orchestr prevents downstream queues 
 
 ---
 
-# M18 — Failure Recovery + Revert
+# M18 — Failure Recovery + Revert — Complete
+
+**Completed:** 2026-08-25
 
 ### Goal
 
@@ -1306,13 +1310,13 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M17 state:
+Continue from the completed M18 state:
 
 ```text
-1. Add recovery and revert workflows
+1. Add project blockers and the Needs Input workflow
 ```
 
-Do not optimize for maximum agent concurrency yet.
+Do not let agents repeatedly guess through a shared project-level problem.
 
 The immediate objective is:
 
@@ -1320,6 +1324,7 @@ The immediate objective is:
 accepted task
   -> safely integrated
   -> main remains healthy
+  -> blockers and input needs remain explicit
   -> next valid task becomes Ready
 ```
 

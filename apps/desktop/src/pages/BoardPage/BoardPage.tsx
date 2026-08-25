@@ -13,10 +13,10 @@ import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
 import { errorMessage, runConfirmedDestructiveAction } from "../../services/confirmations";
 import { getProject, getRepositoryDetails, type Project, type RepositoryDetails } from "../../services/projects";
-import { cancelQueuedTaskRun, cancelTaskRun, listTaskRuns, startTaskRun, type TaskRun } from "../../services/runs";
+import { cancelQueuedTaskRun, cancelTaskRun, listTaskRuns, recoverTaskRun, resolveFailedRun, startTaskRun, type TaskRun } from "../../services/runs";
 import { approveTaskReview, getTaskReview, requestTaskChanges, type TaskReview } from "../../services/reviews";
 import { listAgentReviews, listenToAgentReviewEvents, startAgentReview, type AgentReview } from "../../services/agentReviews";
-import { integrateNextTask, listIntegrationAttempts, retryIntegrationAttempt, type IntegrationAttempt } from "../../services/integrations";
+import { integrateNextTask, listIntegrationAttempts, listRevertAttempts, retryIntegrationAttempt, retryIntegrationCleanup, revertIntegration, type IntegrationAttempt, type RevertAttempt } from "../../services/integrations";
 import { createValidationCommand, deleteValidationCommand, getProjectHealth, listValidationAttempts, listValidationCommands, listenToValidationEvents, rerunIntegrationValidation, type ProjectHealth, type ValidationAttempt, type ValidationCommand, type ValidationStage } from "../../services/quality";
 import { listEpics, listMilestones, type Epic, type Milestone } from "../../services/outcomes";
 import { getFlowState, listenToFlowChanges, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
@@ -60,8 +60,12 @@ export function BoardPage() {
   const [isReviewLoading, setIsReviewLoading] = useState(false);
   const [isReviewActionPending, setIsReviewActionPending] = useState(false);
   const [integrationAttempts, setIntegrationAttempts] = useState<IntegrationAttempt[]>([]);
+  const [revertAttempts, setRevertAttempts] = useState<RevertAttempt[]>([]);
   const [isIntegrationQueueLoading, setIsIntegrationQueueLoading] = useState(false);
   const [isIntegrating, setIsIntegrating] = useState(false);
+  const [recoveringIntegrationId, setRecoveringIntegrationId] = useState<string>();
+  const [revertingIntegrationId, setRevertingIntegrationId] = useState<string>();
+  const [runRecoveryAction, setRunRecoveryAction] = useState<string>();
   const [health, setHealth] = useState<ProjectHealth>();
   const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
   const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
@@ -115,7 +119,9 @@ export function BoardPage() {
     if (!projectId) return;
     setIsIntegrationQueueLoading(true);
     try {
-      setIntegrationAttempts(await listIntegrationAttempts(projectId));
+      const [attempts, reverts] = await Promise.all([listIntegrationAttempts(projectId), listRevertAttempts(projectId)]);
+      setIntegrationAttempts(attempts);
+      setRevertAttempts(reverts);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the integration queue.");
     } finally {
@@ -393,6 +399,59 @@ export function BoardPage() {
     }
   };
 
+  const recoverRun = async (runId: string, mode: "resume" | "restart_clean", agentId?: string) => {
+    const execute = async () => {
+      setRunRecoveryAction(agentId ? `reassign:${agentId}` : mode);
+      const started = await recoverTaskRun(runId, mode, agentId);
+      setRuns((current) => [started.run, ...current]);
+      setTasks((current) => current.map((task) => task.id === started.task.id ? started.task : task));
+      setInspectedTask(started.task);
+      await Promise.all([loadBoard(), loadFlowControl()]);
+    };
+    setError(undefined);
+    try {
+      if (mode === "restart_clean") {
+        await runConfirmedDestructiveAction({
+          title: "Restart task clean",
+          message: "Remove the failed run's managed worktree and task branch, then restart from the integration branch? The run history will be preserved.",
+          confirmLabel: "Restart clean",
+        }, execute);
+      } else {
+        await execute();
+      }
+    } catch (recoveryError) {
+      setError(errorMessage(recoveryError, "Unable to recover the failed run."));
+    } finally {
+      setRunRecoveryAction(undefined);
+    }
+  };
+
+  const resolveRunFailure = async (runId: string, action: "abandon" | "escalate") => {
+    setError(undefined);
+    setRunRecoveryAction(action);
+    try {
+      const execute = async () => {
+        const task = await resolveFailedRun(runId, action, action === "escalate" ? "A failed agent run requires human recovery." : undefined);
+        setTasks((current) => current.map((currentTask) => currentTask.id === task.id ? task : currentTask));
+        setInspectedTask(task);
+        await Promise.all([loadBoard(), loadFlowControl()]);
+      };
+      if (action === "abandon") {
+        await runConfirmedDestructiveAction({
+          title: "Abandon run recovery",
+          message: "Move this task back to Backlog? Its branch, worktree, and run history will be preserved for inspection.",
+          confirmLabel: "Abandon recovery",
+        }, execute);
+      } else {
+        await execute();
+      }
+    } catch (recoveryError) {
+      setError(errorMessage(recoveryError, "Unable to resolve the failed run."));
+    } finally {
+      setRunRecoveryAction(undefined);
+    }
+  };
+
   const saveFlowLimits = async (limits: FlowLimitInput) => {
     if (!projectId) return;
     setIsFlowSaving(true);
@@ -486,6 +545,41 @@ export function BoardPage() {
     }
   };
 
+  const retryCleanup = async (attempt: IntegrationAttempt) => {
+    setError(undefined);
+    setRecoveringIntegrationId(attempt.id);
+    try {
+      await retryIntegrationCleanup(attempt.id);
+      await Promise.all([loadBoard(), loadIntegrationQueue(), loadRepository()]);
+    } catch (cleanupError) {
+      setError(errorMessage(cleanupError, "Unable to retry integration cleanup."));
+    } finally {
+      setRecoveringIntegrationId(undefined);
+    }
+  };
+
+  const revertMergedIntegration = async (attempt: IntegrationAttempt, createRepairTask: boolean) => {
+    setError(undefined);
+    try {
+      await runConfirmedDestructiveAction({
+        title: "Revert integrated change",
+        message: `Create a normal Git revert for ${tasks.find((task) => task.id === attempt.taskId)?.title ?? attempt.taskId}? Shared history will not be rewritten${createRepairTask ? ", and a high-priority repair task will be created" : ""}.`,
+        confirmLabel: createRepairTask ? "Revert + repair" : "Revert change",
+      }, async () => {
+        setRevertingIntegrationId(attempt.id);
+        const reverted = await revertIntegration(attempt.id, createRepairTask);
+        if (reverted.status === "failed" || reverted.status === "validation_failed") {
+          setError(reverted.error ?? "The revert requires attention.");
+        }
+        await Promise.all([loadBoard(), loadIntegrationQueue(), loadRepository(), loadQualityGates()]);
+      });
+    } catch (revertError) {
+      setError(errorMessage(revertError, "Unable to revert the integrated change."));
+    } finally {
+      setRevertingIntegrationId(undefined);
+    }
+  };
+
   const addValidationCommand = async (input: { stage: ValidationStage; name: string; program: string; arguments: string[] }) => {
     if (!projectId) return;
     try {
@@ -562,9 +656,9 @@ export function BoardPage() {
         </DndContext>
       </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} milestones={milestones} epics={epics} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
+      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} recoveryAgents={agents.filter((agent) => agent.provider === "codex")} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} runRecoveryAction={runRecoveryAction} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onRecoverRun={(runId, mode, agentId) => void recoverRun(runId, mode, agentId)} onResolveRunFailure={(runId, action) => void resolveRunFailure(runId, action)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
       {activeSidePanel === "repository" && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={closeSidePanel} onRefresh={() => void loadRepository()} />}
-      {activeSidePanel === "integration" && <IntegrationQueuePanel attempts={integrationAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} onClose={closeSidePanel} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} />}
+      {activeSidePanel === "integration" && <IntegrationQueuePanel attempts={integrationAttempts} reverts={revertAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} recoveringIntegrationId={recoveringIntegrationId} revertingIntegrationId={revertingIntegrationId} onClose={closeSidePanel} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} onRetryCleanup={(attempt) => void retryCleanup(attempt)} onRevert={(attempt, createRepairTask) => void revertMergedIntegration(attempt, createRepairTask)} />}
       {activeSidePanel === "quality" && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={closeSidePanel} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
       {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} />}
     </section>

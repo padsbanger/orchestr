@@ -12,8 +12,9 @@ use orchestr_db::{
     FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
     NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun, NewRunEvent, NewTask,
     NewValidationCommand, NewValidationEvent, Project, ProjectDeletion, ProjectHealth,
-    ProjectProgress, Run, RunEvent, RunOutput, RunStatus, Task, TaskPriority, TaskStatus,
-    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, Workspace,
+    ProjectProgress, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput, RunStatus, Task,
+    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
+    ValidationStatus, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -200,6 +201,22 @@ struct RunResponse {
 struct StartedTaskRunResponse {
     run: RunResponse,
     task: TaskResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverTaskRunInput {
+    run_id: String,
+    mode: String,
+    agent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveFailedRunInput {
+    run_id: String,
+    action: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +427,29 @@ struct IntegrationExecutionResponse {
     outcome: String,
     message: String,
     cleanup_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevertIntegrationInput {
+    attempt_id: String,
+    create_repair_task: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevertAttemptResponse {
+    id: String,
+    project_id: String,
+    original_task_id: String,
+    integration_attempt_id: String,
+    original_commit: String,
+    status: String,
+    revert_commit: Option<String>,
+    repair_task_id: Option<String>,
+    error: Option<String>,
+    started_at: String,
+    completed_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -631,6 +671,24 @@ impl From<IntegrationAttempt> for IntegrationAttemptResponse {
             merge_commit: attempt.merge_commit,
             error: attempt.error,
             created_at: attempt.created_at,
+            started_at: attempt.started_at,
+            completed_at: attempt.completed_at,
+        }
+    }
+}
+
+impl From<RevertAttempt> for RevertAttemptResponse {
+    fn from(attempt: RevertAttempt) -> Self {
+        Self {
+            id: attempt.id,
+            project_id: attempt.project_id,
+            original_task_id: attempt.original_task_id,
+            integration_attempt_id: attempt.integration_attempt_id,
+            original_commit: attempt.original_commit,
+            status: attempt.status.as_str().to_owned(),
+            revert_commit: attempt.revert_commit,
+            repair_task_id: attempt.repair_task_id,
+            error: attempt.error,
             started_at: attempt.started_at,
             completed_at: attempt.completed_at,
         }
@@ -1110,6 +1168,269 @@ fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<Run
         .list_runs_for_task(&task_id)
         .map(|runs| runs.into_iter().map(Into::into).collect())
         .map_err(|error| format!("Unable to load task runs: {error}"))
+}
+
+#[tauri::command]
+fn recover_task_run(
+    input: RecoverTaskRunInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartedTaskRunResponse, String> {
+    let prepared = prepare_run_recovery(&input, &state)?;
+    let queued = queue_prepared_run_recovery(&input, &state, prepared)?;
+    dispatch_and_reload_recovery(app, &state, queued)
+}
+
+struct PreparedRunRecovery {
+    source_run: Run,
+}
+
+fn prepare_run_recovery(
+    input: &RecoverTaskRunInput,
+    state: &AppState,
+) -> Result<PreparedRunRecovery, String> {
+    validate_run_recovery_mode(&input.mode)?;
+    let context = load_run_recovery_context(state, &input.run_id)?;
+    prepare_recovery_context(input, state, context)
+}
+
+fn prepare_recovery_context(
+    input: &RecoverTaskRunInput,
+    state: &AppState,
+    context: (Run, Task, String),
+) -> Result<PreparedRunRecovery, String> {
+    let (source_run, task, workspace_path) = context;
+    if input.mode == "restart_clean" {
+        reset_failed_task_worktree(state, &task, &workspace_path)?;
+    }
+    Ok(PreparedRunRecovery { source_run })
+}
+
+fn validate_run_recovery_mode(mode: &str) -> Result<(), String> {
+    if matches!(mode, "resume" | "restart_clean") {
+        Ok(())
+    } else {
+        Err("Choose resume or restart clean for run recovery.".into())
+    }
+}
+
+fn load_run_recovery_context(
+    state: &AppState,
+    run_id: &str,
+) -> Result<(Run, Task, String), String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    load_run_recovery_entities(&database, run_id)
+}
+
+fn load_run_recovery_entities(
+    database: &Database,
+    run_id: &str,
+) -> Result<(Run, Task, String), String> {
+    let run = required_recovery_run(&database, run_id)?;
+    let task = required_recovery_task(&database, &run.task_id)?;
+    let workspace = required_recovery_workspace(&database, &task.project_id)?;
+    Ok((run, task, workspace))
+}
+
+fn required_recovery_run(database: &Database, run_id: &str) -> Result<Run, String> {
+    database
+        .get_run(run_id)
+        .map_err(|error| format!("Unable to load the failed run: {error}"))?
+        .ok_or_else(|| "The failed run no longer exists.".to_owned())
+}
+
+fn required_recovery_task(database: &Database, task_id: &str) -> Result<Task, String> {
+    database
+        .get_task(task_id)
+        .map_err(|error| format!("Unable to load the failed task: {error}"))?
+        .ok_or_else(|| "The failed task no longer exists.".to_owned())
+}
+
+fn required_recovery_workspace(database: &Database, project_id: &str) -> Result<String, String> {
+    database
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load the recovery workspace: {error}"))?
+        .and_then(|project| {
+            project
+                .workspaces
+                .into_iter()
+                .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+                .map(|workspace| workspace.path)
+        })
+        .ok_or_else(|| "This project has no local recovery workspace.".to_owned())
+}
+
+fn queue_prepared_run_recovery(
+    input: &RecoverTaskRunInput,
+    state: &AppState,
+    prepared: PreparedRunRecovery,
+) -> Result<(String, Run, Task), String> {
+    let (agent_id, action) = recovery_assignment(input, &prepared.source_run);
+    let run_id = Uuid::new_v4().to_string();
+    let queued = persist_run_recovery(state, input, &run_id, agent_id, action)?;
+    Ok((run_id, queued.0, queued.1))
+}
+
+fn recovery_assignment<'a>(
+    input: &'a RecoverTaskRunInput,
+    source_run: &'a Run,
+) -> (&'a str, &'a str) {
+    let agent_id = input.agent_id.as_deref().unwrap_or(&source_run.agent_id);
+    let action = if agent_id == source_run.agent_id {
+        input.mode.as_str()
+    } else {
+        "reassign"
+    };
+    (agent_id, action)
+}
+
+fn persist_run_recovery(
+    state: &AppState,
+    input: &RecoverTaskRunInput,
+    run_id: &str,
+    agent_id: &str,
+    action: &str,
+) -> Result<(Run, Task), String> {
+    state.database.lock().map_err(|_| "The local run store is unavailable.".to_owned())?
+        .queue_run_recovery(&input.run_id, run_id, &Uuid::new_v4().to_string(), agent_id, action)
+        .map_err(|_| "Only failed or cancelled In Progress runs can be recovered, and the selected Codex agent must be available.".to_owned())?
+        .ok_or_else(|| "The failed run no longer exists.".to_owned())
+}
+
+fn dispatch_and_reload_recovery(
+    app: AppHandle,
+    state: &AppState,
+    queued: (String, Run, Task),
+) -> Result<StartedTaskRunResponse, String> {
+    dispatch_queued_task_runs(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    )?;
+    reload_recovery_response(&state.database, queued)
+}
+
+fn reload_recovery_response(
+    database: &Arc<Mutex<Database>>,
+    queued: (String, Run, Task),
+) -> Result<StartedTaskRunResponse, String> {
+    let store = database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let run = store
+        .get_run(&queued.0)
+        .map_err(|error| format!("Unable to reload the recovery run: {error}"))?
+        .unwrap_or(queued.1);
+    let task = store
+        .get_task(&queued.2.id)
+        .map_err(|error| format!("Unable to reload the recovered task: {error}"))?
+        .unwrap_or(queued.2);
+    Ok(StartedTaskRunResponse {
+        run: run.into(),
+        task: task.into(),
+    })
+}
+
+fn reset_failed_task_worktree(
+    state: &AppState,
+    task: &Task,
+    workspace_path: &str,
+) -> Result<(), String> {
+    reset_failed_worktree_record(state, task, workspace_path)?;
+    reset_failed_task_branch(task, workspace_path)
+}
+
+fn reset_failed_worktree_record(
+    state: &AppState,
+    task: &Task,
+    workspace_path: &str,
+) -> Result<(), String> {
+    if let Some(recorded_path) = task.worktree_path.as_deref() {
+        remove_failed_worktree(task, workspace_path, recorded_path)?;
+        release_failed_worktree_record(state, &task.id)?;
+    }
+    Ok(())
+}
+
+fn remove_failed_worktree(
+    task: &Task,
+    workspace_path: &str,
+    recorded_path: &str,
+) -> Result<(), String> {
+    let recorded = PathBuf::from(recorded_path);
+    if recorded.exists() {
+        remove_existing_failed_worktree(task, workspace_path, recorded_path)
+    } else {
+        validate_missing_failed_worktree(task, workspace_path, recorded_path)
+    }
+}
+
+fn remove_existing_failed_worktree(
+    task: &Task,
+    workspace_path: &str,
+    recorded_path: &str,
+) -> Result<(), String> {
+    let actual = canonical_recovery_worktree(task, workspace_path, recorded_path)?;
+    GitService::remove_task_worktree(Path::new(workspace_path), &actual)
+        .map_err(|error| format!("Unable to remove the failed task worktree: {error}"))
+}
+
+fn validate_missing_failed_worktree(
+    task: &Task,
+    workspace_path: &str,
+    recorded_path: &str,
+) -> Result<(), String> {
+    let expected = task_worktree_path(workspace_path, &task.project_id, &task.id)?;
+    if PathBuf::from(normalize_workspace_path(recorded_path))
+        == PathBuf::from(normalize_workspace_path(&expected.to_string_lossy()))
+    {
+        Ok(())
+    } else {
+        Err("The failed task worktree is outside Orchestr's managed location.".into())
+    }
+}
+
+fn release_failed_worktree_record(state: &AppState, task_id: &str) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .release_task_worktree(task_id)
+        .map_err(|error| format!("Unable to release the failed task worktree: {error}"))?;
+    Ok(())
+}
+
+fn reset_failed_task_branch(task: &Task, workspace_path: &str) -> Result<(), String> {
+    if let Some(branch) = task.branch.as_deref() {
+        GitService::delete_task_branch_if_exists(Path::new(workspace_path), branch)
+            .map_err(|error| format!("Unable to reset the failed task branch: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn resolve_failed_run(
+    input: ResolveFailedRunInput,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .resolve_failed_run(
+            &input.run_id,
+            &Uuid::new_v4().to_string(),
+            &input.action,
+            input.note.as_deref(),
+        )
+        .map_err(|_| {
+            "Only failed or cancelled In Progress runs can be abandoned or escalated.".to_owned()
+        })?
+        .map(Into::into)
+        .ok_or_else(|| "The failed run no longer exists.".into())
 }
 
 fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateResponse, String> {
@@ -1631,6 +1952,440 @@ fn retry_integration_attempt(
         .map_err(|_| "Only failed or conflicted integrations can be retried.".to_owned())?
         .map(Into::into)
         .ok_or_else(|| "The integration attempt no longer exists.".into())
+}
+
+#[tauri::command]
+fn retry_integration_cleanup(
+    attempt_id: String,
+    state: State<'_, AppState>,
+) -> Result<IntegrationAttemptResponse, String> {
+    let attempt = integration_attempt(&state, &attempt_id)?;
+    let (task, workspace_path) = retry_cleanup_context(&state, &attempt)?;
+    execute_cleanup_retry(&state, &attempt, &task, &workspace_path)
+}
+
+fn retry_cleanup_context(
+    state: &AppState,
+    attempt: &IntegrationAttempt,
+) -> Result<(Task, String), String> {
+    if attempt.status != orchestr_db::IntegrationStatus::Merged || attempt.error.is_none() {
+        return Err(
+            "Only merged integrations with a recorded cleanup failure can retry cleanup.".into(),
+        );
+    }
+    integration_context(state, attempt)
+}
+
+fn execute_cleanup_retry(
+    state: &AppState,
+    attempt: &IntegrationAttempt,
+    task: &Task,
+    workspace_path: &str,
+) -> Result<IntegrationAttemptResponse, String> {
+    cleanup_integrated_task(
+        state,
+        &attempt.id,
+        task,
+        workspace_path,
+        &attempt.source_branch,
+    )?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .clear_integration_cleanup_error(&attempt.id)
+        .map_err(|error| format!("Unable to clear the cleanup failure: {error}"))?;
+    integration_attempt(state, &attempt.id).map(Into::into)
+}
+
+#[tauri::command]
+fn list_revert_attempts(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<RevertAttemptResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_revert_attempts(&project_id)
+        .map(|attempts| attempts.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load revert history: {error}"))
+}
+
+#[tauri::command]
+fn revert_integration(
+    input: RevertIntegrationInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RevertAttemptResponse, String> {
+    run_revert_integration(&state, &app, &input)
+}
+
+fn run_revert_integration(
+    state: &AppState,
+    app: &AppHandle,
+    input: &RevertIntegrationInput,
+) -> Result<RevertAttemptResponse, String> {
+    let context = prepare_revert_execution(state, &input.attempt_id)?;
+    let outcome = execute_revert_commit(state, &context)?;
+    finish_revert_command(state, app, input, context, outcome)
+}
+
+fn finish_revert_command(
+    state: &AppState,
+    app: &AppHandle,
+    input: &RevertIntegrationInput,
+    context: RevertExecutionContext,
+    outcome: RevertCommitOutcome,
+) -> Result<RevertAttemptResponse, String> {
+    match outcome {
+        RevertCommitOutcome::Committed(commit) => {
+            complete_revert_execution(state, app, input, context, commit)
+        }
+        RevertCommitOutcome::Failed(response) => Ok(response),
+    }
+}
+
+struct RevertExecutionContext {
+    revert: RevertAttempt,
+    project: Project,
+    workspace_path: String,
+    original_task: Task,
+}
+enum RevertCommitOutcome {
+    Committed(String),
+    Failed(RevertAttemptResponse),
+}
+struct RevertValidationOutcome {
+    status: RevertStatus,
+    error: Option<String>,
+    validation_id: Option<String>,
+}
+
+fn prepare_revert_execution(
+    state: &AppState,
+    attempt_id: &str,
+) -> Result<RevertExecutionContext, String> {
+    let revert = begin_revert_attempt(state, attempt_id)?;
+    let (project, original_task, workspace_path) = load_revert_resources(state, &revert)?;
+    Ok(RevertExecutionContext {
+        revert,
+        project,
+        workspace_path,
+        original_task,
+    })
+}
+
+fn begin_revert_attempt(state: &AppState, attempt_id: &str) -> Result<RevertAttempt, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .begin_revert(&Uuid::new_v4().to_string(), attempt_id)
+        .map_err(|_| {
+            "Only a merged integration that has not already been reverted can be reverted."
+                .to_owned()
+        })?
+        .ok_or_else(|| "The merged integration no longer exists.".to_owned())
+}
+
+fn load_revert_resources(
+    state: &AppState,
+    revert: &RevertAttempt,
+) -> Result<(Project, Task, String), String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    let (project, task) = load_revert_project_and_task(&database, revert)?;
+    let workspace = local_project_workspace(&project)?;
+    Ok((project, task, workspace))
+}
+
+fn load_revert_project_and_task(
+    database: &Database,
+    revert: &RevertAttempt,
+) -> Result<(Project, Task), String> {
+    let project = required_revert_project(database, &revert.project_id)?;
+    let task = required_reverted_task(database, &revert.original_task_id)?;
+    Ok((project, task))
+}
+
+fn required_revert_project(database: &Database, project_id: &str) -> Result<Project, String> {
+    let project = database
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load the revert project: {error}"))?
+        .ok_or_else(|| "The revert project no longer exists.".to_owned())?;
+    Ok(project)
+}
+
+fn required_reverted_task(database: &Database, task_id: &str) -> Result<Task, String> {
+    let task = database
+        .get_task(task_id)
+        .map_err(|error| format!("Unable to load the reverted task: {error}"))?
+        .ok_or_else(|| "The reverted task no longer exists.".to_owned())?;
+    Ok(task)
+}
+
+fn local_project_workspace(project: &Project) -> Result<String, String> {
+    project
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+        .map(|workspace| workspace.path.clone())
+        .ok_or_else(|| "This project has no local integration workspace.".to_owned())
+}
+
+fn execute_revert_commit(
+    state: &AppState,
+    context: &RevertExecutionContext,
+) -> Result<RevertCommitOutcome, String> {
+    match GitService::revert_integration_commit(
+        Path::new(&context.workspace_path),
+        &context.project.default_branch,
+        &context.revert.original_commit,
+    ) {
+        Ok(commit) => Ok(RevertCommitOutcome::Committed(commit)),
+        Err(error) => record_failed_revert(state, &context.revert.id, &error.to_string())
+            .map(RevertCommitOutcome::Failed),
+    }
+}
+
+fn record_failed_revert(
+    state: &AppState,
+    revert_id: &str,
+    error: &str,
+) -> Result<RevertAttemptResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .finish_revert(revert_id, RevertStatus::Failed, None, Some(error), None)
+        .map_err(|database_error| format!("Unable to record the failed revert: {database_error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The revert attempt is no longer active.".to_owned())
+}
+
+fn complete_revert_execution(
+    state: &AppState,
+    app: &AppHandle,
+    input: &RevertIntegrationInput,
+    context: RevertExecutionContext,
+    commit: String,
+) -> Result<RevertAttemptResponse, String> {
+    let mut validation = validate_reverted_project(state, app, &context);
+    let health_error = record_revert_health(state, &context.project.id, &validation).err();
+    let repair = create_optional_repair_task(state, input, &context, &commit);
+    validation.error = combine_revert_errors(validation.error, health_error);
+    validation.error = combine_revert_errors(validation.error, repair.error);
+    finish_completed_revert(
+        state,
+        &context.revert.id,
+        &commit,
+        validation,
+        repair.task_id,
+    )
+}
+
+fn validate_reverted_project(
+    state: &AppState,
+    app: &AppHandle,
+    context: &RevertExecutionContext,
+) -> RevertValidationOutcome {
+    match run_validation(
+        &state.database,
+        app,
+        &context.project.id,
+        None,
+        None,
+        ValidationStage::Integration,
+        Path::new(&context.workspace_path),
+        true,
+    ) {
+        Ok(validation) if validation.status == ValidationStatus::Passed => {
+            RevertValidationOutcome {
+                status: RevertStatus::Reverted,
+                error: None,
+                validation_id: Some(validation.id),
+            }
+        }
+        Ok(validation) => RevertValidationOutcome {
+            status: RevertStatus::ValidationFailed,
+            error: validation
+                .error
+                .or_else(|| Some("The integration branch is unhealthy after revert.".into())),
+            validation_id: Some(validation.id),
+        },
+        Err(error) => RevertValidationOutcome {
+            status: RevertStatus::ValidationFailed,
+            error: Some(error),
+            validation_id: None,
+        },
+    }
+}
+
+fn record_revert_health(
+    state: &AppState,
+    project_id: &str,
+    outcome: &RevertValidationOutcome,
+) -> Result<(), String> {
+    match outcome.validation_id.as_deref() {
+        Some(validation_id) => {
+            record_revert_validation_health(state, project_id, validation_id, outcome)
+        }
+        None => mark_revert_health_broken(
+            state,
+            project_id,
+            outcome
+                .error
+                .as_deref()
+                .unwrap_or("Revert validation could not run."),
+        ),
+    }
+}
+
+fn record_revert_validation_health(
+    state: &AppState,
+    project_id: &str,
+    validation_id: &str,
+    outcome: &RevertValidationOutcome,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .record_project_validation(
+            project_id,
+            validation_id,
+            if outcome.status == RevertStatus::Reverted {
+                ValidationStatus::Passed
+            } else {
+                ValidationStatus::Failed
+            },
+            outcome.error.as_deref(),
+            false,
+        )
+        .map_err(|error| format!("Unable to update project health after revert: {error}"))
+}
+
+fn mark_revert_health_broken(
+    state: &AppState,
+    project_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .mark_project_health_broken(project_id, error)
+        .map_err(|database_error| {
+            format!("Unable to mark project health after revert: {database_error}")
+        })
+}
+
+fn maybe_create_repair_task(
+    state: &AppState,
+    input: &RevertIntegrationInput,
+    context: &RevertExecutionContext,
+    revert_commit: &str,
+) -> Result<Option<String>, String> {
+    if !input.create_repair_task {
+        return Ok(None);
+    }
+    create_revert_repair_task(state, input, context, revert_commit).map(Some)
+}
+
+struct RepairTaskOutcome {
+    task_id: Option<String>,
+    error: Option<String>,
+}
+
+fn create_optional_repair_task(
+    state: &AppState,
+    input: &RevertIntegrationInput,
+    context: &RevertExecutionContext,
+    revert_commit: &str,
+) -> RepairTaskOutcome {
+    match maybe_create_repair_task(state, input, context, revert_commit) {
+        Ok(task_id) => RepairTaskOutcome {
+            task_id,
+            error: None,
+        },
+        Err(error) => RepairTaskOutcome {
+            task_id: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn combine_revert_errors(primary: Option<String>, secondary: Option<String>) -> Option<String> {
+    match (primary, secondary) {
+        (Some(primary), Some(secondary)) => Some(format!("{primary} {secondary}")),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    }
+}
+
+fn create_revert_repair_task(
+    state: &AppState,
+    input: &RevertIntegrationInput,
+    context: &RevertExecutionContext,
+    revert_commit: &str,
+) -> Result<String, String> {
+    let id = Uuid::new_v4().to_string();
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_task(NewTask {
+            id: id.clone(),
+            project_id: context.project.id.clone(),
+            title: format!("Repair reverted task: {}", context.original_task.title),
+            description: Some(format!(
+                "Follow-up for reverted integration {} (commit {}).",
+                input.attempt_id, context.revert.original_commit
+            )),
+            acceptance_criteria: vec![
+                "Restore the intended behavior without reintroducing the regression.".into(),
+            ],
+            implementation_notes: Some(format!(
+                "Review revert commit {revert_commit} and the original task {}.",
+                context.original_task.id
+            )),
+            relevant_paths: context.original_task.relevant_paths.clone(),
+            dependency_ids: Vec::new(),
+            assigned_agent_id: None,
+            priority: TaskPriority::High,
+            milestone_id: context.original_task.milestone_id.clone(),
+            epic_id: context.original_task.epic_id.clone(),
+        })
+        .map_err(|error| {
+            format!("The revert succeeded, but its repair task could not be created: {error}")
+        })?;
+    Ok(id)
+}
+
+fn finish_completed_revert(
+    state: &AppState,
+    revert_id: &str,
+    commit: &str,
+    outcome: RevertValidationOutcome,
+    repair_task_id: Option<String>,
+) -> Result<RevertAttemptResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .finish_revert(
+            revert_id,
+            outcome.status,
+            Some(commit),
+            outcome.error.as_deref(),
+            repair_task_id.as_deref(),
+        )
+        .map_err(|error| format!("Unable to record the completed revert: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The revert attempt is no longer active.".to_owned())
 }
 
 #[tauri::command]
@@ -2242,20 +2997,27 @@ fn cleanup_integrated_task(
     workspace_path: &str,
     branch: &str,
 ) -> Result<(), String> {
-    let worktree_path = task.worktree_path.as_deref().ok_or_else(|| {
-        "The integrated task worktree is no longer available for cleanup.".to_owned()
-    })?;
     let cleanup = (|| {
-        GitService::remove_task_worktree(Path::new(workspace_path), Path::new(worktree_path))
-            .map_err(|error| format!("Unable to remove the integrated task worktree: {error}"))?;
-        state
-            .database
-            .lock()
-            .map_err(|_| "The local project store is unavailable.".to_owned())?
-            .release_task_worktree(&task.id)
-            .map_err(|error| format!("Unable to release the integrated task worktree: {error}"))?
-            .ok_or_else(|| "The integrated task worktree was already released.".to_owned())?;
-        GitService::delete_integrated_task_branch(Path::new(workspace_path), branch)
+        if let Some(worktree_path) = task.worktree_path.as_deref() {
+            if Path::new(worktree_path).exists() {
+                GitService::remove_task_worktree(
+                    Path::new(workspace_path),
+                    Path::new(worktree_path),
+                )
+                .map_err(|error| {
+                    format!("Unable to remove the integrated task worktree: {error}")
+                })?;
+            }
+            state
+                .database
+                .lock()
+                .map_err(|_| "The local project store is unavailable.".to_owned())?
+                .release_task_worktree(&task.id)
+                .map_err(|error| {
+                    format!("Unable to release the integrated task worktree: {error}")
+                })?;
+        }
+        GitService::delete_task_branch_if_exists(Path::new(workspace_path), branch)
             .map_err(|error| format!("Unable to delete the integrated task branch: {error}"))
     })();
     if let Err(error) = cleanup {
@@ -2599,6 +3361,69 @@ struct PreparedTaskRun {
 }
 
 fn prepare_task_run_worktree(
+    task: &Task,
+    workspace_path: &str,
+    default_branch: &str,
+    database: &Arc<Mutex<Database>>,
+) -> Result<PreparedTaskRun, String> {
+    if let Some(worktree_path) = task.worktree_path.as_deref() {
+        return reuse_task_run_worktree(task, workspace_path, worktree_path);
+    }
+    create_fresh_task_run_worktree(task, workspace_path, default_branch, database)
+}
+
+fn reuse_task_run_worktree(
+    task: &Task,
+    workspace_path: &str,
+    worktree_path: &str,
+) -> Result<PreparedTaskRun, String> {
+    let branch = task
+        .branch
+        .clone()
+        .ok_or_else(|| "The recoverable task worktree has no recorded branch.".to_owned())?;
+    let worktree = canonical_recovery_worktree(task, workspace_path, worktree_path)?;
+    ensure_recovery_worktree_branch(&worktree, &branch)?;
+    Ok(PreparedTaskRun {
+        branch,
+        repository_before: repository_observation(&worktree),
+        worktree_path: normalize_workspace_path(&worktree.to_string_lossy()),
+        created_branch: false,
+    })
+}
+
+fn canonical_recovery_worktree(
+    task: &Task,
+    workspace_path: &str,
+    worktree_path: &str,
+) -> Result<PathBuf, String> {
+    let expected = task_worktree_path(workspace_path, &task.project_id, &task.id)?;
+    let worktree = fs::canonicalize(worktree_path)
+        .map_err(|error| format!("The recoverable task worktree is unavailable: {error}"))?;
+    let expected = fs::canonicalize(expected).map_err(|_| {
+        "The recoverable task worktree is outside Orchestr's managed location.".to_owned()
+    })?;
+    ensure_managed_worktree_path(worktree, expected)
+}
+
+fn ensure_managed_worktree_path(worktree: PathBuf, expected: PathBuf) -> Result<PathBuf, String> {
+    if worktree == expected {
+        Ok(worktree)
+    } else {
+        Err("The recoverable task worktree is outside Orchestr's managed location.".into())
+    }
+}
+
+fn ensure_recovery_worktree_branch(worktree: &Path, branch: &str) -> Result<(), String> {
+    let repository = GitService::inspect_repository(worktree)
+        .map_err(|error| format!("Unable to inspect the recoverable task worktree: {error}"))?;
+    if repository.current_branch.as_deref() == Some(branch) {
+        Ok(())
+    } else {
+        Err("The recoverable task worktree is checked out on a different branch.".into())
+    }
+}
+
+fn create_fresh_task_run_worktree(
     task: &Task,
     workspace_path: &str,
     default_branch: &str,
@@ -3848,7 +4673,9 @@ fn main() {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join("orchestr.db");
-            let database = Arc::new(Mutex::new(Database::open(&database_path)?));
+            let mut database = Database::open(&database_path)?;
+            database.recover_interrupted_integrations()?;
+            let database = Arc::new(Mutex::new(database));
             let local_worker_runs = Arc::new(Mutex::new(HashMap::new()));
 
             app.manage(AppState {
@@ -3880,6 +4707,8 @@ fn main() {
             cancel_local_worker_run,
             cancel_queued_task_run,
             list_task_runs,
+            recover_task_run,
+            resolve_failed_run,
             get_flow_state,
             update_flow_limits,
             export_task_run_log,
@@ -3890,6 +4719,9 @@ fn main() {
             request_task_changes,
             list_integration_attempts,
             retry_integration_attempt,
+            retry_integration_cleanup,
+            list_revert_attempts,
+            revert_integration,
             integrate_next_task,
             list_validation_commands,
             create_validation_command,

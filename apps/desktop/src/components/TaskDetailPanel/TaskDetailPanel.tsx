@@ -11,11 +11,13 @@ import "./TaskDetailPanel.css";
 type TaskDetailPanelProps = {
   task: Task;
   assignedAgent?: Agent;
+  recoveryAgents: Agent[];
   reviewerAgents: Agent[];
   agentReviews: AgentReview[];
   isAgentReviewStarting: boolean;
   runs: TaskRun[];
   isStartingRun: boolean;
+  runRecoveryAction?: string;
   cancellingRunId?: string;
   isCleaningWorktree: boolean;
   isOpeningWorktree: boolean;
@@ -27,6 +29,8 @@ type TaskDetailPanelProps = {
   onEdit: (task: Task) => void;
   onStartRun: () => void;
   onCancelRun: (runId: string) => void;
+  onRecoverRun: (runId: string, mode: "resume" | "restart_clean", agentId?: string) => void;
+  onResolveRunFailure: (runId: string, action: "abandon" | "escalate") => void;
   onCleanupWorktree: () => void;
   onOpenWorktree: () => void;
   onApproveReview: () => void;
@@ -34,12 +38,13 @@ type TaskDetailPanelProps = {
   onStartAgentReview: (agentId: string) => void;
 };
 
-export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentReviews, isAgentReviewStarting, runs, isStartingRun, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
+export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
   const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
   const activeAgentReview = agentReviews.find((review) => review.status === "running");
   const latestRun = activeRun ?? runs[0];
   const [now, setNow] = useState(() => Date.now());
   const [reviewerId, setReviewerId] = useState("");
+  const [recoveryAgentId, setRecoveryAgentId] = useState("");
 
   useEffect(() => {
     if (!activeRun && !activeAgentReview) return undefined;
@@ -50,6 +55,11 @@ export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentRevi
   useEffect(() => {
     if (!reviewerAgents.some((agent) => agent.id === reviewerId)) setReviewerId(reviewerAgents[0]?.id ?? "");
   }, [reviewerAgents, reviewerId]);
+
+  useEffect(() => {
+    const alternative = recoveryAgents.find((agent) => agent.id !== latestRun?.agentId);
+    if (!recoveryAgents.some((agent) => agent.id === recoveryAgentId && agent.id !== latestRun?.agentId)) setRecoveryAgentId(alternative?.id ?? "");
+  }, [latestRun?.agentId, recoveryAgentId, recoveryAgents]);
 
   const canStart = Boolean(assignedAgent) && task.status === "ready" && !activeRun;
   return (
@@ -100,6 +110,15 @@ export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentRevi
             {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : activeRun.status === "queued" ? "Remove from queue" : "Cancel"}</button>}
           </div>
           {!assignedAgent ? <p className="task-detail-hint">Assign a Codex agent before starting this task.</p> : task.status === "blocked" ? <p className="task-detail-hint">Resolve the blocked requirement before starting this task.</p> : activeRun?.status === "queued" ? <p className="task-detail-hint">Waiting for worker, agent, and downstream WIP capacity.</p> : task.status !== "ready" && !activeRun ? <p className="task-detail-hint">Only Ready tasks can be queued. Successful runs are sent to Review for human approval.</p> : <p className="task-detail-hint">Codex runs in an isolated task worktree. Successful runs move the task to Review.</p>}
+          {latestRun && task.status === "in_progress" && (latestRun.status === "failed" || latestRun.status === "cancelled") && <div className="run-recovery-panel">
+            <div className="run-recovery-heading"><CircleAlert size={15} /><div><strong>Run needs recovery</strong><p>The branch, worktree, output, and timeline remain available.</p></div></div>
+            <div className="run-recovery-actions">
+              <button className="primary-button" type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "resume")}><RotateCcw size={14} /> {runRecoveryAction === "resume" ? "Resuming..." : "Resume worktree"}</button>
+              <button className="secondary-button" type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "restart_clean")}>{runRecoveryAction === "restart_clean" ? "Restarting..." : "Restart clean"}</button>
+            </div>
+            {recoveryAgents.some((agent) => agent.id !== latestRun.agentId) && <div className="run-recovery-reassign"><select value={recoveryAgentId} onChange={(event) => setRecoveryAgentId(event.target.value)}>{recoveryAgents.filter((agent) => agent.id !== latestRun.agentId).map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!recoveryAgentId || Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "resume", recoveryAgentId)}>{runRecoveryAction?.startsWith("reassign:") ? "Reassigning..." : "Retry with agent"}</button></div>}
+            <div className="run-recovery-secondary"><button type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onResolveRunFailure(latestRun.id, "escalate")}>Escalate as blocked</button><button type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onResolveRunFailure(latestRun.id, "abandon")}>Abandon recovery</button></div>
+          </div>}
           {latestRun ? <RunSummary run={latestRun} now={now} /> : <p className="task-detail-empty">No runs recorded for this task.</p>}
         </TaskSection>
       </div>
