@@ -298,6 +298,39 @@ marks a task Done. The Review inspector shows status, reviewer, notes, bounded
 raw output, and cancellation while refreshing task state through its typed
 agent-review service.
 
+## M17 parallel local agents and flow control
+
+Migration `0015_flow_control` turns the existing `queued` run status into a
+durable execution queue. Queue order is priority-first (`critical`, `high`,
+`normal`, `low`) and FIFO within a priority. Claiming work is an atomic
+database transition: the run becomes Running and its Ready task becomes In
+Progress in the same transaction. A partial unique index prevents more than
+one queued or running implementation run for a task, while database triggers
+prevent queued work from being silently edited, reassigned, or moved.
+
+The claim policy checks capacity in this order: local-worker concurrency,
+project health and WIP pressure, then the candidate agent's
+`max_concurrent_tasks`. Project flow limits default to four In Progress, three
+Review, and two Approved plus Integrating tasks; the local worker defaults to
+four concurrent implementation runs. Review or Approved congestion pauses new
+starts even when a worker or agent is idle. The existing per-project
+integration claim remains serialized to one mutating attempt.
+
+Tauri owns queue dispatch and process lifecycle. Each claimed task creates its
+existing isolated branch/worktree and launches independently. A terminal run,
+review decision, successful integration, limit update, new enqueue, or app
+startup asks the scheduler to fill newly available slots. Launch preparation,
+output forwarding, completion classification, validation, and persistence are
+separate operations so failures remain observable and one run cannot hold the
+database lock while another executes.
+
+The board's Flow inspector exposes the worker and downstream occupancy, the
+specific pressure reason, editable limits, and the ordered queue. Queued runs
+remain Ready, may be cancelled without creating a worktree, survive restart,
+and begin automatically when capacity returns. React only invokes the typed
+flow-control service and renders the persisted read model; it does not decide
+which task is eligible to start.
+
 ### Planning, blockers, and durable project context
 
 Project-level blockers and task-level `NEEDS_INPUT` records will stop unsafe

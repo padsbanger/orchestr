@@ -8,7 +8,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["json", "text"],
       reportsDirectory: "coverage",
-      include: ["src/services/agentReviews.ts"],
+      include: ["src/services/agentReviews.ts", "src/services/confirmations.ts", "src/services/flow.ts"],
       exclude: ["src/**/*.test.ts"],
     },
   },

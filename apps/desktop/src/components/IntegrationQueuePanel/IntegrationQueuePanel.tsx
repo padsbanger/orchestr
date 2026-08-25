@@ -19,7 +19,7 @@ export function IntegrationQueuePanel({ attempts, tasks, isLoading, isIntegratin
   const queued = attempts.filter((attempt) => attempt.status === "queued");
   const active = attempts.filter((attempt) => attempt.status === "integrating");
 
-  return <aside className="integration-queue-panel" aria-label="Integration queue">
+  return <aside className="board-inspector-panel integration-queue-panel" aria-label="Integration queue">
     <header className="integration-queue-header">
       <div><p className="eyebrow">Serialized delivery</p><h2>Integration queue</h2></div>
       <div className="integration-queue-header-actions"><button className="icon-button" type="button" disabled={isLoading || isIntegrating} onClick={onRefresh} aria-label="Refresh integration queue"><RefreshCw size={16} className={isLoading ? "spin" : undefined} /></button><button className="icon-button" type="button" onClick={onClose} aria-label="Close integration queue"><X size={16} /></button></div>

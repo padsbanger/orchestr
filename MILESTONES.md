@@ -1306,11 +1306,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the current M17 state:
+Continue from the completed M17 state:
 
 ```text
-1. Add bounded local concurrency and WIP limits
-2. Add recovery and revert workflows
+1. Add recovery and revert workflows
 ```
 
 Do not optimize for maximum agent concurrency yet.

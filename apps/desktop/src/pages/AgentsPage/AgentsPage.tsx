@@ -2,6 +2,7 @@ import { Bot, Pencil, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { AgentDialog } from "../../components/AgentDialog/AgentDialog";
 import { createAgent, deleteAgent, listAgents, type Agent, type AgentInput, updateAgent } from "../../services/agents";
+import { errorMessage, runConfirmedDestructiveAction } from "../../services/confirmations";
 import "./AgentsPage.css";
 
 export function AgentsPage() {
@@ -24,9 +25,19 @@ export function AgentsPage() {
     await loadAgents();
   };
   const removeAgent = async (agent: Agent) => {
-    if (!window.confirm(`Delete ${agent.name}? Tasks assigned to it will become unassigned.`)) return;
-    try { await deleteAgent(agent.id); await loadAgents(); }
-    catch (deleteError) { setError(deleteError instanceof Error ? deleteError.message : "Unable to delete agent."); }
+    setError(undefined);
+    try {
+      await runConfirmedDestructiveAction({
+        title: "Delete agent",
+        message: `Delete ${agent.name}? Tasks assigned to it will become unassigned.`,
+        confirmLabel: "Delete agent",
+      }, async () => {
+        await deleteAgent(agent.id);
+        await loadAgents();
+      });
+    } catch (deleteError) {
+      setError(errorMessage(deleteError, "Unable to delete agent."));
+    }
   };
 
   return <section className="page agents-page">

@@ -2,6 +2,7 @@ import { FolderGit2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { NewProjectDialog } from "../../components/NewProjectDialog/NewProjectDialog";
+import { errorMessage, runConfirmedDestructiveAction } from "../../services/confirmations";
 import { deleteProject, listProjects, type Project } from "../../services/projects";
 import "./DashboardPage.css";
 
@@ -34,15 +35,23 @@ export function DashboardPage() {
   };
 
   const removeProject = async (project: Project) => {
-    if (!window.confirm(`Remove ${project.name} from Orchestr? This deletes its tasks and run history from Orchestr only. The repository files and Git history will remain unchanged.`)) return;
     setError(undefined);
-    setDeletingProjectId(project.id);
     try {
-      await deleteProject(project.id);
-      await loadProjects();
+      await runConfirmedDestructiveAction({
+        title: "Remove project",
+        message: `Remove ${project.name} from Orchestr? This deletes its tasks and run history from Orchestr only. The repository files and Git history will remain unchanged.`,
+        confirmLabel: "Remove project",
+      }, async () => {
+        setDeletingProjectId(project.id);
+        try {
+          await deleteProject(project.id);
+          await loadProjects();
+        } finally {
+          setDeletingProjectId(undefined);
+        }
+      });
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Unable to remove the project.");
-    } finally {
+      setError(errorMessage(deleteError, "Unable to remove the project."));
       setDeletingProjectId(undefined);
     }
   };

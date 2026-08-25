@@ -31,10 +31,11 @@ Completed milestones:
 - M14 — Dependencies + Ready / Blocked Workflow
 - M15 — Milestones, Epics + Project Progress
 - M16 — Architect / Reviewer Agent
+- M17 — Parallel Local Agents + WIP Limits
 
 Immediate next milestone:
 
-**M17 — Parallel Local Agents + WIP Limits**
+**M18 — Failure Recovery + Revert**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1274,7 +1275,7 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M17 — Parallel Local Agents + WIP Limits**
+**M18 — Failure Recovery + Revert**
 
 Do not prioritize:
 
@@ -1286,10 +1287,8 @@ Do not prioritize:
 
 before accepted work can reliably land on a healthy integration branch.
 
-Immediately after integration correctness, prioritize:
-
-1. parallel scheduling + WIP/backpressure
-2. failure recovery
+Immediately after integration correctness and bounded parallel scheduling,
+prioritize failure recovery.
 
 ---
 

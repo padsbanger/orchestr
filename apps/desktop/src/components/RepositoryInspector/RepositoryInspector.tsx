@@ -43,7 +43,7 @@ export function RepositoryInspector({
   };
 
   return (
-    <aside className="repository-inspector" aria-label="Repository inspector">
+    <aside className="board-inspector-panel repository-inspector" aria-label="Repository inspector">
       <header className="repository-inspector-header">
         <div>
           <p className="eyebrow">Repository awareness</p>

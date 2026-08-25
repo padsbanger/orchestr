@@ -33,7 +33,7 @@ export function QualityGatesPanel({ health, implementationCommands, integrationC
     } finally { setIsSaving(false); }
   };
 
-  return <aside className="quality-gates-panel" aria-label="Quality gates and project health">
+  return <aside className="board-inspector-panel quality-gates-panel" aria-label="Quality gates and project health">
     <header className="quality-gates-header"><div><p className="eyebrow">Delivery safety</p><h2>Quality gates</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close quality gates"><X size={16} /></button></header>
     <div className="quality-gates-content">
       <section className={`project-health ${health?.status ?? "unknown"}`}>

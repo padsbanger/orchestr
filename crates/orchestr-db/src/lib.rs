@@ -31,6 +31,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (13, include_str!("../migrations/0013_project_outcomes.sql")),
     (14, include_str!("../migrations/0014_agent_reviews.sql")),
+    (15, include_str!("../migrations/0015_flow_control.sql")),
 ];
 
 pub struct Database {
@@ -694,6 +695,35 @@ pub struct NewRun {
     pub task_id: String,
     pub agent_id: String,
     pub worker_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowLimits {
+    pub project_id: String,
+    pub worker_id: String,
+    pub worker_max_concurrent_runs: i64,
+    pub in_progress_limit: i64,
+    pub review_limit: i64,
+    pub approved_limit: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowState {
+    pub limits: FlowLimits,
+    pub active_worker_runs: i64,
+    pub in_progress: i64,
+    pub review: i64,
+    pub approved: i64,
+    pub integrating: i64,
+    pub queued: i64,
+    pub blocked_reason: Option<String>,
+}
+
+pub struct FlowLimitUpdate {
+    pub worker_max_concurrent_runs: i64,
+    pub in_progress_limit: i64,
+    pub review_limit: i64,
+    pub approved_limit: i64,
 }
 
 impl Database {
@@ -1365,7 +1395,7 @@ impl Database {
         runs
     }
 
-    pub fn start_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
+    pub fn enqueue_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
         let transaction = self.connection.transaction()?;
         let (project_id, task_status, assigned_agent_id): (String, String, Option<String>) =
             transaction.query_row(
@@ -1383,20 +1413,12 @@ impl Database {
         }
 
         transaction.execute(
-            "INSERT INTO runs (id, task_id, agent_id, worker_id, status) VALUES (?1, ?2, ?3, ?4, 'running')",
+            "INSERT INTO runs (id, task_id, agent_id, worker_id, status, queued_at) VALUES (?1, ?2, ?3, ?4, 'queued', CURRENT_TIMESTAMP)",
             params![new_run.id, new_run.task_id, new_run.agent_id, new_run.worker_id],
         )?;
         transaction.execute(
-            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.started', 'Agent run started.')",
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.queued', 'Agent run queued for local execution.')",
             [&new_run.id],
-        )?;
-        move_task_in_transaction(
-            &transaction,
-            &new_run.task_id,
-            &project_id,
-            TaskStatus::Ready,
-            TaskStatus::InProgress,
-            usize::MAX,
         )?;
         transaction.commit()?;
 
@@ -1409,6 +1431,182 @@ impl Database {
         Ok((run, task))
     }
 
+    pub fn start_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
+        let worker_id = new_run.worker_id.clone();
+        let run_id = new_run.id.clone();
+        self.enqueue_run(new_run)?;
+        match self.claim_next_run(&worker_id)? {
+            Some((run, task)) if run.id == run_id => Ok((run, task)),
+            _ => Err(rusqlite::Error::InvalidParameterName(
+                "The run was queued because execution capacity is not currently available.".into(),
+            )),
+        }
+    }
+
+    pub fn claim_next_run(&mut self, worker_id: &str) -> Result<Option<(Run, Task)>> {
+        let transaction = self.connection.transaction()?;
+        let worker_limit = worker_limit_in_transaction(&transaction, worker_id)?;
+        let active_worker_runs: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM runs WHERE worker_id = ?1 AND status = 'running'",
+            [worker_id],
+            |row| row.get(0),
+        )?;
+        if active_worker_runs >= worker_limit {
+            return Ok(None);
+        }
+
+        let candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT runs.id, runs.task_id, tasks.project_id, runs.agent_id, agents.max_concurrent_tasks
+                 FROM runs
+                 JOIN tasks ON tasks.id = runs.task_id
+                 JOIN agents ON agents.id = runs.agent_id
+                 WHERE runs.worker_id = ?1 AND runs.status = 'queued' AND tasks.status = 'ready'
+                 ORDER BY CASE tasks.priority
+                    WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                    runs.queued_at ASC, runs.id ASC",
+            )?;
+            let records = statement
+                .query_map([worker_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            records
+        };
+
+        let mut selected = None;
+        for (run_id, task_id, project_id, agent_id, agent_limit) in candidates {
+            if flow_blocked_reason_in_transaction(&transaction, &project_id)?.is_some() {
+                continue;
+            }
+            let active_agent_runs: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM runs WHERE agent_id = ?1 AND status = 'running'",
+                [&agent_id],
+                |row| row.get(0),
+            )?;
+            if active_agent_runs < agent_limit {
+                selected = Some((run_id, task_id, project_id));
+                break;
+            }
+        }
+        let Some((run_id, task_id, project_id)) = selected else {
+            return Ok(None);
+        };
+
+        transaction.execute(
+            "UPDATE runs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'queued'",
+            [&run_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.started', 'Agent run claimed by the local worker.')",
+            [&run_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            &project_id,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            usize::MAX,
+        )?;
+        transaction.commit()?;
+
+        let run = self
+            .get_run(&run_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let task = self
+            .task_by_id(&task_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        Ok(Some((run, task)))
+    }
+
+    pub fn list_queued_runs(&self, project_id: &str) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare(
+            "SELECT runs.id, runs.task_id, runs.agent_id, runs.worker_id, runs.status,
+                    runs.started_at, runs.completed_at, runs.exit_code, runs.error
+             FROM runs JOIN tasks ON tasks.id = runs.task_id
+             WHERE tasks.project_id = ?1 AND runs.status = 'queued'
+             ORDER BY CASE tasks.priority
+                WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                runs.queued_at ASC, runs.id ASC",
+        )?;
+        let records = statement
+            .query_map([project_id], run_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn cancel_queued_run(&mut self, run_id: &str) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'queued'",
+            [run_id],
+        )?;
+        if changed > 0 {
+            transaction.execute(
+                "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.cancelled', 'Queued agent run cancelled.')",
+                [run_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
+
+    pub fn flow_state(&self, project_id: &str, worker_id: &str) -> Result<FlowState> {
+        flow_state_for_connection(&self.connection, project_id, worker_id)
+    }
+
+    pub fn update_flow_limits(
+        &mut self,
+        project_id: &str,
+        worker_id: &str,
+        update: FlowLimitUpdate,
+    ) -> Result<FlowState> {
+        if [
+            update.worker_max_concurrent_runs,
+            update.in_progress_limit,
+            update.review_limit,
+            update.approved_limit,
+        ]
+        .into_iter()
+        .any(|value| !(1..=32).contains(&value))
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO project_flow_limits (project_id, in_progress_limit, review_limit, approved_limit)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET
+                in_progress_limit = excluded.in_progress_limit,
+                review_limit = excluded.review_limit,
+                approved_limit = excluded.approved_limit,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                project_id,
+                update.in_progress_limit,
+                update.review_limit,
+                update.approved_limit
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO worker_flow_limits (worker_id, max_concurrent_runs) VALUES (?1, ?2)
+             ON CONFLICT(worker_id) DO UPDATE SET
+                max_concurrent_runs = excluded.max_concurrent_runs,
+                updated_at = CURRENT_TIMESTAMP",
+            params![worker_id, update.worker_max_concurrent_runs],
+        )?;
+        transaction.commit()?;
+        self.flow_state(project_id, worker_id)
+    }
+
     pub fn assign_task_worktree(
         &mut self,
         id: &str,
@@ -1417,7 +1615,7 @@ impl Database {
     ) -> Result<Option<Task>> {
         let changed = self.connection.execute(
             "UPDATE tasks SET branch = ?1, worktree_path = ?2, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?3 AND status = 'ready' AND worktree_path IS NULL",
+             WHERE id = ?3 AND status IN ('ready', 'in_progress') AND worktree_path IS NULL",
             params![branch, worktree_path, id],
         )?;
         if changed == 0 {
@@ -2559,6 +2757,137 @@ fn validate_outcome_status(status: &str) -> Result<()> {
     }
 }
 
+fn flow_limits_for_connection(
+    connection: &Connection,
+    project_id: &str,
+    worker_id: &str,
+) -> Result<FlowLimits> {
+    connection.query_row(
+        "SELECT
+            COALESCE((SELECT max_concurrent_runs FROM worker_flow_limits WHERE worker_id = ?2), 4),
+            COALESCE((SELECT in_progress_limit FROM project_flow_limits WHERE project_id = ?1), 4),
+            COALESCE((SELECT review_limit FROM project_flow_limits WHERE project_id = ?1), 3),
+            COALESCE((SELECT approved_limit FROM project_flow_limits WHERE project_id = ?1), 2)",
+        params![project_id, worker_id],
+        |row| {
+            Ok(FlowLimits {
+                project_id: project_id.to_owned(),
+                worker_id: worker_id.to_owned(),
+                worker_max_concurrent_runs: row.get(0)?,
+                in_progress_limit: row.get(1)?,
+                review_limit: row.get(2)?,
+                approved_limit: row.get(3)?,
+            })
+        },
+    )
+}
+
+fn worker_limit_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    worker_id: &str,
+) -> Result<i64> {
+    transaction.query_row(
+        "SELECT COALESCE((SELECT max_concurrent_runs FROM worker_flow_limits WHERE worker_id = ?1), 4)",
+        [worker_id],
+        |row| row.get(0),
+    )
+}
+
+fn project_flow_counts(connection: &Connection, project_id: &str) -> Result<(i64, i64, i64, i64)> {
+    connection.query_row(
+        "SELECT
+            COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'review' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'integrating' THEN 1 ELSE 0 END), 0)
+         FROM tasks WHERE project_id = ?1",
+        [project_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+}
+
+fn flow_blocked_reason_for_connection(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<String>> {
+    let limits = flow_limits_for_connection(connection, project_id, "local")?;
+    let (in_progress, review, approved, integrating) = project_flow_counts(connection, project_id)?;
+    let health: Option<String> = connection
+        .query_row(
+            "SELECT status FROM project_health WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let reason = if health.as_deref() == Some("broken") {
+        Some("The integration branch is broken; automatic starts are paused.".into())
+    } else if review >= limits.review_limit {
+        Some(format!(
+            "Review is at its WIP limit ({review}/{}).",
+            limits.review_limit
+        ))
+    } else if approved + integrating >= limits.approved_limit {
+        Some(format!(
+            "Approved and integrating work is at its WIP limit ({}/{}).",
+            approved + integrating,
+            limits.approved_limit
+        ))
+    } else if in_progress >= limits.in_progress_limit {
+        Some(format!(
+            "In Progress is at its WIP limit ({in_progress}/{}).",
+            limits.in_progress_limit
+        ))
+    } else {
+        None
+    };
+    Ok(reason)
+}
+
+fn flow_blocked_reason_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+) -> Result<Option<String>> {
+    flow_blocked_reason_for_connection(transaction, project_id)
+}
+
+fn flow_state_for_connection(
+    connection: &Connection,
+    project_id: &str,
+    worker_id: &str,
+) -> Result<FlowState> {
+    let limits = flow_limits_for_connection(connection, project_id, worker_id)?;
+    let active_worker_runs = connection.query_row(
+        "SELECT COUNT(*) FROM runs WHERE worker_id = ?1 AND status = 'running'",
+        [worker_id],
+        |row| row.get(0),
+    )?;
+    let queued = connection.query_row(
+        "SELECT COUNT(*) FROM runs JOIN tasks ON tasks.id = runs.task_id
+         WHERE tasks.project_id = ?1 AND runs.status = 'queued'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    let (in_progress, review, approved, integrating) = project_flow_counts(connection, project_id)?;
+    let blocked_reason = if active_worker_runs >= limits.worker_max_concurrent_runs {
+        Some(format!(
+            "The local worker is at capacity ({active_worker_runs}/{}).",
+            limits.worker_max_concurrent_runs
+        ))
+    } else {
+        flow_blocked_reason_for_connection(connection, project_id)?
+    };
+    Ok(FlowState {
+        limits,
+        active_worker_runs,
+        in_progress,
+        review,
+        approved,
+        integrating,
+        queued,
+        blocked_reason,
+    })
+}
+
 fn task_blocked_reason(
     transaction: &rusqlite::Transaction<'_>,
     task_id: &str,
@@ -2695,10 +3024,10 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, IntegrationStatus, NewAgent,
-        NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun, NewTask, NewValidationCommand,
-        ProjectDeletion, ProjectHealthStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
-        ValidationStage, ValidationStatus,
+        AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, FlowLimitUpdate,
+        IntegrationStatus, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun,
+        NewTask, NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RunStatus,
+        TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -3425,7 +3754,11 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, RunStatus::Completed);
         assert_eq!(runs[0].output[0].text, "Task complete");
-        assert_eq!(runs[0].events[0].kind, "run.started");
+        assert_eq!(runs[0].events[0].kind, "run.queued");
+        assert!(runs[0]
+            .events
+            .iter()
+            .any(|event| event.kind == "run.started"));
         assert!(runs[0]
             .events
             .iter()
@@ -3622,6 +3955,171 @@ mod tests {
             .list_tasks("project-1")
             .expect("tasks load")
             .is_empty());
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn execution_queue_respects_priority_agent_worker_and_downstream_limits() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Flow-controlled project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/flow-project".into(),
+            })
+            .expect("project saves");
+        for (id, limit) in [("agent-1", 1), ("agent-2", 2)] {
+            database
+                .create_agent(NewAgent {
+                    id: id.into(),
+                    name: id.into(),
+                    provider: "codex".into(),
+                    role: "Engineer".into(),
+                    model: None,
+                    system_prompt: None,
+                    skills: Vec::new(),
+                    max_concurrent_tasks: limit,
+                })
+                .expect("agent saves");
+        }
+        for (id, agent_id, priority) in [
+            ("task-normal-a", "agent-1", TaskPriority::Normal),
+            ("task-critical", "agent-1", TaskPriority::Critical),
+            ("task-high", "agent-2", TaskPriority::High),
+            ("task-normal-b", "agent-2", TaskPriority::Normal),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-1".into(),
+                    title: id.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Complete the task".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: Some(agent_id.into()),
+                    priority,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+            database
+                .move_task(id, TaskStatus::Ready, usize::MAX)
+                .expect("task becomes ready");
+            database
+                .enqueue_run(NewRun {
+                    id: format!("run-{id}"),
+                    task_id: id.into(),
+                    agent_id: agent_id.into(),
+                    worker_id: "local".into(),
+                })
+                .expect("run queues");
+        }
+        database
+            .update_flow_limits(
+                "project-1",
+                "local",
+                FlowLimitUpdate {
+                    worker_max_concurrent_runs: 2,
+                    in_progress_limit: 4,
+                    review_limit: 1,
+                    approved_limit: 2,
+                },
+            )
+            .expect("flow limits save");
+        let queued_task_ids = database
+            .list_queued_runs("project-1")
+            .expect("execution queue loads")
+            .into_iter()
+            .map(|run| run.task_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            queued_task_ids,
+            [
+                "task-critical",
+                "task-high",
+                "task-normal-a",
+                "task-normal-b"
+            ]
+        );
+        assert!(database
+            .move_task("task-normal-a", TaskStatus::Backlog, 0)
+            .is_err());
+
+        let first = database
+            .claim_next_run("local")
+            .expect("queue claims")
+            .expect("critical task is available");
+        assert_eq!(first.1.id, "task-critical");
+        let second = database
+            .claim_next_run("local")
+            .expect("queue claims")
+            .expect("second agent is available");
+        assert_eq!(second.1.id, "task-high");
+        assert!(database
+            .claim_next_run("local")
+            .expect("worker capacity checks")
+            .is_none());
+
+        database
+            .finish_run(&second.0.id, RunStatus::Completed, Some(0), None)
+            .expect("run completes");
+        let state = database
+            .flow_state("project-1", "local")
+            .expect("flow state loads");
+        assert_eq!(state.active_worker_runs, 1);
+        assert_eq!(state.review, 1);
+        assert_eq!(state.queued, 2);
+        assert_eq!(
+            state.blocked_reason.as_deref(),
+            Some("Review is at its WIP limit (1/1).")
+        );
+        assert!(database
+            .claim_next_run("local")
+            .expect("backpressure checks")
+            .is_none());
+        database
+            .update_flow_limits(
+                "project-1",
+                "local",
+                FlowLimitUpdate {
+                    worker_max_concurrent_runs: 2,
+                    in_progress_limit: 4,
+                    review_limit: 3,
+                    approved_limit: 1,
+                },
+            )
+            .expect("downstream limits update");
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET status = 'approved' WHERE id = 'task-high'",
+                [],
+            )
+            .expect("reviewed work is approved");
+        assert_eq!(
+            database
+                .flow_state("project-1", "local")
+                .expect("approved pressure loads")
+                .blocked_reason
+                .as_deref(),
+            Some("Approved and integrating work is at its WIP limit (1/1).")
+        );
+        assert!(database
+            .cancel_queued_run("run-task-normal-a")
+            .expect("queued run cancels"));
+        assert!(database
+            .move_task("task-normal-a", TaskStatus::Backlog, 0)
+            .expect("cancelled queued task can move")
+            .is_some());
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");

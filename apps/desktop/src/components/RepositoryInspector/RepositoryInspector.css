@@ -1,4 +1,3 @@
-.repository-inspector { position: fixed; z-index: 5; top: 0; right: 0; bottom: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(100%, 480px); border-left: 1px solid #3a4349; background: #15181a; box-shadow: -18px 0 42px rgb(0 0 0 / 32%); }
 .repository-inspector-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid #2b3237; }
 .repository-inspector-header h2 { margin: 0; font-size: 18px; }
 .repository-inspector-actions { display: flex; gap: 6px; }
@@ -39,7 +38,6 @@
 .commit-list span { color: #77828a; font-size: 11px; }
 
 @media (max-width: 600px) {
-  .repository-inspector { width: 100%; }
   .repository-overview { grid-template-columns: 1fr; }
   .repository-overview > div + div { border-top: 1px solid #30383d; border-left: 0; }
 }

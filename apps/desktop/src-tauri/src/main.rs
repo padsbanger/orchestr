@@ -9,11 +9,11 @@ use std::{
 
 use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, Epic,
-    IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject,
-    NewRun, NewRunEvent, NewTask, NewValidationCommand, NewValidationEvent, Project,
-    ProjectDeletion, ProjectHealth, ProjectProgress, Run, RunEvent, RunOutput, RunStatus, Task,
-    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
-    ValidationStatus, Workspace,
+    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
+    NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun, NewRunEvent, NewTask,
+    NewValidationCommand, NewValidationEvent, Project, ProjectDeletion, ProjectHealth,
+    ProjectProgress, Run, RunEvent, RunOutput, RunStatus, Task, TaskPriority, TaskStatus,
+    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -200,6 +200,41 @@ struct RunResponse {
 struct StartedTaskRunResponse {
     run: RunResponse,
     task: TaskResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateFlowLimitsInput {
+    project_id: String,
+    worker_max_concurrent_runs: i64,
+    in_progress_limit: i64,
+    review_limit: i64,
+    approved_limit: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLimitsResponse {
+    project_id: String,
+    worker_id: String,
+    worker_max_concurrent_runs: i64,
+    in_progress_limit: i64,
+    review_limit: i64,
+    approved_limit: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowStateResponse {
+    limits: FlowLimitsResponse,
+    active_worker_runs: i64,
+    in_progress: i64,
+    review: i64,
+    approved: i64,
+    integrating: i64,
+    queued: i64,
+    blocked_reason: Option<String>,
+    queue: Vec<RunResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,6 +699,19 @@ impl From<ProjectHealth> for ProjectHealthResponse {
     }
 }
 
+impl From<FlowLimits> for FlowLimitsResponse {
+    fn from(limits: FlowLimits) -> Self {
+        Self {
+            project_id: limits.project_id,
+            worker_id: limits.worker_id,
+            worker_max_concurrent_runs: limits.worker_max_concurrent_runs,
+            in_progress_limit: limits.in_progress_limit,
+            review_limit: limits.review_limit,
+            approved_limit: limits.approved_limit,
+        }
+    }
+}
+
 impl From<Agent> for AgentResponse {
     fn from(agent: Agent) -> Self {
         Self {
@@ -1042,6 +1090,18 @@ fn cancel_local_worker_run(run_id: String, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
+fn cancel_queued_task_run(run_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .cancel_queued_run(&run_id)
+        .map_err(|error| format!("Unable to cancel the queued task: {error}"))?
+        .then_some(())
+        .ok_or_else(|| "The task run is no longer queued.".into())
+}
+
+#[tauri::command]
 fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<RunResponse>, String> {
     state
         .database
@@ -1050,6 +1110,96 @@ fn list_task_runs(task_id: String, state: State<'_, AppState>) -> Result<Vec<Run
         .list_runs_for_task(&task_id)
         .map(|runs| runs.into_iter().map(Into::into).collect())
         .map_err(|error| format!("Unable to load task runs: {error}"))
+}
+
+fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateResponse, String> {
+    let FlowState {
+        limits,
+        active_worker_runs,
+        in_progress,
+        review,
+        approved,
+        integrating,
+        queued,
+        blocked_reason,
+    } = database
+        .flow_state(project_id, LOCAL_WORKER_ID)
+        .map_err(|error| format!("Unable to load flow control: {error}"))?;
+    let queue = database
+        .list_queued_runs(project_id)
+        .map_err(|error| format!("Unable to load the execution queue: {error}"))?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(FlowStateResponse {
+        limits: limits.into(),
+        active_worker_runs,
+        in_progress,
+        review,
+        approved,
+        integrating,
+        queued,
+        blocked_reason,
+        queue,
+    })
+}
+
+#[tauri::command]
+fn get_flow_state(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<FlowStateResponse, String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    load_flow_state(&database, &project_id)
+}
+
+#[tauri::command]
+fn update_flow_limits(
+    input: UpdateFlowLimitsInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<FlowStateResponse, String> {
+    save_flow_limit_update(&state.database, &input)?;
+    let _ = dispatch_queued_task_runs(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    );
+    load_flow_state_from_store(&state.database, &input.project_id)
+}
+
+fn save_flow_limit_update(
+    database: &Arc<Mutex<Database>>,
+    input: &UpdateFlowLimitsInput,
+) -> Result<(), String> {
+    database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .update_flow_limits(
+            &input.project_id,
+            LOCAL_WORKER_ID,
+            FlowLimitUpdate {
+                worker_max_concurrent_runs: input.worker_max_concurrent_runs,
+                in_progress_limit: input.in_progress_limit,
+                review_limit: input.review_limit,
+                approved_limit: input.approved_limit,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Unable to update flow limits: {error}"))
+}
+
+fn load_flow_state_from_store(
+    database: &Arc<Mutex<Database>>,
+    project_id: &str,
+) -> Result<FlowStateResponse, String> {
+    let database = database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    load_flow_state(&database, project_id)
 }
 
 #[tauri::command]
@@ -1388,6 +1538,7 @@ fn start_agent_review(
             ),
         }
         let _ = app.emit("agent-review://event", event_review_id);
+        let _ = dispatch_queued_task_runs(app, database, active_runs);
     });
     Ok(persisted_review.into())
 }
@@ -1395,6 +1546,7 @@ fn start_agent_review(
 #[tauri::command]
 fn approve_task_review(
     task_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskResponse, String> {
     let worktree_path = {
@@ -1421,14 +1573,20 @@ fn approve_task_review(
         );
     }
 
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
         .approve_task_review(&task_id, &Uuid::new_v4().to_string())
         .map_err(|_| "Only Review tasks with an isolated branch can be approved.".to_owned())?
         .map(Into::into)
-        .ok_or_else(|| "The task no longer exists.".into())
+        .ok_or_else(|| "The task no longer exists.".into());
+    let _ = dispatch_queued_task_runs(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    );
+    result
 }
 
 #[tauri::command]
@@ -2000,6 +2158,11 @@ fn integrate_next_task(
                 .ok_or_else(|| "The integrated task no longer exists.".to_owned())?;
             let attempt = integration_attempt(&state, &attempt.id)?;
             let target_branch = attempt.target_branch.clone();
+            let _ = dispatch_queued_task_runs(
+                app,
+                Arc::clone(&state.database),
+                Arc::clone(&state.local_worker_runs),
+            );
             Ok(IntegrationExecutionResponse {
                 task: task.into(),
                 attempt: attempt.into(),
@@ -2211,7 +2374,7 @@ fn start_task_run(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartedTaskRunResponse, String> {
-    let (task, agent, workspace_path, default_branch) = {
+    let (task, agent) = {
         let database = state
             .database
             .lock()
@@ -2237,17 +2400,7 @@ fn start_task_run(
         if agent.provider != "codex" {
             return Err("Only Codex agents can run locally at this stage.".into());
         }
-        let project = database
-            .get_project(&task.project_id)
-            .map_err(|error| format!("Unable to load the task workspace: {error}"))?
-            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
-        let workspace_path = project
-            .workspaces
-            .into_iter()
-            .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
-            .map(|workspace| workspace.path)
-            .ok_or_else(|| "This project has no local workspace.".to_owned())?;
-        (task, agent, workspace_path, project.default_branch)
+        (task, agent)
     };
 
     let provider_status = CodexProvider
@@ -2266,6 +2419,191 @@ fn start_task_run(
                 .into(),
         );
     }
+    let run_id = Uuid::new_v4().to_string();
+    let (queued_run, queued_task) = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .enqueue_run(NewRun {
+            id: run_id.clone(),
+            task_id: task.id,
+            agent_id: agent.id,
+            worker_id: LOCAL_WORKER_ID.to_owned(),
+        })
+        .map_err(|error| format!("Unable to queue the task run: {error}"))?;
+    dispatch_queued_task_runs(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    )?;
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    Ok(StartedTaskRunResponse {
+        run: database
+            .get_run(&run_id)
+            .map_err(|error| format!("Unable to reload the queued run: {error}"))?
+            .unwrap_or(queued_run)
+            .into(),
+        task: database
+            .get_task(&queued_task.id)
+            .map_err(|error| format!("Unable to reload the queued task: {error}"))?
+            .unwrap_or(queued_task)
+            .into(),
+    })
+}
+
+fn dispatch_queued_task_runs(
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) -> Result<(), String> {
+    loop {
+        let Some((run, task)) = claim_queued_task_run(&database)? else {
+            return Ok(());
+        };
+        dispatch_claimed_task_run(
+            run,
+            task,
+            app.clone(),
+            Arc::clone(&database),
+            Arc::clone(&active_runs),
+        );
+    }
+}
+
+fn claim_queued_task_run(database: &Arc<Mutex<Database>>) -> Result<Option<(Run, Task)>, String> {
+    database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .claim_next_run(LOCAL_WORKER_ID)
+        .map_err(|error| format!("Unable to claim queued work: {error}"))
+}
+
+fn dispatch_claimed_task_run(
+    run: Run,
+    task: Task,
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) {
+    let result = load_queued_run_context(&database, &run, &task).and_then(
+        |(agent, workspace_path, default_branch)| {
+            launch_claimed_task_run(
+                run.clone(),
+                task,
+                agent,
+                workspace_path,
+                default_branch,
+                app.clone(),
+                Arc::clone(&database),
+                Arc::clone(&active_runs),
+            )
+        },
+    );
+    if let Err(error) = result {
+        record_task_launch_failure(&database, &app, run.id, error);
+    }
+}
+
+fn load_queued_run_context(
+    database: &Arc<Mutex<Database>>,
+    run: &Run,
+    task: &Task,
+) -> Result<(Agent, String, String), String> {
+    let store = database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let agent = queued_run_agent(&store, &run.agent_id)?;
+    let (workspace_path, default_branch) = queued_run_workspace(&store, &task.project_id)?;
+    Ok((agent, workspace_path, default_branch))
+}
+
+fn queued_run_agent(database: &Database, agent_id: &str) -> Result<Agent, String> {
+    database
+        .get_agent(agent_id)
+        .map_err(|error| format!("Unable to load the queued run's agent: {error}"))?
+        .ok_or_else(|| "The queued run's agent no longer exists.".to_owned())
+}
+
+fn queued_run_workspace(database: &Database, project_id: &str) -> Result<(String, String), String> {
+    let project = database
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load the queued run's project: {error}"))?
+        .ok_or_else(|| "The queued run's project no longer exists.".to_owned())?;
+    project
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+        .map(|workspace| (workspace.path, project.default_branch))
+        .ok_or_else(|| "This project has no local workspace.".to_owned())
+}
+
+fn record_task_launch_failure(
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    run_id: String,
+    error: String,
+) {
+    if let Ok(mut store) = database.lock() {
+        let _ = store.finish_run(&run_id, RunStatus::Failed, None, Some(&error));
+    }
+    let _ = app.emit(
+        "worker://run-event",
+        WorkerRunEvent {
+            run_id,
+            kind: "failed".into(),
+            stream: None,
+            text: Some(error),
+            raw_text: None,
+            command: None,
+            exit_code: None,
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_claimed_task_run(
+    persisted_run: Run,
+    task: Task,
+    agent: Agent,
+    workspace_path: String,
+    default_branch: String,
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) -> Result<(), String> {
+    let prepared = prepare_task_run_worktree(&task, &workspace_path, &default_branch, &database)?;
+    let request = prepare_task_process_request(&task, &agent, &prepared.worktree_path)?;
+    let run = LocalWorker::start(request)
+        .map_err(|error| format!("Unable to start Codex for this task: {error}"))?;
+    record_task_worktree_events(&database, &persisted_run.id, &prepared);
+    register_task_worker(
+        run,
+        persisted_run.id,
+        task.project_id,
+        task.id,
+        prepared,
+        app,
+        database,
+        active_runs,
+    )
+}
+
+struct PreparedTaskRun {
+    branch: String,
+    worktree_path: String,
+    created_branch: bool,
+    repository_before: Option<RepositoryObservation>,
+}
+
+fn prepare_task_run_worktree(
+    task: &Task,
+    workspace_path: &str,
+    default_branch: &str,
+    database: &Arc<Mutex<Database>>,
+) -> Result<PreparedTaskRun, String> {
     let branch = task
         .branch
         .clone()
@@ -2279,54 +2617,74 @@ fn start_task_run(
     )
     .map_err(|error| format!("Unable to create the isolated task worktree: {error}"))?;
     let worktree_path = normalize_workspace_path(&task_worktree.path.to_string_lossy());
-    if state
-        .database
+    assign_prepared_task_worktree(
+        database,
+        task,
+        &branch,
+        &worktree_path,
+        workspace_path,
+        &task_worktree.path,
+    )?;
+    Ok(PreparedTaskRun {
+        branch,
+        repository_before: repository_observation(Path::new(&worktree_path)),
+        worktree_path,
+        created_branch: task_worktree.created_branch,
+    })
+}
+
+fn assign_prepared_task_worktree(
+    database: &Arc<Mutex<Database>>,
+    task: &Task,
+    branch: &str,
+    worktree_path: &str,
+    workspace_path: &str,
+    created_path: &Path,
+) -> Result<(), String> {
+    let assigned = database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
-        .assign_task_worktree(&task.id, &branch, &worktree_path)
-        .map_err(|error| format!("Unable to record the task worktree: {error}"))?
-        .is_none()
-    {
-        let _ = GitService::remove_task_worktree(Path::new(&workspace_path), &task_worktree.path);
-        return Err("The task is no longer eligible to start.".into());
+        .assign_task_worktree(&task.id, branch, worktree_path)
+        .map_err(|error| format!("Unable to record the task worktree: {error}"))?;
+    if assigned.is_some() {
+        return Ok(());
     }
+    let _ = GitService::remove_task_worktree(Path::new(workspace_path), created_path);
+    Err("The task is no longer eligible to start.".into())
+}
 
-    let request = CodexProvider
+fn prepare_task_process_request(
+    task: &Task,
+    agent: &Agent,
+    worktree_path: &str,
+) -> Result<ProcessRequest, String> {
+    let additional_writable_directories =
+        GitService::writable_git_directories(Path::new(worktree_path)).map_err(|error| {
+            format!("Unable to prepare Git metadata access for the task worktree: {error}")
+        })?;
+    CodexProvider
         .execution_request(AgentRunInput {
             model: agent.model.clone(),
             prompt: build_task_prompt(&task, &agent),
-            working_directory: PathBuf::from(&worktree_path),
-            additional_writable_directories: GitService::writable_git_directories(Path::new(
-                &worktree_path,
-            ))
-            .map_err(|error| {
-                format!("Unable to prepare Git metadata access for the task worktree: {error}")
-            })?,
+            working_directory: PathBuf::from(worktree_path),
+            additional_writable_directories,
             read_only: false,
         })
-        .map_err(|error| format!("Unable to prepare the Codex task: {error}"))?;
-    let repository_before = repository_observation(Path::new(&worktree_path));
-    let validation_project_id = task.project_id.clone();
-    let validation_task_id = task.id.clone();
-    let run_id = Uuid::new_v4().to_string();
-    let (persisted_run, updated_task) = state
-        .database
-        .lock()
-        .map_err(|_| "The local run store is unavailable.".to_owned())?
-        .start_run(NewRun {
-            id: run_id.clone(),
-            task_id: task.id.clone(),
-            agent_id: agent.id,
-            worker_id: LOCAL_WORKER_ID.to_owned(),
-        })
-        .map_err(|error| format!("Unable to start the task run: {error}"))?;
-    if let Ok(mut database) = state.database.lock() {
-        if task_worktree.created_branch {
+        .map_err(|error| format!("Unable to prepare the Codex task: {error}"))
+}
+
+fn record_task_worktree_events(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    prepared: &PreparedTaskRun,
+) {
+    if let Ok(mut database) = database.lock() {
+        if prepared.created_branch {
             let _ = database.append_run_event(
-                &run_id,
+                run_id,
                 NewRunEvent {
                     kind: "git.branch.created".into(),
-                    message: format!("Created task branch {branch}."),
+                    message: format!("Created task branch {}.", prepared.branch),
                     command: None,
                     file_path: None,
                     exit_code: None,
@@ -2334,31 +2692,30 @@ fn start_task_run(
             );
         }
         let _ = database.append_run_event(
-            &run_id,
+            run_id,
             NewRunEvent {
                 kind: "git.worktree.created".into(),
-                message: format!("Created isolated worktree at {worktree_path}."),
+                message: format!("Created isolated worktree at {}.", prepared.worktree_path),
                 command: None,
                 file_path: None,
                 exit_code: None,
             },
         );
     }
+}
 
-    let run = match LocalWorker::start(request) {
-        Ok(run) => run,
-        Err(error) => {
-            let _ = state.database.lock().ok().and_then(|mut database| {
-                database
-                    .finish_run(&run_id, RunStatus::Failed, None, Some(&error.to_string()))
-                    .ok()
-            });
-            return Err(format!("Unable to start Codex for this task: {error}"));
-        }
-    };
-
+#[allow(clippy::too_many_arguments)]
+fn register_task_worker(
+    run: orchestr_worker::WorkerRun,
+    run_id: String,
+    project_id: String,
+    task_id: String,
+    prepared: PreparedTaskRun,
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) -> Result<(), String> {
     let handle = run.handle;
-    let active_runs = Arc::clone(&state.local_worker_runs);
     active_runs
         .lock()
         .map_err(|_| "The local worker state is unavailable.".to_owned())?
@@ -2369,135 +2726,291 @@ fn start_task_run(
                 cancel_requested: false,
             },
         );
-    let database = Arc::clone(&state.database);
-    let event_run_id = run_id.clone();
+    let _ = app.emit("scheduler://changed", run_id.clone());
     thread::spawn(move || {
-        for output in run.output {
-            let stream = output.stream.clone();
-            let stream_name = match &stream {
-                OutputStream::Stdout => "stdout",
-                OutputStream::Stderr => "stderr",
-            };
-            let raw_text = output.text;
-            let event = CodexProvider::execution_event(&raw_text);
-            let text = event.message.clone();
-            let command = event.command.clone();
-            let event_kind = event.kind.clone();
-            if let Ok(mut database) = database.lock() {
-                let _ = database.append_run_output(&event_run_id, stream_name, &raw_text);
-                let _ = database.append_run_event(
-                    &event_run_id,
-                    NewRunEvent {
-                        kind: event.kind,
-                        message: event.message,
-                        command: event.command,
-                        file_path: None,
-                        exit_code: event.exit_code,
-                    },
-                );
-            }
-            let _ = app.emit(
-                "worker://run-event",
-                WorkerRunEvent {
-                    run_id: event_run_id.clone(),
-                    kind: event_kind,
-                    stream: Some(stream),
-                    text: Some(text),
-                    raw_text: Some(raw_text),
-                    command,
-                    exit_code: None,
+        monitor_task_worker(
+            run.output,
+            handle,
+            run_id,
+            project_id,
+            task_id,
+            prepared,
+            app,
+            database,
+            active_runs,
+        );
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn monitor_task_worker(
+    output: std::sync::mpsc::Receiver<orchestr_worker::ProcessOutput>,
+    handle: WorkerHandle,
+    run_id: String,
+    project_id: String,
+    task_id: String,
+    prepared: PreparedTaskRun,
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) {
+    forward_task_output(output, &run_id, &database, &app);
+    let result = handle.wait();
+    let cancelled = remove_active_task_run(&active_runs, &run_id);
+    let outcome = classify_task_process_result(
+        result,
+        cancelled,
+        &database,
+        &app,
+        &project_id,
+        &task_id,
+        &prepared.worktree_path,
+    );
+    finish_task_worker(&database, &run_id, &prepared, &outcome);
+    emit_task_worker_outcome(&app, &run_id, outcome);
+    let _ = dispatch_queued_task_runs(app, database, active_runs);
+}
+
+fn forward_task_output(
+    output: std::sync::mpsc::Receiver<orchestr_worker::ProcessOutput>,
+    run_id: &str,
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+) {
+    for output in output {
+        let stream = output.stream;
+        let raw_text = output.text;
+        let event = CodexProvider::execution_event(&raw_text);
+        if let Ok(mut database) = database.lock() {
+            let _ = database.append_run_output(run_id, output_stream_name(&stream), &raw_text);
+            let _ = database.append_run_event(
+                run_id,
+                NewRunEvent {
+                    kind: event.kind.clone(),
+                    message: event.message.clone(),
+                    command: event.command.clone(),
+                    file_path: None,
+                    exit_code: event.exit_code,
                 },
             );
-        }
-
-        let result = handle.wait();
-        let cancelled = active_runs
-            .lock()
-            .ok()
-            .and_then(|mut runs| runs.remove(&event_run_id))
-            .is_some_and(|run| run.cancel_requested);
-        let (status, kind, text, exit_code) = match result {
-            Ok(exit_status) if cancelled => (
-                RunStatus::Cancelled,
-                "cancelled",
-                Some("Codex task cancelled.".into()),
-                exit_status.code(),
-            ),
-            Ok(exit_status) if exit_status.success() => {
-                match GitService::inspect_repository(Path::new(&worktree_path)) {
-                    Ok(repository) if !repository.is_clean => (
-                        RunStatus::Failed,
-                        "failed",
-                        Some(
-                            "Codex finished with uncommitted task changes. Commit the task worktree before requesting review."
-                                .into(),
-                        ),
-                        exit_status.code(),
-                    ),
-                    Ok(_) => match run_validation(
-                        &database,
-                        &app,
-                        &validation_project_id,
-                        Some(&validation_task_id),
-                        None,
-                        ValidationStage::Implementation,
-                        Path::new(&worktree_path),
-                        false,
-                    ) {
-                        Ok(validation) if validation.status == ValidationStatus::Passed => {
-                            (RunStatus::Completed, "completed", None, exit_status.code())
-                        }
-                        Ok(validation) => (
-                            RunStatus::Failed,
-                            "failed",
-                            Some(validation.error.unwrap_or_else(|| "Implementation validation failed.".into())),
-                            exit_status.code(),
-                        ),
-                        Err(error) => (RunStatus::Failed, "failed", Some(error), exit_status.code()),
-                    },
-                    Err(error) => (
-                        RunStatus::Failed,
-                        "failed",
-                        Some(format!("Unable to verify the task worktree after Codex completed: {error}")),
-                        exit_status.code(),
-                    ),
-                }
-            }
-            Ok(exit_status) => (
-                RunStatus::Failed,
-                "failed",
-                Some("Codex exited with an error.".into()),
-                exit_status.code(),
-            ),
-            Err(error) => (RunStatus::Failed, "failed", Some(error.to_string()), None),
-        };
-        if let Ok(mut database) = database.lock() {
-            record_repository_events(
-                &mut database,
-                &event_run_id,
-                Path::new(&worktree_path),
-                repository_before.as_ref(),
-            );
-            let _ = database.finish_run(&event_run_id, status, exit_code, text.as_deref());
         }
         let _ = app.emit(
             "worker://run-event",
             WorkerRunEvent {
-                run_id: event_run_id,
-                kind: kind.into(),
-                stream: None,
-                text,
-                raw_text: None,
-                command: None,
-                exit_code,
+                run_id: run_id.to_owned(),
+                kind: event.kind,
+                stream: Some(stream),
+                text: Some(event.message),
+                raw_text: Some(raw_text),
+                command: event.command,
+                exit_code: None,
             },
         );
-    });
+    }
+}
 
-    Ok(StartedTaskRunResponse {
-        run: persisted_run.into(),
-        task: updated_task.into(),
-    })
+fn output_stream_name(stream: &OutputStream) -> &'static str {
+    match stream {
+        OutputStream::Stdout => "stdout",
+        OutputStream::Stderr => "stderr",
+    }
+}
+
+fn remove_active_task_run(
+    active_runs: &Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+    run_id: &str,
+) -> bool {
+    active_runs
+        .lock()
+        .ok()
+        .and_then(|mut runs| runs.remove(run_id))
+        .is_some_and(|run| run.cancel_requested)
+}
+
+struct TaskRunOutcome {
+    status: RunStatus,
+    kind: &'static str,
+    text: Option<String>,
+    exit_code: Option<i32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_task_process_result(
+    result: orchestr_worker::Result<std::process::ExitStatus>,
+    cancelled: bool,
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    project_id: &str,
+    task_id: &str,
+    worktree_path: &str,
+) -> TaskRunOutcome {
+    match result {
+        Ok(exit_status) => classify_task_exit_status(
+            exit_status,
+            cancelled,
+            database,
+            app,
+            project_id,
+            task_id,
+            worktree_path,
+        ),
+        Err(error) => failed_task_outcome(error.to_string(), None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_task_exit_status(
+    exit_status: std::process::ExitStatus,
+    cancelled: bool,
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    project_id: &str,
+    task_id: &str,
+    worktree_path: &str,
+) -> TaskRunOutcome {
+    if cancelled {
+        return TaskRunOutcome {
+            status: RunStatus::Cancelled,
+            kind: "cancelled",
+            text: Some("Codex task cancelled.".into()),
+            exit_code: exit_status.code(),
+        };
+    }
+    if !exit_status.success() {
+        return failed_task_outcome("Codex exited with an error.".into(), exit_status.code());
+    }
+    inspect_completed_task(
+        database,
+        app,
+        project_id,
+        task_id,
+        worktree_path,
+        exit_status.code(),
+    )
+}
+
+fn inspect_completed_task(
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    project_id: &str,
+    task_id: &str,
+    worktree_path: &str,
+    exit_code: Option<i32>,
+) -> TaskRunOutcome {
+    match GitService::inspect_repository(Path::new(worktree_path)) {
+        Ok(repository) => validate_completed_task(
+            repository.is_clean,
+            database,
+            app,
+            project_id,
+            task_id,
+            worktree_path,
+            exit_code,
+        ),
+        Err(error) => failed_task_outcome(
+            format!("Unable to verify the task worktree after Codex completed: {error}"),
+            exit_code,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_completed_task(
+    is_clean: bool,
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    project_id: &str,
+    task_id: &str,
+    worktree_path: &str,
+    exit_code: Option<i32>,
+) -> TaskRunOutcome {
+    if !is_clean {
+        return failed_task_outcome(
+            "Codex finished with uncommitted task changes. Commit the task worktree before requesting review."
+                .into(),
+            exit_code,
+        );
+    }
+    match run_validation(
+        database,
+        app,
+        project_id,
+        Some(task_id),
+        None,
+        ValidationStage::Implementation,
+        Path::new(worktree_path),
+        false,
+    ) {
+        Ok(validation) => implementation_validation_outcome(validation, exit_code),
+        Err(error) => failed_task_outcome(error, exit_code),
+    }
+}
+
+fn implementation_validation_outcome(
+    validation: ValidationAttempt,
+    exit_code: Option<i32>,
+) -> TaskRunOutcome {
+    if validation.status == ValidationStatus::Passed {
+        return TaskRunOutcome {
+            status: RunStatus::Completed,
+            kind: "completed",
+            text: None,
+            exit_code,
+        };
+    }
+    failed_task_outcome(
+        validation
+            .error
+            .unwrap_or_else(|| "Implementation validation failed.".into()),
+        exit_code,
+    )
+}
+
+fn failed_task_outcome(message: String, exit_code: Option<i32>) -> TaskRunOutcome {
+    TaskRunOutcome {
+        status: RunStatus::Failed,
+        kind: "failed",
+        text: Some(message),
+        exit_code,
+    }
+}
+
+fn finish_task_worker(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    prepared: &PreparedTaskRun,
+    outcome: &TaskRunOutcome,
+) {
+    if let Ok(mut database) = database.lock() {
+        record_repository_events(
+            &mut database,
+            run_id,
+            Path::new(&prepared.worktree_path),
+            prepared.repository_before.as_ref(),
+        );
+        let _ = database.finish_run(
+            run_id,
+            outcome.status,
+            outcome.exit_code,
+            outcome.text.as_deref(),
+        );
+    }
+}
+
+fn emit_task_worker_outcome(app: &AppHandle, run_id: &str, outcome: TaskRunOutcome) {
+    let _ = app.emit(
+        "worker://run-event",
+        WorkerRunEvent {
+            run_id: run_id.to_owned(),
+            kind: outcome.kind.into(),
+            stream: None,
+            text: outcome.text,
+            raw_text: None,
+            command: None,
+            exit_code: outcome.exit_code,
+        },
+    );
 }
 
 #[tauri::command]
@@ -3335,12 +3848,15 @@ fn main() {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join("orchestr.db");
-            let database = Database::open(&database_path)?;
+            let database = Arc::new(Mutex::new(Database::open(&database_path)?));
+            let local_worker_runs = Arc::new(Mutex::new(HashMap::new()));
 
             app.manage(AppState {
-                database: Arc::new(Mutex::new(database)),
-                local_worker_runs: Arc::new(Mutex::new(HashMap::new())),
+                database: Arc::clone(&database),
+                local_worker_runs: Arc::clone(&local_worker_runs),
             });
+            dispatch_queued_task_runs(app.handle().clone(), database, local_worker_runs)
+                .map_err(std::io::Error::other)?;
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -3362,7 +3878,10 @@ fn main() {
             logout_codex,
             test_codex_connection,
             cancel_local_worker_run,
+            cancel_queued_task_run,
             list_task_runs,
+            get_flow_state,
+            update_flow_limits,
             export_task_run_log,
             get_task_review,
             list_agent_reviews,

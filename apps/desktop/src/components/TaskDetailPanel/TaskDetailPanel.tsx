@@ -1,4 +1,4 @@
-import { Bot, CheckSquare, Code2, Download, FileCode2, FolderOpen, GitBranch, Pencil, Play, Square, Terminal, X } from "lucide-react";
+import { Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
@@ -35,16 +35,17 @@ type TaskDetailPanelProps = {
 };
 
 export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentReviews, isAgentReviewStarting, runs, isStartingRun, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
-  const activeRun = runs.find((run) => run.status === "running");
+  const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
+  const activeAgentReview = agentReviews.find((review) => review.status === "running");
   const latestRun = activeRun ?? runs[0];
   const [now, setNow] = useState(() => Date.now());
   const [reviewerId, setReviewerId] = useState("");
 
   useEffect(() => {
-    if (!activeRun) return undefined;
+    if (!activeRun && !activeAgentReview) return undefined;
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(interval);
-  }, [activeRun]);
+  }, [activeAgentReview, activeRun]);
 
   useEffect(() => {
     if (!reviewerAgents.some((agent) => agent.id === reviewerId)) setReviewerId(reviewerAgents[0]?.id ?? "");
@@ -52,7 +53,7 @@ export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentRevi
 
   const canStart = Boolean(assignedAgent) && task.status === "ready" && !activeRun;
   return (
-    <aside className="task-detail-panel" aria-label={`Task details for ${task.title}`}>
+    <aside className="board-inspector-panel task-detail-panel" aria-label={`Task details for ${task.title}`}>
       <header className="task-detail-header">
         <div><p className="eyebrow">Task specification</p><h2>{task.title}</h2><code>{task.id}</code></div>
         <div className="task-detail-actions">
@@ -85,20 +86,60 @@ export function TaskDetailPanel({ task, assignedAgent, reviewerAgents, agentRevi
           {task.branch && <p className="task-detail-copy"><span className="task-detail-label">Branch</span><code>{task.branch}</code></p>}
           {task.worktreePath ? <><p className="task-detail-copy"><span className="task-detail-label">Worktree</span><code className="task-worktree-path">{task.worktreePath}</code></p><div className="task-worktree-actions"><button className="secondary-button" type="button" disabled={isOpeningWorktree} onClick={onOpenWorktree}><FolderOpen size={14} /> {isOpeningWorktree ? "Opening..." : "Open folder"}</button><button className="secondary-button" type="button" disabled={Boolean(activeRun) || isCleaningWorktree} onClick={onCleanupWorktree}>{isCleaningWorktree ? "Removing..." : "Remove worktree"}</button></div><p className="task-detail-hint">Open the isolated checkout to inspect the agent's files. Removing it retains the task branch for review.</p></> : <p className="task-detail-hint">The task branch is retained; its isolated checkout has been removed.</p>}
         </TaskSection>}
-        {task.status === "review" && <TaskSection title="Review" icon={<GitBranch size={14} />}>
-          {isReviewLoading ? <p className="task-detail-empty">Loading task branch changes...</p> : reviewError ? <p className="task-run-error">{reviewError}</p> : review && <><p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><h4>Architect review</h4>{agentReviews.length > 0 && <div className="agent-review-list">{agentReviews.map((agentReview) => <article key={agentReview.id}><span className={`agent-review-status ${agentReview.status}`}>{agentReview.decision ?? agentReview.status}</span><strong>{reviewerAgents.find((agent) => agent.id === agentReview.agentId)?.name ?? "Removed agent"}</strong>{agentReview.notes && <p>{agentReview.notes}</p>}{agentReview.error && <p className="task-run-error">{agentReview.error}</p>}{agentReview.status === "running" && <button className="secondary-button" type="button" disabled={cancellingRunId === agentReview.id} onClick={() => onCancelRun(agentReview.id)}>{cancellingRunId === agentReview.id ? "Cancelling..." : "Cancel reviewer"}</button>}{agentReview.rawOutput && <details className="agent-review-output"><summary>Raw provider output</summary><pre>{agentReview.rawOutput}</pre></details>}</article>)}</div>}{reviewerAgents.length === 0 ? <p className="task-detail-hint">Create a separate Codex agent to run an architect review. The implementation agent cannot review its own task.</p> : <div className="agent-review-controls"><select value={reviewerId} onChange={(event) => setReviewerId(event.target.value)}>{reviewerAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!reviewerId || isAgentReviewStarting || agentReviews.some((agentReview) => agentReview.status === "running")} onClick={() => onStartAgentReview(reviewerId)}>{isAgentReviewStarting ? "Starting reviewer..." : "Run architect review"}</button></div>}<p className="task-detail-hint">The reviewer runs in read-only mode and can approve for integration or request changes. It cannot review its own implementation.</p><div className="review-actions"><button className="primary-button" type="button" disabled={isReviewActionPending} onClick={onApproveReview}>Approve for integration</button><button className="secondary-button" type="button" disabled={isReviewActionPending} onClick={onRequestChanges}>Request changes</button></div><p className="task-detail-hint">Approval queues a serialized squash merge; it does not mark the task Done.</p><h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}<h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}</>}
+        {(task.status === "review" || agentReviews.length > 0) && <TaskSection title="Architect review" icon={<Bot size={14} />} count={agentReviews.length || undefined}>
+          {agentReviews.length > 0 && <ArchitectReviewHistory reviews={agentReviews} agents={reviewerAgents} now={now} cancellingRunId={cancellingRunId} onCancel={onCancelRun} />}
+          {task.status === "review" && (reviewerAgents.length === 0 ? <p className="task-detail-hint">Create a separate Codex agent to run an architect review. The implementation agent cannot review its own task.</p> : <div className="agent-review-controls"><select value={reviewerId} onChange={(event) => setReviewerId(event.target.value)}>{reviewerAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!reviewerId || isAgentReviewStarting || Boolean(activeAgentReview)} onClick={() => onStartAgentReview(reviewerId)}>{isAgentReviewStarting ? "Starting architect..." : activeAgentReview ? "Architect reviewing..." : agentReviews.length > 0 ? "Run another review" : "Run architect review"}</button></div>)}
+          {task.status === "review" && <p className="task-detail-hint">The architect inspects the branch in read-only mode. Its decision is persisted here even after the task moves to Approved or back to In Progress.</p>}
+        </TaskSection>}
+        {task.status === "review" && <TaskSection title="Branch review" icon={<GitBranch size={14} />}>
+          {isReviewLoading ? <p className="task-detail-empty">Loading task branch changes...</p> : reviewError ? <p className="task-run-error">{reviewError}</p> : review && <><p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><div className="review-actions"><button className="primary-button" type="button" disabled={isReviewActionPending || Boolean(activeAgentReview)} onClick={onApproveReview}>Approve for integration</button><button className="secondary-button" type="button" disabled={isReviewActionPending || Boolean(activeAgentReview)} onClick={onRequestChanges}>Request changes</button></div><p className="task-detail-hint">Approval queues a serialized squash merge; it does not mark the task Done.</p><h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}<h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}</>}
         </TaskSection>}
         <TaskSection title="Execution" icon={<Terminal size={14} />}>
           <div className="task-run-actions">
-            <button className="primary-button" type="button" disabled={!canStart || isStartingRun} onClick={onStartRun}><Play size={15} /> {isStartingRun ? "Starting..." : "Run with Codex"}</button>
-            {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : "Cancel"}</button>}
+            <button className="primary-button" type="button" disabled={!canStart || isStartingRun} onClick={onStartRun}><Play size={15} /> {isStartingRun ? "Queuing..." : "Queue with Codex"}</button>
+            {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : activeRun.status === "queued" ? "Remove from queue" : "Cancel"}</button>}
           </div>
-          {!assignedAgent ? <p className="task-detail-hint">Assign a Codex agent before starting this task.</p> : task.status === "blocked" ? <p className="task-detail-hint">Resolve the blocked requirement before starting this task.</p> : task.status !== "ready" && !activeRun ? <p className="task-detail-hint">Only Ready tasks can be started. Successful runs are sent to Review for human approval.</p> : <p className="task-detail-hint">Codex runs in an isolated task worktree. Successful runs move the task to Review.</p>}
+          {!assignedAgent ? <p className="task-detail-hint">Assign a Codex agent before starting this task.</p> : task.status === "blocked" ? <p className="task-detail-hint">Resolve the blocked requirement before starting this task.</p> : activeRun?.status === "queued" ? <p className="task-detail-hint">Waiting for worker, agent, and downstream WIP capacity.</p> : task.status !== "ready" && !activeRun ? <p className="task-detail-hint">Only Ready tasks can be queued. Successful runs are sent to Review for human approval.</p> : <p className="task-detail-hint">Codex runs in an isolated task worktree. Successful runs move the task to Review.</p>}
           {latestRun ? <RunSummary run={latestRun} now={now} /> : <p className="task-detail-empty">No runs recorded for this task.</p>}
         </TaskSection>
       </div>
     </aside>
   );
+}
+
+function ArchitectReviewHistory({ reviews, agents, now, cancellingRunId, onCancel }: { reviews: AgentReview[]; agents: Agent[]; now: number; cancellingRunId?: string; onCancel: (runId: string) => void }) {
+  return <div className="agent-review-list" aria-live="polite">{reviews.map((review, index) => {
+    const outcome = architectReviewOutcome(review);
+    const runtimeEnd = review.completedAt ? timestamp(review.completedAt) : now;
+    const runtime = formatDuration(Math.max(0, runtimeEnd - timestamp(review.startedAt)));
+    const outputEvents = review.rawOutput.trim() ? review.rawOutput.trim().split("\n").length : 0;
+    const reviewer = agents.find((agent) => agent.id === review.agentId)?.name ?? "Removed agent";
+    return <article className={`agent-review-card ${outcome.tone}`} key={review.id}>
+      <header className="agent-review-card-header">
+        <span className={`agent-review-icon ${outcome.tone}`}>{outcome.icon}</span>
+        <div><strong>{outcome.title}</strong><p>{outcome.detail}</p></div>
+        <span className={`agent-review-status ${outcome.tone}`}>{outcome.label}</span>
+      </header>
+      {review.status === "running" && <div className="agent-review-progress" aria-label="Architect review in progress"><span /><span /><span /></div>}
+      <div className="agent-review-meta"><span>{reviewer}</span><span>{runtime}</span><span>{dateTime(review.completedAt ?? review.startedAt)}</span>{reviews.length > 1 && <span>Attempt {reviews.length - index}</span>}</div>
+      {review.status === "running" && <p className="agent-review-activity">Inspecting acceptance criteria, commits, diff, and validation evidence{outputEvents > 0 ? ` · ${outputEvents} provider events received` : ""}.</p>}
+      {review.notes && <div className="agent-review-notes"><span>Architect notes</span><p>{review.notes}</p></div>}
+      {review.error && <p className="task-run-error">{review.error}</p>}
+      <div className="agent-review-card-actions">
+        {review.status === "running" && <button className="secondary-button" type="button" disabled={cancellingRunId === review.id} onClick={() => onCancel(review.id)}>{cancellingRunId === review.id ? "Cancelling..." : "Cancel architect"}</button>}
+        {review.rawOutput && <details className="agent-review-output"><summary>Provider transcript · {outputEvents} events</summary><pre>{review.rawOutput}</pre></details>}
+      </div>
+    </article>;
+  })}</div>;
+}
+
+function architectReviewOutcome(review: AgentReview): { tone: string; label: string; title: string; detail: string; icon: ReactNode } {
+  if (review.status === "running") return { tone: "running", label: "Reviewing", title: "Architect review in progress", detail: "The task stays in Review until a durable decision is recorded.", icon: <LoaderCircle size={15} className="spin" /> };
+  if (review.status === "failed") return { tone: "failed", label: "Failed", title: "Architect review failed", detail: "No workflow decision was applied. The task remains available for another review.", icon: <CircleAlert size={15} /> };
+  if (review.status === "cancelled") return { tone: "cancelled", label: "Cancelled", title: "Architect review cancelled", detail: "No workflow decision was applied.", icon: <Square size={13} /> };
+  if (review.decision === "approve") return { tone: "approve", label: "Approved", title: "Architect approved the implementation", detail: "The task moved to Approved and entered the serialized integration queue.", icon: <CheckCircle2 size={15} /> };
+  if (review.decision === "request_changes") return { tone: "request_changes", label: "Changes", title: "Architect requested changes", detail: "The task returned to In Progress with the architect's notes retained below.", icon: <RotateCcw size={15} /> };
+  return { tone: "completed", label: "Completed", title: "Architect review completed", detail: "The review finished without a workflow decision.", icon: <CheckCircle2 size={15} /> };
 }
 
 function TaskSection({ title, icon, count, children }: { title: string; icon?: ReactNode; count?: number; children: ReactNode }) {
@@ -183,6 +224,7 @@ function eventLabel(kind: string) {
     "agent.message": "Codex",
     "file.modified": "Changed files",
     "provider.error": "Provider error",
+    "run.queued": "Run queued",
     "run.completed": "Run completed",
     "run.failed": "Run failed",
   };
@@ -206,6 +248,8 @@ function commandActivity(command: string, kind: string) {
 function timestamp(value: string) { return Date.parse(value.endsWith("Z") ? value : `${value}Z`); }
 
 function time(value: string) { return new Date(timestamp(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+
+function dateTime(value: string) { return new Date(timestamp(value)).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
 
 function formatDuration(milliseconds: number) {
   const seconds = Math.floor(milliseconds / 1_000);

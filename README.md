@@ -38,10 +38,11 @@ npm run crap:rust
 npm run crap
 ```
 
-`crap4ts` currently covers `agentReviews.ts`, which has dedicated Vitest
-tests. The Rust gate compares against the checked-in baseline, failing for a
-regression or for a new function whose score exceeds 30. Refresh that baseline
-only after reviewing and intentionally accepting a report change:
+`crap4ts` currently covers the agent-review and flow-control service boundaries,
+which have dedicated Vitest tests. The Rust gate compares against the checked-in
+baseline, failing for a regression or for a new function whose score exceeds 30.
+Refresh that baseline only after reviewing and intentionally accepting a report
+change:
 
 ```bash
 npm run crap:rust:baseline

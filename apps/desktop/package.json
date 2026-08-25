@@ -9,7 +9,7 @@
     "check": "tsc -b --pretty false",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "crap": "node scripts/normalize-coverage-paths.mjs && crap4ts --coverage coverage/coverage-final.normalized.json --include src/services/agentReviews.ts --lenient",
+    "crap": "node scripts/normalize-coverage-paths.mjs && crap4ts --coverage coverage/coverage-final.normalized.json --include src/services/agentReviews.ts src/services/confirmations.ts src/services/flow.ts --lenient",
     "tauri": "tauri"
   },
   "dependencies": {

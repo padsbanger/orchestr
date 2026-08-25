@@ -50,6 +50,10 @@ export function cancelTaskRun(runId: string): Promise<void> {
   return invoke<void>("cancel_local_worker_run", { runId });
 }
 
+export function cancelQueuedTaskRun(runId: string): Promise<void> {
+  return invoke<void>("cancel_queued_task_run", { runId });
+}
+
 export function exportTaskRunLog(runId: string, destinationPath: string): Promise<void> {
   return invoke<void>("export_task_run_log", { runId, destinationPath });
 }
