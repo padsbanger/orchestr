@@ -69,13 +69,13 @@ jobs:
             target/crap/rust-crap.json
 
       - name: Set release version from tag
-        if: ${{ github.ref_type == 'tag' }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.created }}
         shell: bash
         run: |
           node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('apps/desktop/src-tauri/tauri.release.conf.json', JSON.stringify({ version: process.env.GITHUB_REF_NAME }));"
 
       - name: Build test installer
-        if: ${{ github.ref_type != 'tag' }}
+        if: ${{ github.event_name != 'push' || github.ref_type != 'tag' || !github.event.created }}
         uses: tauri-apps/tauri-action@v1
         with:
           projectPath: apps/desktop
@@ -84,7 +84,7 @@ jobs:
           workflowArtifactNamePattern: orchestr-windows-[arch]-[bundle]
 
       - name: Build and publish release installer
-        if: ${{ github.ref_type == 'tag' }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.created }}
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
