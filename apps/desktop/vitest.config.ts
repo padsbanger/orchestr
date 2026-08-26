@@ -13,6 +13,7 @@ export default defineConfig({
         "src/services/confirmations.ts",
         "src/services/flow.ts",
         "src/services/integrations.ts",
+        "src/services/interruptions.ts",
         "src/services/runs.ts",
       ],
       exclude: ["src/**/*.test.ts"],

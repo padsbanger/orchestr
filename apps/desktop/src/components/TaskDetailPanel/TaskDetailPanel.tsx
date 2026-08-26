@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
+import { Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, MessageSquareText, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
@@ -6,6 +6,7 @@ import { exportTaskRunLog, type RunEvent, type TaskRun } from "../../services/ru
 import type { Task } from "../../services/tasks";
 import type { TaskReview } from "../../services/reviews";
 import type { AgentReview } from "../../services/agentReviews";
+import type { TaskInputRequest } from "../../services/interruptions";
 import "./TaskDetailPanel.css";
 
 type TaskDetailPanelProps = {
@@ -14,10 +15,12 @@ type TaskDetailPanelProps = {
   recoveryAgents: Agent[];
   reviewerAgents: Agent[];
   agentReviews: AgentReview[];
+  inputRequests: TaskInputRequest[];
   isAgentReviewStarting: boolean;
   runs: TaskRun[];
   isStartingRun: boolean;
   runRecoveryAction?: string;
+  inputAction?: "request" | "answer";
   cancellingRunId?: string;
   isCleaningWorktree: boolean;
   isOpeningWorktree: boolean;
@@ -31,6 +34,8 @@ type TaskDetailPanelProps = {
   onCancelRun: (runId: string) => void;
   onRecoverRun: (runId: string, mode: "resume" | "restart_clean", agentId?: string) => void;
   onResolveRunFailure: (runId: string, action: "abandon" | "escalate") => void;
+  onRequestInput: (question: string, runId?: string) => void;
+  onAnswerInput: (requestId: string, answer: string) => void;
   onCleanupWorktree: () => void;
   onOpenWorktree: () => void;
   onApproveReview: () => void;
@@ -38,7 +43,7 @@ type TaskDetailPanelProps = {
   onStartAgentReview: (agentId: string) => void;
 };
 
-export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
+export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, inputRequests, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, inputAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onRequestInput, onAnswerInput, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
   const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
   const activeAgentReview = agentReviews.find((review) => review.status === "running");
   const latestRun = activeRun ?? runs[0];
@@ -92,6 +97,7 @@ export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerA
         <TaskSection title="Assigned agent" icon={<Bot size={14} />}>
           {assignedAgent ? <p className="task-detail-copy"><strong>{assignedAgent.name}</strong><br />{assignedAgent.role}{assignedAgent.model ? ` / ${assignedAgent.model}` : ""}</p> : <p className="task-detail-empty">No agent assigned.</p>}
         </TaskSection>
+        {(task.status === "in_progress" || task.status === "needs_input" || inputRequests.length > 0) && <InputRequestSection task={task} requests={inputRequests} latestRun={latestRun} activeRun={activeRun} inputAction={inputAction} onRequest={onRequestInput} onAnswer={onAnswerInput} />}
         {(task.branch || task.worktreePath) && <TaskSection title="Isolation" icon={<GitBranch size={14} />}>
           {task.branch && <p className="task-detail-copy"><span className="task-detail-label">Branch</span><code>{task.branch}</code></p>}
           {task.worktreePath ? <><p className="task-detail-copy"><span className="task-detail-label">Worktree</span><code className="task-worktree-path">{task.worktreePath}</code></p><div className="task-worktree-actions"><button className="secondary-button" type="button" disabled={isOpeningWorktree} onClick={onOpenWorktree}><FolderOpen size={14} /> {isOpeningWorktree ? "Opening..." : "Open folder"}</button><button className="secondary-button" type="button" disabled={Boolean(activeRun) || isCleaningWorktree} onClick={onCleanupWorktree}>{isCleaningWorktree ? "Removing..." : "Remove worktree"}</button></div><p className="task-detail-hint">Open the isolated checkout to inspect the agent's files. Removing it retains the task branch for review.</p></> : <p className="task-detail-hint">The task branch is retained; its isolated checkout has been removed.</p>}
@@ -124,6 +130,21 @@ export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerA
       </div>
     </aside>
   );
+}
+
+function InputRequestSection({ task, requests, latestRun, activeRun, inputAction, onRequest, onAnswer }: { task: Task; requests: TaskInputRequest[]; latestRun?: TaskRun; activeRun?: TaskRun; inputAction?: "request" | "answer"; onRequest: (question: string, runId?: string) => void; onAnswer: (requestId: string, answer: string) => void }) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const openRequest = requests.find((request) => request.status === "open");
+  const answered = requests.filter((request) => request.status === "answered");
+  return <TaskSection title="Human input" icon={<MessageSquareText size={14} />} count={requests.length || undefined}>
+    {openRequest ? <div className="task-input-open">
+      <span>Waiting for answer</span><strong>{openRequest.question}</strong>
+      <small>{openRequest.requestingRunId ? `Requested by run ${openRequest.requestingRunId}` : "Task-level request"} · {dateTime(openRequest.requestedAt)}</small>
+      {activeRun?.status === "running" ? <p className="task-detail-hint">The worker is stopping safely. Answering becomes available when the run is paused.</p> : <><textarea rows={3} value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Record the decision or missing information..." /><button className="primary-button" type="button" disabled={!answer.trim() || Boolean(inputAction)} onClick={() => onAnswer(openRequest.id, answer)}>{inputAction === "answer" ? "Saving answer..." : "Answer and resume"}</button></>}
+    </div> : task.status === "in_progress" && <div className="task-input-form"><p className="task-detail-hint">Stop the active implementation and ask instead of allowing the agent to guess.</p><textarea rows={3} value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What decision or information is required?" /><button className="secondary-button" type="button" disabled={!question.trim() || Boolean(inputAction)} onClick={() => onRequest(question, latestRun?.id)}>{inputAction === "request" ? "Pausing..." : "Request human input"}</button></div>}
+    {answered.length > 0 && <details className="task-input-history"><summary>Answered requests · {answered.length}</summary>{answered.map((request) => <article key={request.id}><strong>{request.question}</strong><p>{request.answer}</p><small>{dateTime(request.answeredAt ?? request.requestedAt)}</small></article>)}</details>}
+  </TaskSection>;
 }
 
 function ArchitectReviewHistory({ reviews, agents, now, cancellingRunId, onCancel }: { reviews: AgentReview[]; agents: Agent[]; now: number; cancellingRunId?: string; onCancel: (runId: string) => void }) {

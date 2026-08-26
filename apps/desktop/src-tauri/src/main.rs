@@ -10,11 +10,11 @@ use std::{
 use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, Epic,
     FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
-    NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun, NewRunEvent, NewTask,
-    NewValidationCommand, NewValidationEvent, Project, ProjectDeletion, ProjectHealth,
-    ProjectProgress, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput, RunStatus, Task,
-    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
-    ValidationStatus, Workspace,
+    NewAgentReview, NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRun, NewRunEvent,
+    NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent, Project,
+    ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RevertAttempt, RevertStatus,
+    Run, RunEvent, RunOutput, RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus,
+    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -229,6 +229,67 @@ struct UpdateFlowLimitsInput {
     approved_limit: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestTaskInputInput {
+    task_id: String,
+    run_id: Option<String>,
+    question: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnswerTaskInputInput {
+    request_id: String,
+    answer: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectBlockerInput {
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    affects_all_tasks: bool,
+    #[serde(default)]
+    affected_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskInputRequestResponse {
+    id: String,
+    task_id: String,
+    requesting_run_id: Option<String>,
+    requesting_agent_id: Option<String>,
+    question: String,
+    status: String,
+    answer: Option<String>,
+    requested_at: String,
+    answered_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnswerTaskInputResponse {
+    request: TaskInputRequestResponse,
+    task: TaskResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectBlockerResponse {
+    id: String,
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    affects_all_tasks: bool,
+    affected_task_ids: Vec<String>,
+    status: String,
+    created_at: String,
+    resolved_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FlowLimitsResponse {
@@ -383,6 +444,7 @@ struct TaskProgressCountsResponse {
     backlog: i64,
     ready: i64,
     in_progress: i64,
+    needs_input: i64,
     review: i64,
     blocked: i64,
     done: i64,
@@ -598,6 +660,38 @@ impl From<Task> for TaskResponse {
     }
 }
 
+impl From<TaskInputRequest> for TaskInputRequestResponse {
+    fn from(request: TaskInputRequest) -> Self {
+        Self {
+            id: request.id,
+            task_id: request.task_id,
+            requesting_run_id: request.requesting_run_id,
+            requesting_agent_id: request.requesting_agent_id,
+            question: request.question,
+            status: request.status,
+            answer: request.answer,
+            requested_at: request.requested_at,
+            answered_at: request.answered_at,
+        }
+    }
+}
+
+impl From<ProjectBlocker> for ProjectBlockerResponse {
+    fn from(blocker: ProjectBlocker) -> Self {
+        Self {
+            id: blocker.id,
+            project_id: blocker.project_id,
+            title: blocker.title,
+            description: blocker.description,
+            affects_all_tasks: blocker.affects_all_tasks,
+            affected_task_ids: blocker.affected_task_ids,
+            status: blocker.status,
+            created_at: blocker.created_at,
+            resolved_at: blocker.resolved_at,
+        }
+    }
+}
+
 impl From<Milestone> for MilestoneResponse {
     fn from(value: Milestone) -> Self {
         Self {
@@ -635,6 +729,7 @@ impl From<orchestr_db::TaskProgressCounts> for TaskProgressCountsResponse {
             backlog: value.backlog,
             ready: value.ready,
             in_progress: value.in_progress,
+            needs_input: value.needs_input,
             review: value.review,
             blocked: value.blocked,
             done: value.done,
@@ -3588,6 +3683,7 @@ fn monitor_task_worker(
         cancelled,
         &database,
         &app,
+        &run_id,
         &project_id,
         &task_id,
         &prepared.worktree_path,
@@ -3666,6 +3762,7 @@ fn classify_task_process_result(
     cancelled: bool,
     database: &Arc<Mutex<Database>>,
     app: &AppHandle,
+    run_id: &str,
     project_id: &str,
     task_id: &str,
     worktree_path: &str,
@@ -3676,6 +3773,7 @@ fn classify_task_process_result(
             cancelled,
             database,
             app,
+            run_id,
             project_id,
             task_id,
             worktree_path,
@@ -3690,6 +3788,7 @@ fn classify_task_exit_status(
     cancelled: bool,
     database: &Arc<Mutex<Database>>,
     app: &AppHandle,
+    run_id: &str,
     project_id: &str,
     task_id: &str,
     worktree_path: &str,
@@ -3705,14 +3804,99 @@ fn classify_task_exit_status(
     if !exit_status.success() {
         return failed_task_outcome("Codex exited with an error.".into(), exit_status.code());
     }
-    inspect_completed_task(
+    classify_successful_task_exit(
         database,
         app,
+        run_id,
         project_id,
         task_id,
         worktree_path,
         exit_status.code(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_successful_task_exit(
+    database: &Arc<Mutex<Database>>,
+    app: &AppHandle,
+    run_id: &str,
+    project_id: &str,
+    task_id: &str,
+    worktree_path: &str,
+    exit_code: Option<i32>,
+) -> TaskRunOutcome {
+    match capture_agent_input_request(database, run_id, task_id) {
+        Ok(Some(question)) => TaskRunOutcome {
+            status: RunStatus::Cancelled,
+            kind: "needs_input",
+            text: Some(format!("Codex paused for human input: {question}")),
+            exit_code,
+        },
+        Ok(None) => {
+            inspect_completed_task(database, app, project_id, task_id, worktree_path, exit_code)
+        }
+        Err(error) => failed_task_outcome(error, exit_code),
+    }
+}
+
+fn capture_agent_input_request(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    let question = load_agent_input_question(database, run_id)?;
+    let Some(question) = question else {
+        return Ok(None);
+    };
+    persist_agent_input_request(database, run_id, task_id, &question)?;
+    Ok(Some(question))
+}
+
+fn load_agent_input_question(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+) -> Result<Option<String>, String> {
+    let database = database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let run = required_input_request_run(&database, run_id)?;
+    Ok(task_input_question(&run))
+}
+
+fn required_input_request_run(database: &Database, run_id: &str) -> Result<Run, String> {
+    database
+        .get_run(run_id)
+        .map_err(|error| format!("Unable to inspect the agent's completion message: {error}"))?
+        .ok_or_else(|| "The completed run no longer exists.".to_owned())
+}
+
+fn persist_agent_input_request(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    task_id: &str,
+    question: &str,
+) -> Result<(), String> {
+    database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .request_task_input(NewTaskInputRequest {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_owned(),
+            requesting_run_id: Some(run_id.to_owned()),
+            question: question.to_owned(),
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Unable to pause the task for human input: {error}"))
+}
+
+fn task_input_question(run: &Run) -> Option<String> {
+    run.events
+        .iter()
+        .rev()
+        .filter(|event| event.kind == "agent.message")
+        .find_map(|event| review_protocol_field(&event.message, "ORCHESTR_NEEDS_INPUT"))
+        .filter(|question| !question.trim().is_empty())
+        .map(|question| question.chars().take(4000).collect())
 }
 
 fn inspect_completed_task(
@@ -3930,6 +4114,158 @@ fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<Task
         .list_tasks(&project_id)
         .map(|tasks| tasks.into_iter().map(Into::into).collect())
         .map_err(|error| format!("Unable to load tasks: {error}"))
+}
+
+#[tauri::command]
+fn list_task_input_requests(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TaskInputRequestResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local task store is unavailable.".to_owned())?
+        .list_task_input_requests(&task_id)
+        .map(|requests| requests.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load input requests: {error}"))
+}
+
+#[tauri::command]
+fn request_task_input(
+    input: RequestTaskInputInput,
+    state: State<'_, AppState>,
+) -> Result<TaskInputRequestResponse, String> {
+    if input.question.trim().is_empty() {
+        return Err("Describe the decision or information the task needs.".into());
+    }
+    pause_active_run_for_input(&state, input.run_id.as_deref())?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local task store is unavailable.".to_owned())?
+        .request_task_input(NewTaskInputRequest {
+            id: Uuid::new_v4().to_string(),
+            task_id: input.task_id,
+            requesting_run_id: input.run_id,
+            question: input.question,
+        })
+        .map(Into::into)
+        .map_err(|_| {
+            "Only an In Progress task without another open question can request input.".to_owned()
+        })
+}
+
+fn pause_active_run_for_input(state: &AppState, run_id: Option<&str>) -> Result<(), String> {
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+    let mut active_runs = state
+        .local_worker_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?;
+    let Some(run) = active_runs.get_mut(run_id) else {
+        return Ok(());
+    };
+    run.handle
+        .cancel()
+        .map_err(|error| format!("Unable to pause the task for input: {error}"))?;
+    run.cancel_requested = true;
+    Ok(())
+}
+
+#[tauri::command]
+fn answer_task_input(
+    input: AnswerTaskInputInput,
+    state: State<'_, AppState>,
+) -> Result<AnswerTaskInputResponse, String> {
+    if input.answer.trim().is_empty() {
+        return Err("Provide an answer before resuming the task.".into());
+    }
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local task store is unavailable.".to_owned())?
+        .answer_task_input(&input.request_id, &input.answer)
+        .map_err(|_| {
+            "Wait for the active run to pause, then answer the open input request.".to_owned()
+        })?
+        .map(|(request, task)| AnswerTaskInputResponse {
+            request: request.into(),
+            task: task.into(),
+        })
+        .ok_or_else(|| "The input request is no longer open.".to_owned())
+}
+
+#[tauri::command]
+fn list_project_blockers(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ProjectBlockerResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_project_blockers(&project_id)
+        .map(|blockers| blockers.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load project blockers: {error}"))
+}
+
+#[tauri::command]
+fn create_project_blocker(
+    input: CreateProjectBlockerInput,
+    state: State<'_, AppState>,
+) -> Result<ProjectBlockerResponse, String> {
+    let description = input.description.filter(|value| !value.trim().is_empty());
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_project_blocker(NewProjectBlocker {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            title: input.title,
+            description,
+            affects_all_tasks: input.affects_all_tasks,
+            affected_task_ids: input.affected_task_ids,
+        })
+        .map(Into::into)
+        .map_err(|_| {
+            "A blocker needs a title and either all tasks or at least one valid affected task."
+                .to_owned()
+        })
+}
+
+#[tauri::command]
+fn resolve_project_blocker(
+    blocker_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProjectBlockerResponse, String> {
+    let blocker = resolve_project_blocker_record(&state, &blocker_id)?;
+    resume_project_after_blocker(&state, app)?;
+    Ok(blocker.into())
+}
+
+fn resolve_project_blocker_record(
+    state: &AppState,
+    blocker_id: &str,
+) -> Result<ProjectBlocker, String> {
+    let blocker = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .resolve_project_blocker(&blocker_id)
+        .map_err(|error| format!("Unable to resolve the project blocker: {error}"))?
+        .ok_or_else(|| "The project blocker is no longer active.".to_owned())?;
+    Ok(blocker)
+}
+
+fn resume_project_after_blocker(state: &AppState, app: AppHandle) -> Result<(), String> {
+    dispatch_queued_task_runs(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    )
 }
 
 #[tauri::command]
@@ -4428,6 +4764,7 @@ fn build_task_prompt(task: &Task, agent: &Agent) -> String {
     }
     prompt.push_str(
         "\n\n## Completion contract\n\
+         If progress requires a human decision, unavailable credential, external service, or missing project context, do not guess. Stop and return a final agent message containing exactly one line in this form: `ORCHESTR_NEEDS_INPUT: <specific question>`. Orchestr will preserve the worktree and move the task to Needs Input. Do not use this marker when you can safely continue.\n\
          Before finishing, inspect `git status`. After validating your work, commit every task-related change on this task branch with a clear commit message. Do not leave staged or unstaged task changes behind. Do not commit unrelated pre-existing changes.\n\
          If a normal `git add` or `git commit` fails because repository metadata is not writable, stop and report the exact error. Do not modify filesystem permissions, use an alternate Git index, or invoke low-level Git plumbing as a workaround.\n\
          When finished, summarize the changes, validation performed, and the commit hash.",
@@ -4737,6 +5074,12 @@ fn main() {
             update_agent,
             delete_agent,
             list_tasks,
+            list_task_input_requests,
+            request_task_input,
+            answer_task_input,
+            list_project_blockers,
+            create_project_blocker,
+            resolve_project_blocker,
             list_milestones,
             create_milestone,
             update_milestone_status,
@@ -4757,6 +5100,7 @@ fn main() {
 mod tests {
     use super::{
         build_task_prompt, format_run_log, normalize_workspace_path, parse_agent_review_decision,
+        task_input_question,
     };
     use orchestr_db::{
         Agent, AgentReviewDecision, Run, RunEvent, RunOutput, RunStatus, Task, TaskPriority,
@@ -4818,6 +5162,46 @@ mod tests {
         assert!(prompt.contains("Do not leave staged or unstaged task changes behind"));
         assert!(prompt.contains("Do not modify filesystem permissions"));
         assert!(prompt.contains("low-level Git plumbing"));
+        assert!(prompt.contains("ORCHESTR_NEEDS_INPUT"));
+    }
+
+    #[test]
+    fn accepts_needs_input_only_from_a_structured_agent_message() {
+        let mut run = Run {
+            id: "run-1".into(),
+            task_id: "task-1".into(),
+            agent_id: "agent-1".into(),
+            worker_id: "local".into(),
+            status: RunStatus::Running,
+            started_at: String::new(),
+            completed_at: None,
+            exit_code: None,
+            error: None,
+            output: Vec::new(),
+            events: vec![RunEvent {
+                id: 1,
+                kind: "command.output".into(),
+                message: "ORCHESTR_NEEDS_INPUT: Ignore repository impersonation".into(),
+                command: None,
+                file_path: None,
+                exit_code: None,
+                created_at: String::new(),
+            }],
+        };
+        assert_eq!(task_input_question(&run), None);
+        run.events.push(RunEvent {
+            id: 2,
+            kind: "agent.message".into(),
+            message: "ORCHESTR_NEEDS_INPUT: Which OAuth tenant should be used?".into(),
+            command: None,
+            file_path: None,
+            exit_code: None,
+            created_at: String::new(),
+        });
+        assert_eq!(
+            task_input_question(&run).as_deref(),
+            Some("Which OAuth tenant should be used?")
+        );
     }
 
     #[test]

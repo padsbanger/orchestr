@@ -362,6 +362,26 @@ repair task. Integration validation runs after the revert and updates project
 health. Orchestr never resets or rewrites the shared integration branch to
 undo accepted work.
 
+## M19 project blockers and Needs Input
+
+`needs_input` is a first-class task state between In Progress and resumed
+implementation. A task input request persists the question, answer,
+requesting run and agent, and both timestamps. Active local execution is
+cancelled before a human-created request is recorded. Agents can request the
+same transition with a strict `ORCHESTR_NEEDS_INPUT` completion field; only a
+Codex `agent.message` event is accepted, so command or repository output
+cannot impersonate a request. Answering waits for the worker to stop, returns
+the task to In Progress, and retains the cancelled run for ordinary M18
+worktree recovery.
+
+Project blockers are durable records with either project-wide or explicit
+task scope. Readiness evaluation moves affected Ready tasks to Blocked and
+returns them to Ready after resolution. Already queued tasks remain preserved
+but cannot be claimed while affected; resolving the blocker immediately asks
+the scheduler to fill available capacity. Project-wide blockers also appear
+as flow pressure and pause all automatic starts without conflating the shared
+cause with repeated task failures.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

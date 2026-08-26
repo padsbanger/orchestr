@@ -3,3 +3,5 @@ select.outcome-status { appearance: none; border: 0; padding: 0 13px 0 0; backgr
 .milestone-epics label { display: inline-flex; gap: 5px; align-items: center; }
 .milestone-epics select { border: 0; background: #20262a; color: #a6d0e4; font: inherit; }
 @media (max-width: 900px) { .progress-system-state { overflow-x: auto; }.progress-overview { grid-template-columns: repeat(3, 1fr); }.outcome-layout { grid-template-columns: 1fr; }.outcome-forms { grid-template-columns: repeat(2, minmax(0, 1fr)); } } @media (max-width: 600px) { .progress-overview, .outcome-forms { grid-template-columns: 1fr 1fr; } }
+.progress-overview { grid-template-columns: repeat(7, minmax(95px, 1fr)); }.progress-metric.input strong { color: #d3c05d; }
+@media (max-width: 900px) { .progress-overview { grid-template-columns: repeat(3, 1fr); } } @media (max-width: 600px) { .progress-overview { grid-template-columns: 1fr 1fr; } }

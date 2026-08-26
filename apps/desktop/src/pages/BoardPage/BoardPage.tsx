@@ -1,13 +1,14 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
 import { IntegrationQueuePanel } from "../../components/IntegrationQueuePanel/IntegrationQueuePanel";
 import { QualityGatesPanel } from "../../components/QualityGatesPanel/QualityGatesPanel";
 import { FlowControlPanel } from "../../components/FlowControlPanel/FlowControlPanel";
+import { ProjectBlockersPanel } from "../../components/ProjectBlockersPanel/ProjectBlockersPanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
@@ -20,6 +21,7 @@ import { integrateNextTask, listIntegrationAttempts, listRevertAttempts, retryIn
 import { createValidationCommand, deleteValidationCommand, getProjectHealth, listValidationAttempts, listValidationCommands, listenToValidationEvents, rerunIntegrationValidation, type ProjectHealth, type ValidationAttempt, type ValidationCommand, type ValidationStage } from "../../services/quality";
 import { listEpics, listMilestones, type Epic, type Milestone } from "../../services/outcomes";
 import { getFlowState, listenToFlowChanges, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
+import { answerTaskInput, createProjectBlocker, listProjectBlockers, listTaskInputRequests, requestTaskInput, resolveProjectBlocker, type ProjectBlocker, type TaskInputRequest } from "../../services/interruptions";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -28,6 +30,7 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   backlog: { label: "Backlog", tone: "neutral" },
   ready: { label: "Ready", tone: "blue" },
   in_progress: { label: "In Progress", tone: "amber" },
+  needs_input: { label: "Needs Input", tone: "yellow" },
   review: { label: "Review", tone: "violet" },
   approved: { label: "Approved", tone: "indigo" },
   integrating: { label: "Integrating", tone: "cyan" },
@@ -35,7 +38,7 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   done: { label: "Done", tone: "green" },
 };
 
-type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow";
+type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers";
 
 export function BoardPage() {
   const { projectId } = useParams();
@@ -48,6 +51,7 @@ export function BoardPage() {
   const [inspectedTask, setInspectedTask] = useState<Task | null>();
   const [isCreating, setIsCreating] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string>();
+  const [recentlyTransitionedTaskIds, setRecentlyTransitionedTaskIds] = useState<string[]>([]);
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [isStartingRun, setIsStartingRun] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState<string>();
@@ -66,6 +70,12 @@ export function BoardPage() {
   const [recoveringIntegrationId, setRecoveringIntegrationId] = useState<string>();
   const [revertingIntegrationId, setRevertingIntegrationId] = useState<string>();
   const [runRecoveryAction, setRunRecoveryAction] = useState<string>();
+  const [inputRequests, setInputRequests] = useState<TaskInputRequest[]>([]);
+  const [inputAction, setInputAction] = useState<"request" | "answer">();
+  const [projectBlockers, setProjectBlockers] = useState<ProjectBlocker[]>([]);
+  const [isBlockersLoading, setIsBlockersLoading] = useState(false);
+  const [isBlockerSaving, setIsBlockerSaving] = useState(false);
+  const [resolvingBlockerId, setResolvingBlockerId] = useState<string>();
   const [health, setHealth] = useState<ProjectHealth>();
   const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
   const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
@@ -78,6 +88,8 @@ export function BoardPage() {
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
   const runIds = useRef(new Set<string>());
+  const taskTransitionTimers = useRef(new Map<string, number>());
+  const previousTaskStatuses = useRef(new Map<string, TaskStatus>());
   const [repository, setRepository] = useState<RepositoryDetails>();
   const [repositoryError, setRepositoryError] = useState<string>();
   const [isRepositoryLoading, setIsRepositoryLoading] = useState(false);
@@ -86,6 +98,25 @@ export function BoardPage() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+
+  const flashTaskTransition = useCallback((taskId: string) => {
+    const existingTimer = taskTransitionTimers.current.get(taskId);
+    if (existingTimer) window.clearTimeout(existingTimer);
+    setRecentlyTransitionedTaskIds((current) => current.includes(taskId) ? current : [...current, taskId]);
+    taskTransitionTimers.current.set(taskId, window.setTimeout(() => {
+      setRecentlyTransitionedTaskIds((current) => current.filter((id) => id !== taskId));
+      taskTransitionTimers.current.delete(taskId);
+    }, 700));
+  }, []);
+
+  useEffect(() => () => {
+    taskTransitionTimers.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  useEffect(() => {
+    previousTaskStatuses.current.clear();
+    setRecentlyTransitionedTaskIds([]);
+  }, [projectId]);
 
   const openSidePanel = (panel: Exclude<BoardSidePanel, "task">) => {
     setInspectedTask(null);
@@ -170,7 +201,19 @@ export function BoardPage() {
     }
   }, [projectId]);
 
-  const loadBoard = useCallback(async (showLoading = true) => {
+  const loadProjectBlockers = useCallback(async () => {
+    if (!projectId) return;
+    setIsBlockersLoading(true);
+    try {
+      setProjectBlockers(await listProjectBlockers(projectId));
+    } catch (loadError) {
+      setError(errorMessage(loadError, "Unable to load project blockers."));
+    } finally {
+      setIsBlockersLoading(false);
+    }
+  }, [projectId]);
+
+  const loadBoard = useCallback(async (showLoading = false) => {
     if (!projectId) return;
     if (showLoading) setIsLoading(true);
     setError(undefined);
@@ -184,15 +227,16 @@ export function BoardPage() {
       void loadQualityGates();
       void loadOutcomes();
       void loadFlowControl();
+      void loadProjectBlockers();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       if (showLoading) setIsLoading(false);
     }
-  }, [loadFlowControl, loadIntegrationQueue, loadOutcomes, loadQualityGates, loadRepository, projectId]);
+  }, [loadFlowControl, loadIntegrationQueue, loadOutcomes, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
-    void loadBoard();
+    void loadBoard(true);
   }, [loadBoard]);
 
   useEffect(() => {
@@ -203,7 +247,14 @@ export function BoardPage() {
     void listTaskRuns(inspectedTask.id).then(setRuns).catch((loadError: unknown) => {
       setError(loadError instanceof Error ? loadError.message : "Unable to load task runs.");
     });
-  }, [inspectedTask?.id]);
+  }, [inspectedTask?.id, inspectedTask?.status]);
+
+  useEffect(() => {
+    if (!inspectedTask) { setInputRequests([]); return; }
+    void listTaskInputRequests(inspectedTask.id).then(setInputRequests).catch((loadError: unknown) => {
+      setError(errorMessage(loadError, "Unable to load task input requests."));
+    });
+  }, [inspectedTask?.id, inspectedTask?.status]);
 
   useEffect(() => {
     if (!inspectedTask || inspectedTask.status !== "review") { setReview(undefined); setReviewError(undefined); return; }
@@ -282,7 +333,10 @@ export function BoardPage() {
         return;
       }
       if (event.kind !== "output" && inspectedTask) {
-        void Promise.all([listTaskRuns(inspectedTask.id), loadBoard(), loadFlowControl()]).then(([loadedRuns]) => setRuns(loadedRuns));
+        void Promise.all([listTaskRuns(inspectedTask.id), listTaskInputRequests(inspectedTask.id), loadBoard(), loadFlowControl()]).then(([loadedRuns, loadedInputRequests]) => {
+          setRuns(loadedRuns);
+          setInputRequests(loadedInputRequests);
+        });
       }
     }).then((stopListening) => {
       if (disposed) stopListening();
@@ -320,14 +374,24 @@ export function BoardPage() {
     TASK_STATUSES.map((status) => [status, tasks.filter((task) => task.status === status).sort((a, b) => a.position - b.position)]),
   ) as Record<TaskStatus, Task[]>, [tasks]);
 
+  useEffect(() => {
+    const previousStatuses = previousTaskStatuses.current;
+    if (previousStatuses.size > 0) {
+      tasks.forEach((task) => {
+        if (previousStatuses.get(task.id) && previousStatuses.get(task.id) !== task.status) flashTaskTransition(task.id);
+      });
+    }
+    previousTaskStatuses.current = new Map(tasks.map((task) => [task.id, task.status]));
+  }, [flashTaskTransition, tasks]);
+
   const handleDragEnd = async ({ active, over }: DragEndEvent) => {
     if (!over) return;
     const source = tasks.find((task) => task.id === active.id);
     if (!source) return;
     const destinationStatus = statusForDropTarget(String(over.id), tasks);
     if (!destinationStatus) return;
-    if (isSystemManagedStatus(destinationStatus)) {
-      setError("Ready is calculated from task requirements. Approved, Integrating, Blocked, and Done are workflow-managed.");
+    if (isSystemManagedStatus(source.status) || isSystemManagedStatus(destinationStatus)) {
+      setError("Needs Input, Approved, Integrating, Blocked, and Done are workflow-managed states.");
       return;
     }
     const destinationTasks = tasksByStatus[destinationStatus];
@@ -450,6 +514,53 @@ export function BoardPage() {
     } finally {
       setRunRecoveryAction(undefined);
     }
+  };
+
+  const requestHumanInput = async (question: string, runId?: string) => {
+    if (!inspectedTask) return;
+    setInputAction("request"); setError(undefined);
+    try {
+      const request = await requestTaskInput(inspectedTask.id, question, runId);
+      setInputRequests((current) => [request, ...current]);
+      await Promise.all([loadBoard(false), loadFlowControl()]);
+    } catch (inputError) {
+      setError(errorMessage(inputError, "Unable to request human input."));
+    } finally { setInputAction(undefined); }
+  };
+
+  const answerHumanInput = async (requestId: string, answer: string) => {
+    setInputAction("answer"); setError(undefined);
+    try {
+      const result = await answerTaskInput(requestId, answer);
+      setInputRequests((current) => current.map((request) => request.id === result.request.id ? result.request : request));
+      setTasks((current) => current.map((task) => task.id === result.task.id ? result.task : task));
+      setInspectedTask(result.task);
+      if (inspectedTask) setRuns(await listTaskRuns(inspectedTask.id));
+      await Promise.all([loadBoard(false), loadFlowControl()]);
+    } catch (inputError) {
+      setError(errorMessage(inputError, "Unable to answer the input request."));
+    } finally { setInputAction(undefined); }
+  };
+
+  const addProjectBlocker = async (input: { title: string; description?: string; affectsAllTasks: boolean; affectedTaskIds: string[] }) => {
+    if (!projectId) return;
+    setIsBlockerSaving(true); setError(undefined);
+    try {
+      await createProjectBlocker({ projectId, ...input });
+      await Promise.all([loadProjectBlockers(), loadBoard(false), loadFlowControl()]);
+    } catch (blockerError) {
+      setError(errorMessage(blockerError, "Unable to create the project blocker."));
+    } finally { setIsBlockerSaving(false); }
+  };
+
+  const clearProjectBlocker = async (blockerId: string) => {
+    setResolvingBlockerId(blockerId); setError(undefined);
+    try {
+      await resolveProjectBlocker(blockerId);
+      await Promise.all([loadProjectBlockers(), loadBoard(false), loadFlowControl()]);
+    } catch (blockerError) {
+      setError(errorMessage(blockerError, "Unable to resolve the project blocker."));
+    } finally { setResolvingBlockerId(undefined); }
   };
 
   const saveFlowLimits = async (limits: FlowLimitInput) => {
@@ -624,6 +735,7 @@ export function BoardPage() {
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
             <Link className="secondary-button" to={`/projects/${project.id}/progress`}><ChartNoAxesCombined size={15} /> Progress</Link>
+            <button className="secondary-button" type="button" onClick={() => openSidePanel("blockers")}><ShieldAlert size={15} /> Blockers <span>{projectBlockers.filter((blocker) => blocker.status === "active").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("flow")}><Gauge size={15} /> Flow <span>{flow?.activeWorkerRuns ?? 0}/{flow?.limits.workerMaxConcurrentRuns ?? 4}</span>{Boolean(flow?.queued) && <span>+{flow?.queued}</span>}</button>
             <button className={`secondary-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => openSidePanel("quality")}><Activity size={15} /> {health?.status ?? "unknown"}</button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("integration")}><GitMerge size={16} />Integrate <span>{integrationAttempts.filter((attempt) => attempt.status === "queued").length}</span></button>
@@ -648,7 +760,7 @@ export function BoardPage() {
           onDragEnd={(event) => { setActiveTaskId(undefined); void handleDragEnd(event); }}
         >
           <div className="kanban-board">
-            {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} onInspect={inspectTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
+            {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} recentlyTransitionedTaskIds={recentlyTransitionedTaskIds} onInspect={inspectTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
           </div>
           <DragOverlay dropAnimation={null}>
             {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
@@ -656,23 +768,24 @@ export function BoardPage() {
         </DndContext>
       </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} milestones={milestones} epics={epics} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} recoveryAgents={agents.filter((agent) => agent.provider === "codex")} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} runRecoveryAction={runRecoveryAction} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onRecoverRun={(runId, mode, agentId) => void recoverRun(runId, mode, agentId)} onResolveRunFailure={(runId, action) => void resolveRunFailure(runId, action)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
+      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} recoveryAgents={agents.filter((agent) => agent.provider === "codex")} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} inputRequests={inputRequests} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} runRecoveryAction={runRecoveryAction} inputAction={inputAction} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onRecoverRun={(runId, mode, agentId) => void recoverRun(runId, mode, agentId)} onResolveRunFailure={(runId, action) => void resolveRunFailure(runId, action)} onRequestInput={(question, runId) => void requestHumanInput(question, runId)} onAnswerInput={(requestId, answer) => void answerHumanInput(requestId, answer)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
       {activeSidePanel === "repository" && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={closeSidePanel} onRefresh={() => void loadRepository()} />}
       {activeSidePanel === "integration" && <IntegrationQueuePanel attempts={integrationAttempts} reverts={revertAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} recoveringIntegrationId={recoveringIntegrationId} revertingIntegrationId={revertingIntegrationId} onClose={closeSidePanel} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} onRetryCleanup={(attempt) => void retryCleanup(attempt)} onRevert={(attempt, createRepairTask) => void revertMergedIntegration(attempt, createRepairTask)} />}
       {activeSidePanel === "quality" && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={closeSidePanel} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
       {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} />}
+      {activeSidePanel === "blockers" && <ProjectBlockersPanel blockers={projectBlockers} tasks={tasks} isLoading={isBlockersLoading} isSaving={isBlockerSaving} resolvingId={resolvingBlockerId} onClose={closeSidePanel} onRefresh={() => void loadProjectBlockers()} onCreate={(input) => void addProjectBlocker(input)} onResolve={(blockerId) => void clearProjectBlocker(blockerId)} />}
     </section>
   );
 }
 
-function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskColumn({ status, tasks, recentlyTransitionedTaskIds, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; recentlyTransitionedTaskIds: string[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: columnDropId(status), disabled: isSystemManagedStatus(status) });
   return (
     <section ref={setNodeRef} className={`kanban-column ${isOver ? "is-over" : ""}`}>
       <header className="column-header"><div><span className={`status-dot ${columns[status].tone}`} /><h2>{columns[status].label}</h2></div><span>{tasks.length}</span></header>
       <div className="task-list">
         <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
-          {tasks.map((task) => <TaskCard key={task.id} task={task} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
+          {tasks.map((task) => <TaskCard key={task.id} task={task} isRecentlyTransitioned={recentlyTransitionedTaskIds.includes(task.id)} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
         </SortableContext>
         {tasks.length === 0 && <p className="empty-column">{isSystemManagedStatus(status) ? "Workflow managed" : "Drop task here"}</p>}
       </div>
@@ -680,10 +793,10 @@ function TaskColumn({ status, tasks, onInspect, onEdit, onDelete }: { status: Ta
   );
 }
 
-function TaskCard({ task, onInspect, onEdit, onDelete }: { task: Task; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskCard({ task, isRecentlyTransitioned, onInspect, onEdit, onDelete }: { task: Task; isRecentlyTransitioned: boolean; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   return (
-    <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${task.status === "in_progress" ? "is-running" : ""} ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
+    <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${task.status === "in_progress" ? "is-running" : ""} ${isRecentlyTransitioned ? "just-transitioned" : ""} ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
       <span className="drag-handle" aria-hidden="true"><GripVertical size={15} /></span>
       <div className="task-card-copy" onClick={() => onInspect(task)}>
         <div className="task-card-title"><h3>{task.title}</h3><span className={`task-card-priority ${task.priority}`}>{task.priority}</span></div>
@@ -721,7 +834,7 @@ function statusForDropTarget(id: string, tasks: Task[]): TaskStatus | undefined 
 }
 
 function isSystemManagedStatus(status: TaskStatus) {
-  return status === "approved" || status === "integrating" || status === "blocked" || status === "done";
+  return status === "needs_input" || status === "approved" || status === "integrating" || status === "blocked" || status === "done";
 }
 
 function moveTaskLocally(tasks: Task[], id: string, status: TaskStatus, position: number) {

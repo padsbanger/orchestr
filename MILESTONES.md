@@ -827,7 +827,9 @@ Crashes and bad changes are recoverable without losing traceability or rewriting
 
 ---
 
-# M19 — Project Blockers + Needs Input
+# M19 — Project Blockers + Needs Input — Complete
+
+**Completed:** 2026-08-25
 
 ### Goal
 
@@ -1310,13 +1312,13 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M18 state:
+Continue from the completed M19 state:
 
 ```text
-1. Add project blockers and the Needs Input workflow
+1. Add architecture decisions and durable project knowledge
 ```
 
-Do not let agents repeatedly guess through a shared project-level problem.
+Do not let later agents casually contradict accepted technical decisions.
 
 The immediate objective is:
 
@@ -1324,7 +1326,7 @@ The immediate objective is:
 accepted task
   -> safely integrated
   -> main remains healthy
-  -> blockers and input needs remain explicit
+  -> blockers, input needs, and accepted decisions remain explicit
   -> next valid task becomes Ready
 ```
 

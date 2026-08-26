@@ -29,6 +29,7 @@ export type TaskProgressCounts = {
   backlog: number;
   ready: number;
   inProgress: number;
+  needsInput: number;
   review: number;
   blocked: number;
   done: number;

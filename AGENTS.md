@@ -33,10 +33,11 @@ Completed milestones:
 - M16 — Architect / Reviewer Agent
 - M17 — Parallel Local Agents + WIP Limits
 - M18 — Failure Recovery + Revert
+- M19 — Project Blockers + Needs Input
 
 Immediate next milestone:
 
-**M19 — Project Blockers + Needs Input**
+**M20 — Architecture Decisions / Project Knowledge**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1276,7 +1277,7 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M19 — Project Blockers + Needs Input**
+**M20 — Architecture Decisions / Project Knowledge**
 
 Do not prioritize:
 
@@ -1288,8 +1289,9 @@ Do not prioritize:
 
 before accepted work can reliably land on a healthy integration branch.
 
-Immediately after integration correctness, bounded parallel scheduling, and
-failure recovery, prioritize explicit project blockers and human input.
+Immediately after integration correctness, bounded parallel scheduling,
+failure recovery, and explicit blockers, prioritize durable architecture
+decisions and project knowledge.
 
 ---
 

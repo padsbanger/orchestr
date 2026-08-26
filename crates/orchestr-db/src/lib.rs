@@ -33,6 +33,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (14, include_str!("../migrations/0014_agent_reviews.sql")),
     (15, include_str!("../migrations/0015_flow_control.sql")),
     (16, include_str!("../migrations/0016_failure_recovery.sql")),
+    (
+        17,
+        include_str!("../migrations/0017_project_blockers_needs_input.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -77,11 +81,13 @@ pub enum ProjectDeletion {
     HasAttachedWorktrees,
 }
 
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Backlog,
     Ready,
     InProgress,
+    NeedsInput,
     Review,
     Approved,
     Integrating,
@@ -91,31 +97,37 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "backlog" => Some(Self::Backlog),
-            "ready" => Some(Self::Ready),
-            "in_progress" => Some(Self::InProgress),
-            "review" => Some(Self::Review),
-            "approved" => Some(Self::Approved),
-            "integrating" => Some(Self::Integrating),
-            "blocked" => Some(Self::Blocked),
-            "done" => Some(Self::Done),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == value)
     }
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Backlog => "backlog",
-            Self::Ready => "ready",
-            Self::InProgress => "in_progress",
-            Self::Review => "review",
-            Self::Approved => "approved",
-            Self::Integrating => "integrating",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-        }
+        Self::NAMES[self as usize]
     }
+
+    const ALL: [Self; 9] = [
+        Self::Backlog,
+        Self::Ready,
+        Self::InProgress,
+        Self::NeedsInput,
+        Self::Review,
+        Self::Approved,
+        Self::Integrating,
+        Self::Blocked,
+        Self::Done,
+    ];
+    const NAMES: [&'static str; 9] = [
+        "backlog",
+        "ready",
+        "in_progress",
+        "needs_input",
+        "review",
+        "approved",
+        "integrating",
+        "blocked",
+        "done",
+    ];
 
     fn from_database(value: String) -> Result<Self> {
         Self::parse(&value).ok_or_else(|| {
@@ -426,6 +438,48 @@ pub struct RevertAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInputRequest {
+    pub id: String,
+    pub task_id: String,
+    pub requesting_run_id: Option<String>,
+    pub requesting_agent_id: Option<String>,
+    pub question: String,
+    pub status: String,
+    pub answer: Option<String>,
+    pub requested_at: String,
+    pub answered_at: Option<String>,
+}
+
+pub struct NewTaskInputRequest {
+    pub id: String,
+    pub task_id: String,
+    pub requesting_run_id: Option<String>,
+    pub question: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectBlocker {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub affects_all_tasks: bool,
+    pub affected_task_ids: Vec<String>,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+pub struct NewProjectBlocker {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub affects_all_tasks: bool,
+    pub affected_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: String,
     pub project_id: String,
@@ -525,6 +579,7 @@ pub struct TaskProgressCounts {
     pub backlog: i64,
     pub ready: i64,
     pub in_progress: i64,
+    pub needs_input: i64,
     pub review: i64,
     pub blocked: i64,
     pub done: i64,
@@ -1049,6 +1104,188 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_task_input_requests(&self, task_id: &str) -> Result<Vec<TaskInputRequest>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, task_id, requesting_run_id, requesting_agent_id, question, status,
+                    answer, requested_at, answered_at
+             FROM task_input_requests WHERE task_id = ?1
+             ORDER BY requested_at DESC, id DESC",
+        )?;
+        let requests = statement
+            .query_map([task_id], task_input_request_from_row)?
+            .collect();
+        requests
+    }
+
+    pub fn request_task_input(&mut self, request: NewTaskInputRequest) -> Result<TaskInputRequest> {
+        if request.question.trim().is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        let (project_id, task_status, assigned_agent_id): (String, String, Option<String>) =
+            transaction.query_row(
+                "SELECT project_id, status, assigned_agent_id FROM tasks WHERE id = ?1",
+                [&request.task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        if task_status != TaskStatus::InProgress.as_str() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let requesting_agent_id = requesting_agent_for_run(
+            &transaction,
+            &request.task_id,
+            request.requesting_run_id.as_deref(),
+            assigned_agent_id,
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &request.task_id,
+            &project_id,
+            TaskStatus::InProgress,
+            TaskStatus::NeedsInput,
+            usize::MAX,
+        )?;
+        transaction.execute(
+            "INSERT INTO task_input_requests
+                (id, task_id, requesting_run_id, requesting_agent_id, question)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                request.id,
+                request.task_id,
+                request.requesting_run_id,
+                requesting_agent_id,
+                request.question.trim()
+            ],
+        )?;
+        append_input_request_event(
+            &transaction,
+            request.requesting_run_id.as_deref(),
+            "input.requested",
+            request.question.trim(),
+        )?;
+        transaction.commit()?;
+        self.task_input_request_by_id(&request.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn answer_task_input(
+        &mut self,
+        request_id: &str,
+        answer: &str,
+    ) -> Result<Option<(TaskInputRequest, Task)>> {
+        if answer.trim().is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        let request = open_input_request_context(&transaction, request_id)?;
+        let Some((task_id, requesting_run_id, project_id, task_status)) = request else {
+            return Ok(None);
+        };
+        if task_status != TaskStatus::NeedsInput.as_str()
+            || task_has_running_run(&transaction, &task_id)?
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.execute(
+            "UPDATE task_input_requests
+             SET status = 'answered', answer = ?1, answered_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status = 'open'",
+            params![answer.trim(), request_id],
+        )?;
+        move_task_in_transaction(
+            &transaction,
+            &task_id,
+            &project_id,
+            TaskStatus::NeedsInput,
+            TaskStatus::InProgress,
+            usize::MAX,
+        )?;
+        append_input_request_event(
+            &transaction,
+            requesting_run_id.as_deref(),
+            "input.answered",
+            answer.trim(),
+        )?;
+        transaction.commit()?;
+        Ok(Some((
+            self.task_input_request_by_id(request_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+            self.task_by_id(&task_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+        )))
+    }
+
+    pub fn list_project_blockers(&self, project_id: &str) -> Result<Vec<ProjectBlocker>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, description, affects_all_tasks, status,
+                    created_at, resolved_at
+             FROM project_blockers WHERE project_id = ?1
+             ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at DESC, id DESC",
+        )?;
+        let blockers = statement
+            .query_map([project_id], project_blocker_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        blockers
+            .into_iter()
+            .map(|mut blocker| {
+                blocker.affected_task_ids = self.blocker_task_ids(&blocker.id)?;
+                Ok(blocker)
+            })
+            .collect()
+    }
+
+    pub fn create_project_blocker(&mut self, blocker: NewProjectBlocker) -> Result<ProjectBlocker> {
+        validate_new_project_blocker(&self.connection, &blocker)?;
+        let project_id = blocker.project_id.clone();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO project_blockers
+                (id, project_id, title, description, affects_all_tasks)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                blocker.id,
+                blocker.project_id,
+                blocker.title.trim(),
+                blocker.description,
+                blocker.affects_all_tasks
+            ],
+        )?;
+        if !blocker.affects_all_tasks {
+            for task_id in &blocker.affected_task_ids {
+                transaction.execute(
+                    "INSERT INTO project_blocker_tasks (blocker_id, task_id) VALUES (?1, ?2)",
+                    params![blocker.id, task_id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        self.recalculate_project_task_readiness(&project_id)?;
+        self.project_blocker_by_id(&blocker.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn resolve_project_blocker(&mut self, blocker_id: &str) -> Result<Option<ProjectBlocker>> {
+        let project_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT project_id FROM project_blockers WHERE id = ?1 AND status = 'active'",
+                [blocker_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        self.connection.execute(
+            "UPDATE project_blockers
+             SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'active'",
+            [blocker_id],
+        )?;
+        self.recalculate_project_task_readiness(&project_id)?;
+        self.project_blocker_by_id(blocker_id)
+    }
+
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
@@ -1058,11 +1295,12 @@ impl Database {
                  WHEN 'backlog' THEN 0
                  WHEN 'ready' THEN 1
                  WHEN 'in_progress' THEN 2
-                 WHEN 'review' THEN 3
-                 WHEN 'approved' THEN 4
-                 WHEN 'integrating' THEN 5
-                 WHEN 'blocked' THEN 6
-                 WHEN 'done' THEN 7
+                 WHEN 'needs_input' THEN 3
+                 WHEN 'review' THEN 4
+                 WHEN 'approved' THEN 5
+                 WHEN 'integrating' THEN 6
+                 WHEN 'blocked' THEN 7
+                 WHEN 'done' THEN 8
              END, position ASC",
         )?;
         let records = statement
@@ -1539,6 +1777,9 @@ impl Database {
             if flow_blocked_reason_in_transaction(&transaction, &project_id)?.is_some() {
                 continue;
             }
+            if active_task_blocker_reason(&transaction, &task_id, &project_id)?.is_some() {
+                continue;
+            }
             let active_agent_runs: i64 = transaction.query_row(
                 "SELECT COUNT(*) FROM runs WHERE agent_id = ?1 AND status = 'running'",
                 [&agent_id],
@@ -1975,7 +2216,11 @@ impl Database {
     ) -> Result<Option<Task>> {
         if matches!(
             target_status,
-            TaskStatus::Approved | TaskStatus::Integrating | TaskStatus::Blocked | TaskStatus::Done
+            TaskStatus::NeedsInput
+                | TaskStatus::Approved
+                | TaskStatus::Integrating
+                | TaskStatus::Blocked
+                | TaskStatus::Done
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -1984,7 +2229,11 @@ impl Database {
         };
         if matches!(
             source_status,
-            TaskStatus::Approved | TaskStatus::Integrating | TaskStatus::Blocked | TaskStatus::Done
+            TaskStatus::NeedsInput
+                | TaskStatus::Approved
+                | TaskStatus::Integrating
+                | TaskStatus::Blocked
+                | TaskStatus::Done
         ) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -2524,15 +2773,7 @@ impl Database {
         for row in rows {
             let (status, count) = row?;
             counts.total += count;
-            match status.as_str() {
-                "backlog" => counts.backlog = count,
-                "ready" => counts.ready = count,
-                "in_progress" => counts.in_progress = count,
-                "review" => counts.review = count,
-                "blocked" => counts.blocked = count,
-                "done" => counts.done = count,
-                _ => {}
-            }
+            record_task_progress_count(&mut counts, &status, count);
         }
         Ok(counts)
     }
@@ -2686,6 +2927,45 @@ impl Database {
                 task_from_row,
             )
             .optional()
+    }
+
+    fn task_input_request_by_id(&self, id: &str) -> Result<Option<TaskInputRequest>> {
+        self.connection
+            .query_row(
+                "SELECT id, task_id, requesting_run_id, requesting_agent_id, question, status,
+                        answer, requested_at, answered_at
+                 FROM task_input_requests WHERE id = ?1",
+                [id],
+                task_input_request_from_row,
+            )
+            .optional()
+    }
+
+    fn project_blocker_by_id(&self, id: &str) -> Result<Option<ProjectBlocker>> {
+        let mut blocker = self
+            .connection
+            .query_row(
+                "SELECT id, project_id, title, description, affects_all_tasks, status,
+                        created_at, resolved_at
+                 FROM project_blockers WHERE id = ?1",
+                [id],
+                project_blocker_from_row,
+            )
+            .optional()?;
+        if let Some(record) = &mut blocker {
+            record.affected_task_ids = self.blocker_task_ids(&record.id)?;
+        }
+        Ok(blocker)
+    }
+
+    fn blocker_task_ids(&self, blocker_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT task_id FROM project_blocker_tasks WHERE blocker_id = ?1 ORDER BY task_id",
+        )?;
+        let task_ids = statement
+            .query_map([blocker_id], |row| row.get(0))?
+            .collect();
+        task_ids
     }
 
     pub fn get_run(&self, id: &str) -> Result<Option<Run>> {
@@ -2854,7 +3134,12 @@ impl Database {
         let candidates = {
             let mut statement = transaction.prepare(
                 "SELECT id, status, readiness_blocked FROM tasks
-                 WHERE project_id = ?1 AND (status = 'ready' OR (status = 'blocked' AND readiness_blocked = 1))",
+                 WHERE project_id = ?1
+                 AND (status = 'ready' OR (status = 'blocked' AND readiness_blocked = 1))
+                 AND NOT EXISTS (
+                    SELECT 1 FROM runs WHERE runs.task_id = tasks.id
+                    AND runs.status IN ('queued', 'running')
+                 )",
             )?;
             let candidates = statement
                 .query_map([project_id], |row| {
@@ -2914,6 +3199,47 @@ impl Database {
         )?;
         transaction.commit()?;
         self.task_by_id(id)
+    }
+}
+
+fn task_input_request_from_row(row: &rusqlite::Row<'_>) -> Result<TaskInputRequest> {
+    Ok(TaskInputRequest {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        requesting_run_id: row.get(2)?,
+        requesting_agent_id: row.get(3)?,
+        question: row.get(4)?,
+        status: row.get(5)?,
+        answer: row.get(6)?,
+        requested_at: row.get(7)?,
+        answered_at: row.get(8)?,
+    })
+}
+
+fn project_blocker_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectBlocker> {
+    Ok(ProjectBlocker {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        affects_all_tasks: row.get(4)?,
+        affected_task_ids: Vec::new(),
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        resolved_at: row.get(7)?,
+    })
+}
+
+fn record_task_progress_count(counts: &mut TaskProgressCounts, status: &str, count: i64) {
+    match status {
+        "backlog" => counts.backlog = count,
+        "ready" => counts.ready = count,
+        "in_progress" => counts.in_progress = count,
+        "needs_input" => counts.needs_input = count,
+        "review" => counts.review = count,
+        "blocked" => counts.blocked = count,
+        "done" => counts.done = count,
+        _ => {}
     }
 }
 
@@ -3173,6 +3499,140 @@ fn project_flow_counts(connection: &Connection, project_id: &str) -> Result<(i64
     )
 }
 
+fn requesting_agent_for_run(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    run_id: Option<&str>,
+    assigned_agent_id: Option<String>,
+) -> Result<Option<String>> {
+    let Some(run_id) = run_id else {
+        return Ok(assigned_agent_id);
+    };
+    let run: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT task_id, agent_id FROM runs WHERE id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match run {
+        Some((run_task_id, agent_id)) if run_task_id == task_id => Ok(Some(agent_id)),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn append_input_request_event(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: Option<&str>,
+    kind: &str,
+    message: &str,
+) -> Result<()> {
+    if let Some(run_id) = run_id {
+        transaction.execute(
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, ?2, ?3)",
+            params![run_id, kind, message],
+        )?;
+    }
+    Ok(())
+}
+
+fn open_input_request_context(
+    transaction: &rusqlite::Transaction<'_>,
+    request_id: &str,
+) -> Result<Option<(String, Option<String>, String, String)>> {
+    transaction
+        .query_row(
+            "SELECT requests.task_id, requests.requesting_run_id, tasks.project_id, tasks.status
+             FROM task_input_requests AS requests
+             JOIN tasks ON tasks.id = requests.task_id
+             WHERE requests.id = ?1 AND requests.status = 'open'",
+            [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+}
+
+fn task_has_running_run(transaction: &rusqlite::Transaction<'_>, task_id: &str) -> Result<bool> {
+    transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ?1 AND status = 'running')",
+        [task_id],
+        |row| row.get(0),
+    )
+}
+
+fn validate_new_project_blocker(
+    connection: &Connection,
+    blocker: &NewProjectBlocker,
+) -> Result<()> {
+    if blocker.title.trim().is_empty()
+        || (!blocker.affects_all_tasks && blocker.affected_task_ids.is_empty())
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let project_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [&blocker.project_id],
+        |row| row.get(0),
+    )?;
+    if !project_exists {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let unique_tasks = blocker.affected_task_ids.iter().collect::<HashSet<_>>();
+    if unique_tasks.len() != blocker.affected_task_ids.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    for task_id in unique_tasks {
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND project_id = ?2)",
+            params![task_id, blocker.project_id],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
+
+fn active_task_blocker_reason(
+    connection: &Connection,
+    task_id: &str,
+    project_id: &str,
+) -> Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT blockers.title FROM project_blockers AS blockers
+             WHERE blockers.project_id = ?1 AND blockers.status = 'active'
+             AND (blockers.affects_all_tasks = 1 OR EXISTS (
+                SELECT 1 FROM project_blocker_tasks AS affected
+                WHERE affected.blocker_id = blockers.id AND affected.task_id = ?2
+             ))
+             ORDER BY blockers.created_at ASC, blockers.id ASC LIMIT 1",
+            params![project_id, task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|title| title.map(|title| format!("Project blocker: {title}.")))
+}
+
+fn active_global_blocker_reason(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT title FROM project_blockers
+             WHERE project_id = ?1 AND status = 'active' AND affects_all_tasks = 1
+             ORDER BY created_at ASC, id ASC LIMIT 1",
+            [project_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|title| {
+            title.map(|title| format!("Project blocker: {title}. Automatic starts are paused."))
+        })
+}
+
 fn flow_blocked_reason_for_connection(
     connection: &Connection,
     project_id: &str,
@@ -3186,7 +3646,10 @@ fn flow_blocked_reason_for_connection(
             |row| row.get(0),
         )
         .optional()?;
-    let reason = if health.as_deref() == Some("broken") {
+    let global_blocker = active_global_blocker_reason(connection, project_id)?;
+    let reason = if global_blocker.is_some() {
+        global_blocker
+    } else if health.as_deref() == Some("broken") {
         Some("The integration branch is broken; automatic starts are paused.".into())
     } else if review >= limits.review_limit {
         Some(format!(
@@ -3256,6 +3719,17 @@ fn flow_state_for_connection(
 }
 
 fn task_blocked_reason(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    project_id: &str,
+) -> Result<Option<String>> {
+    match active_task_blocker_reason(transaction, task_id, project_id)? {
+        Some(reason) => Ok(Some(reason)),
+        None => task_readiness_requirement_reason(transaction, task_id, project_id),
+    }
+}
+
+fn task_readiness_requirement_reason(
     transaction: &rusqlite::Transaction<'_>,
     task_id: &str,
     project_id: &str,
@@ -3392,9 +3866,10 @@ fn migrate(connection: &Connection) -> Result<()> {
 mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, FlowLimitUpdate,
-        IntegrationStatus, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject, NewRun,
-        NewTask, NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RevertStatus,
-        RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
+        IntegrationStatus, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject,
+        NewProjectBlocker, NewRun, NewTask, NewTaskInputRequest, NewValidationCommand,
+        ProjectDeletion, ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus,
+        TaskUpdate, ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -4689,6 +5164,208 @@ mod tests {
         assert_eq!(history[0].revert_commit.as_deref(), Some("def456"));
         assert!(database.begin_revert("revert-2", "integration-2").is_err());
         drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn needs_input_and_project_blockers_pause_work_without_losing_context() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Human decisions".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/human-decisions".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "agent-1".into(),
+                name: "Implementer".into(),
+                provider: "codex".into(),
+                role: "developer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 2,
+            })
+            .expect("agent saves");
+        for (id, title) in [
+            ("task-input", "Clarify behavior"),
+            ("task-blocked", "Use SDK"),
+            ("task-readiness", "Wait for service"),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-1".into(),
+                    title: title.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Outcome is verified".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: Some("agent-1".into()),
+                    priority: TaskPriority::Normal,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+            database
+                .move_task(id, TaskStatus::Ready, usize::MAX)
+                .expect("task becomes ready");
+        }
+
+        let (_, running_task) = database
+            .start_run(NewRun {
+                id: "run-input".into(),
+                task_id: "task-input".into(),
+                agent_id: "agent-1".into(),
+                worker_id: "local".into(),
+            })
+            .expect("input task starts");
+        assert_eq!(running_task.status, TaskStatus::InProgress);
+        let request = database
+            .request_task_input(NewTaskInputRequest {
+                id: "input-1".into(),
+                task_id: "task-input".into(),
+                requesting_run_id: Some("run-input".into()),
+                question: "Which authentication flow should be authoritative?".into(),
+            })
+            .expect("input request saves");
+        assert_eq!(request.requesting_agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(
+            database
+                .get_task("task-input")
+                .expect("task loads")
+                .unwrap()
+                .status,
+            TaskStatus::NeedsInput
+        );
+        assert!(database
+            .answer_task_input("input-1", "Use device authorization.")
+            .is_err());
+        database
+            .finish_run(
+                "run-input",
+                RunStatus::Cancelled,
+                None,
+                Some("Paused for input."),
+            )
+            .expect("run pauses");
+        let (answered, resumed_task) = database
+            .answer_task_input("input-1", "Use device authorization.")
+            .expect("answer saves")
+            .expect("request exists");
+        assert_eq!(answered.status, "answered");
+        assert_eq!(resumed_task.status, TaskStatus::InProgress);
+        let events = database
+            .get_run("run-input")
+            .expect("run loads")
+            .unwrap()
+            .events;
+        assert!(events.iter().any(|event| event.kind == "input.requested"));
+        assert!(events.iter().any(|event| event.kind == "input.answered"));
+
+        database
+            .create_project_blocker(NewProjectBlocker {
+                id: "blocker-readiness".into(),
+                project_id: "project-1".into(),
+                title: "External service unavailable".into(),
+                description: None,
+                affects_all_tasks: false,
+                affected_task_ids: vec!["task-readiness".into()],
+            })
+            .expect("readiness blocker saves");
+        let blocked_task = database
+            .get_task("task-readiness")
+            .expect("blocked task loads")
+            .unwrap();
+        assert_eq!(blocked_task.status, TaskStatus::Blocked);
+        assert!(blocked_task
+            .blocked_reason
+            .unwrap()
+            .contains("External service"));
+        database
+            .resolve_project_blocker("blocker-readiness")
+            .expect("readiness blocker resolves");
+        assert_eq!(
+            database
+                .get_task("task-readiness")
+                .expect("task loads")
+                .unwrap()
+                .status,
+            TaskStatus::Ready
+        );
+
+        database
+            .enqueue_run(NewRun {
+                id: "run-blocked".into(),
+                task_id: "task-blocked".into(),
+                agent_id: "agent-1".into(),
+                worker_id: "local".into(),
+            })
+            .expect("second run queues");
+        let blocker = database
+            .create_project_blocker(NewProjectBlocker {
+                id: "blocker-1".into(),
+                project_id: "project-1".into(),
+                title: "Required SDK unavailable".into(),
+                description: Some("Wait for the platform package.".into()),
+                affects_all_tasks: false,
+                affected_task_ids: vec!["task-blocked".into()],
+            })
+            .expect("blocker saves");
+        assert_eq!(blocker.affected_task_ids, ["task-blocked"]);
+        assert!(database
+            .claim_next_run("local")
+            .expect("scheduler checks blockers")
+            .is_none());
+        database
+            .resolve_project_blocker("blocker-1")
+            .expect("blocker resolves")
+            .expect("blocker exists");
+        let (claimed, _) = database
+            .claim_next_run("local")
+            .expect("scheduler resumes")
+            .expect("run is eligible");
+        assert_eq!(claimed.id, "run-blocked");
+
+        let global = database
+            .create_project_blocker(NewProjectBlocker {
+                id: "blocker-global".into(),
+                project_id: "project-1".into(),
+                title: "Product decision pending".into(),
+                description: None,
+                affects_all_tasks: true,
+                affected_task_ids: Vec::new(),
+            })
+            .expect("global blocker saves");
+        assert!(global.affects_all_tasks);
+        assert!(database
+            .flow_state("project-1", "local")
+            .expect("flow loads")
+            .blocked_reason
+            .unwrap()
+            .contains("Product decision pending"));
+
+        drop(database);
+        let reopened = Database::open(&database_path).expect("database reopens");
+        let requests = reopened
+            .list_task_input_requests("task-input")
+            .expect("input history persists");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].answer.as_deref(), Some("Use device authorization."));
+        let blockers = reopened
+            .list_project_blockers("project-1")
+            .expect("blockers persist");
+        assert_eq!(blockers.len(), 3);
+        assert_eq!(blockers[0].id, "blocker-global");
+        drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }
