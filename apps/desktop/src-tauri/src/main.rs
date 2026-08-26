@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -11,13 +11,13 @@ use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
     ArchitectureDecisionStatus, Database, Epic, FlowLimitUpdate, FlowLimits, FlowState,
     IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewArchitectureDecision, NewEpic,
-    NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent, NewTask,
-    NewTaskInputRequest, NewValidationCommand, NewValidationEvent, Project, ProjectBlocker,
-    ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker, RevertAttempt, RevertStatus,
-    Run, RunEvent, RunOutput, RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus,
-    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus,
-    WorkerManagement, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
-    Workspace,
+    NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent,
+    NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent,
+    Project, ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker,
+    RevertAttempt, RevertStatus, Run, RunEvent, RunOutput, RunStatus, SchedulerDecision, Task,
+    TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand,
+    ValidationStage, ValidationStatus, WorkerManagement, WorkerManagementUpdate,
+    WorkerProviderStatus, WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -78,6 +78,8 @@ struct CreateTaskInput {
     #[serde(default)]
     relevant_paths: Vec<String>,
     #[serde(default)]
+    required_capabilities: Vec<String>,
+    #[serde(default)]
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
     #[serde(default = "default_task_priority")]
@@ -97,6 +99,8 @@ struct UpdateTaskInput {
     implementation_notes: Option<String>,
     #[serde(default)]
     relevant_paths: Vec<String>,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
     #[serde(default)]
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
@@ -430,6 +434,28 @@ struct FlowStateResponse {
     queued: i64,
     blocked_reason: Option<String>,
     queue: Vec<RunResponse>,
+    scheduler_decisions: Vec<SchedulerDecisionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchedulerDecisionResponse {
+    id: String,
+    project_id: String,
+    task_id: Option<String>,
+    worker_id: Option<String>,
+    run_id: Option<String>,
+    outcome: String,
+    reason: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleProjectResponse {
+    scheduled: Vec<SchedulerDecisionResponse>,
+    skipped: Vec<SchedulerDecisionResponse>,
+    blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,6 +513,7 @@ struct TaskResponse {
     acceptance_criteria: Vec<String>,
     implementation_notes: Option<String>,
     relevant_paths: Vec<String>,
+    required_capabilities: Vec<String>,
     dependency_ids: Vec<String>,
     assigned_agent_id: Option<String>,
     branch: Option<String>,
@@ -759,6 +786,7 @@ impl From<Task> for TaskResponse {
             acceptance_criteria: task.acceptance_criteria,
             implementation_notes: task.implementation_notes,
             relevant_paths: task.relevant_paths,
+            required_capabilities: task.required_capabilities,
             dependency_ids: task.dependency_ids,
             assigned_agent_id: task.assigned_agent_id,
             branch: task.branch,
@@ -871,6 +899,21 @@ impl From<WorkerManagement> for WorkerManagementResponse {
             labels: worker.labels,
             maintenance: worker.maintenance,
             max_concurrent_runs: worker.max_concurrent_runs,
+        }
+    }
+}
+
+impl From<SchedulerDecision> for SchedulerDecisionResponse {
+    fn from(decision: SchedulerDecision) -> Self {
+        Self {
+            id: decision.id,
+            project_id: decision.project_id,
+            task_id: decision.task_id,
+            worker_id: decision.worker_id,
+            run_id: decision.run_id,
+            outcome: decision.outcome,
+            reason: decision.reason,
+            created_at: decision.created_at,
         }
     }
 }
@@ -2104,6 +2147,12 @@ fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateRes
         .into_iter()
         .map(Into::into)
         .collect();
+    let scheduler_decisions = database
+        .list_scheduler_decisions(project_id, 20)
+        .map_err(|error| format!("Unable to load scheduler decisions: {error}"))?
+        .into_iter()
+        .map(Into::into)
+        .collect();
     Ok(FlowStateResponse {
         limits: limits.into(),
         active_worker_runs,
@@ -2114,6 +2163,7 @@ fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateRes
         queued,
         blocked_reason,
         queue,
+        scheduler_decisions,
     })
 }
 
@@ -3028,6 +3078,7 @@ fn create_revert_repair_task(
                 context.original_task.id
             )),
             relevant_paths: context.original_task.relevant_paths.clone(),
+            required_capabilities: context.original_task.required_capabilities.clone(),
             dependency_ids: Vec::new(),
             assigned_agent_id: None,
             priority: TaskPriority::High,
@@ -3810,7 +3861,7 @@ fn start_task_run(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartedTaskRunResponse, String> {
-    let (task, agent, remote_worker) = {
+    let (task, agent) = {
         let database = state
             .database
             .lock()
@@ -3836,13 +3887,8 @@ fn start_task_run(
         if agent.provider != "codex" {
             return Err("Only Codex agents can execute tasks at this stage.".into());
         }
-        let remote_worker = database
-            .remote_worker_for_project(&task.project_id)
-            .map_err(|error| format!("Unable to resolve the task worker: {error}"))?;
-        (task, agent, remote_worker)
+        (task, agent)
     };
-
-    verify_task_worker_readiness(remote_worker.as_ref())?;
 
     if task.worktree_path.is_some() {
         return Err(
@@ -3850,9 +3896,7 @@ fn start_task_run(
                 .into(),
         );
     }
-    let worker_id = remote_worker
-        .as_ref()
-        .map_or_else(|| LOCAL_WORKER_ID.to_owned(), |worker| worker.id.clone());
+    let worker_id = select_task_worker(&state, &task, &agent)?;
     let run_id = Uuid::new_v4().to_string();
     let (queued_run, queued_task) = state
         .database
@@ -3888,55 +3932,449 @@ fn start_task_run(
     })
 }
 
-fn verify_task_worker_readiness(remote_worker: Option<&RemoteWorker>) -> Result<(), String> {
-    match remote_worker {
-        Some(worker) => verify_remote_task_worker(worker),
-        None => verify_local_task_worker(),
-    }
+#[derive(Debug, Clone)]
+struct SchedulerWorker {
+    id: String,
+    name: String,
+    capabilities: HashSet<String>,
+    ready_providers: HashSet<String>,
+    available_slots: i64,
+    online: bool,
+    maintenance: bool,
+    blocked_reason: Option<String>,
 }
 
-fn verify_local_task_worker() -> Result<(), String> {
-    let provider_status = CodexProvider
-        .inspect()
-        .map_err(|error| format!("Unable to inspect Codex before starting the task: {error}"))?;
-    if matches!(provider_status.readiness, ProviderReadiness::Ready) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Codex is not ready to run this task. {}",
-            provider_status.detail
-        ))
-    }
+fn select_task_worker(state: &AppState, task: &Task, agent: &Agent) -> Result<String, String> {
+    let local_profile = LocalWorker::profile();
+    let local_providers = local_provider_statuses();
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The worker registry is unavailable.".to_owned())?;
+    let workers = scheduler_workers(&database, &task.project_id, local_profile, local_providers)?;
+    choose_compatible_worker(&workers, task, &agent.provider)
+        .map(|worker| worker.id.clone())
+        .ok_or_else(|| worker_mismatch_reason(&workers, task, &agent.provider))
 }
 
-fn verify_remote_task_worker(worker: &RemoteWorker) -> Result<(), String> {
-    if worker.status != "online" {
-        return Err(
-            "The project's remote worker is offline. Refresh it from Workers first.".into(),
-        );
-    }
-    remote_worker_handshake(worker)
-        .and_then(verified_remote_handshake)
-        .and_then(verify_remote_codex)
-}
-
-fn verified_remote_handshake(
-    handshake: orchestr_worker::RemoteWorkerHandshake,
-) -> Result<orchestr_worker::RemoteWorkerHandshake, String> {
-    validate_remote_protocol(handshake.protocol_version)?;
-    Ok(handshake)
-}
-
-fn verify_remote_codex(handshake: orchestr_worker::RemoteWorkerHandshake) -> Result<(), String> {
-    if handshake
-        .providers
+fn scheduler_workers(
+    database: &Database,
+    project_id: &str,
+    local_profile: orchestr_worker::WorkerProfile,
+    local_providers: Vec<WorkerProviderStatus>,
+) -> Result<Vec<SchedulerWorker>, String> {
+    let project = database
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load scheduler workspaces: {error}"))?
+        .ok_or_else(|| "The project no longer exists.".to_owned())?;
+    let mut workers = Vec::new();
+    if project
+        .workspaces
         .iter()
-        .any(|provider| provider.id == "codex" && provider.readiness == "ready")
+        .any(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
     {
-        Ok(())
-    } else {
-        Err("Codex is not ready on the project's remote worker. Check its provider authentication state from Workers.".into())
+        let management = database
+            .worker_management(LOCAL_WORKER_ID, &local_profile.name)
+            .map_err(|error| format!("Unable to load local worker settings: {error}"))?;
+        let flow = database
+            .flow_state(project_id, LOCAL_WORKER_ID)
+            .map_err(|error| format!("Unable to load local worker capacity: {error}"))?;
+        let queued = database
+            .queued_run_count_for_worker(LOCAL_WORKER_ID)
+            .map_err(|error| format!("Unable to load local worker queue: {error}"))?;
+        workers.push(SchedulerWorker {
+            id: LOCAL_WORKER_ID.into(),
+            name: management.display_name,
+            capabilities: worker_capabilities(
+                &local_profile.os,
+                &local_profile.architecture,
+                &management.labels,
+                local_profile
+                    .tools
+                    .iter()
+                    .map(|tool| (tool.name.as_str(), tool.installed)),
+            ),
+            ready_providers: ready_provider_ids(&local_providers),
+            available_slots: (flow.limits.worker_max_concurrent_runs
+                - flow.active_worker_runs
+                - queued)
+                .max(0),
+            online: local_profile.status != "offline",
+            maintenance: management.maintenance,
+            blocked_reason: flow.blocked_reason,
+        });
     }
+    if let Some(worker) = database
+        .remote_worker_for_project(project_id)
+        .map_err(|error| format!("Unable to load the remote scheduler worker: {error}"))?
+    {
+        let flow = database
+            .flow_state(project_id, &worker.id)
+            .map_err(|error| format!("Unable to load remote worker capacity: {error}"))?;
+        let queued = database
+            .queued_run_count_for_worker(&worker.id)
+            .map_err(|error| format!("Unable to load remote worker queue: {error}"))?;
+        workers.push(SchedulerWorker {
+            id: worker.id,
+            name: worker.management.display_name,
+            capabilities: worker_capabilities(
+                &worker.os,
+                &worker.architecture,
+                &worker.management.labels,
+                worker
+                    .tools
+                    .iter()
+                    .map(|tool| (tool.name.as_str(), tool.installed)),
+            ),
+            ready_providers: ready_provider_ids(&worker.providers),
+            available_slots: (flow.limits.worker_max_concurrent_runs
+                - flow.active_worker_runs
+                - queued)
+                .max(0),
+            online: worker.status == "online",
+            maintenance: worker.management.maintenance,
+            blocked_reason: flow.blocked_reason,
+        });
+    }
+    Ok(workers)
+}
+
+fn worker_capabilities<'a>(
+    os: &str,
+    architecture: &str,
+    labels: &[String],
+    tools: impl Iterator<Item = (&'a str, bool)>,
+) -> HashSet<String> {
+    let mut capabilities = labels
+        .iter()
+        .map(|label| normalized_capability(label))
+        .collect::<HashSet<_>>();
+    let os = normalized_capability(os);
+    let architecture = normalized_capability(architecture);
+    capabilities.extend([
+        os.clone(),
+        architecture.clone(),
+        format!("os:{os}"),
+        format!("arch:{architecture}"),
+    ]);
+    capabilities.extend(
+        tools
+            .filter(|(_, installed)| *installed)
+            .map(|(name, _)| normalized_capability(name)),
+    );
+    capabilities
+}
+
+fn ready_provider_ids(providers: &[WorkerProviderStatus]) -> HashSet<String> {
+    providers
+        .iter()
+        .filter(|provider| provider.readiness == "ready")
+        .map(|provider| normalized_capability(&provider.id))
+        .collect()
+}
+
+fn normalized_capability(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn choose_compatible_worker<'a>(
+    workers: &'a [SchedulerWorker],
+    task: &Task,
+    provider: &str,
+) -> Option<&'a SchedulerWorker> {
+    workers
+        .iter()
+        .filter(|worker| worker_can_execute(worker, task, provider))
+        .max_by_key(|worker| (worker.available_slots, worker.id == LOCAL_WORKER_ID))
+}
+
+fn worker_can_execute(worker: &SchedulerWorker, task: &Task, provider: &str) -> bool {
+    worker.online
+        && !worker.maintenance
+        && worker
+            .ready_providers
+            .contains(&normalized_capability(provider))
+        && task.required_capabilities.iter().all(|required| {
+            worker
+                .capabilities
+                .contains(&normalized_capability(required))
+        })
+}
+
+fn worker_mismatch_reason(workers: &[SchedulerWorker], task: &Task, provider: &str) -> String {
+    if workers.is_empty() {
+        return "No worker has a workspace for this project.".into();
+    }
+    let operational = workers
+        .iter()
+        .filter(|worker| worker.online && !worker.maintenance)
+        .collect::<Vec<_>>();
+    if operational.is_empty() {
+        return "All project workers are offline or in maintenance.".into();
+    }
+    let provider = normalized_capability(provider);
+    let provider_ready = operational
+        .into_iter()
+        .filter(|worker| worker.ready_providers.contains(&provider))
+        .collect::<Vec<_>>();
+    if provider_ready.is_empty() {
+        return format!("No project worker has the {provider} provider ready.");
+    }
+    let missing = task
+        .required_capabilities
+        .iter()
+        .filter(|required| {
+            !provider_ready.iter().any(|worker| {
+                worker
+                    .capabilities
+                    .contains(&normalized_capability(required))
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        "No single project worker satisfies every required capability.".into()
+    } else {
+        format!("No project worker provides: {}.", missing.join(", "))
+    }
+}
+
+#[tauri::command]
+fn schedule_ready_tasks(
+    project_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ScheduleProjectResponse, String> {
+    let local_profile = LocalWorker::profile();
+    let local_providers = local_provider_statuses();
+    let (scheduled, skipped) = {
+        let mut database = state
+            .database
+            .lock()
+            .map_err(|_| "The scheduler store is unavailable.".to_owned())?;
+        schedule_ready_tasks_in_database(
+            &mut database,
+            &project_id,
+            local_profile,
+            local_providers,
+        )?
+    };
+    dispatch_queued_task_runs(
+        app.clone(),
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    )?;
+    let _ = app.emit("scheduler://changed", project_id);
+    Ok(schedule_project_response(scheduled, skipped))
+}
+
+fn schedule_ready_tasks_in_database(
+    database: &mut Database,
+    project_id: &str,
+    local_profile: orchestr_worker::WorkerProfile,
+    local_providers: Vec<WorkerProviderStatus>,
+) -> Result<(Vec<SchedulerDecision>, Vec<SchedulerDecision>), String> {
+    let tasks = database
+        .list_ready_tasks_for_scheduling(project_id)
+        .map_err(|error| format!("Unable to load Ready work: {error}"))?;
+    let mut workers = scheduler_workers(database, project_id, local_profile, local_providers)?;
+    let flow = database
+        .flow_state(project_id, LOCAL_WORKER_ID)
+        .map_err(|error| format!("Unable to load project scheduling capacity: {error}"))?;
+    let project_slots = (flow.limits.in_progress_limit - flow.in_progress - flow.queued).max(0);
+    schedule_task_candidates(database, project_id, tasks, &mut workers, project_slots)
+}
+
+fn schedule_project_response(
+    scheduled: Vec<SchedulerDecision>,
+    skipped: Vec<SchedulerDecision>,
+) -> ScheduleProjectResponse {
+    let blocked_reason = if scheduled.is_empty() {
+        skipped.first().map(|decision| decision.reason.clone())
+    } else {
+        None
+    };
+    ScheduleProjectResponse {
+        scheduled: scheduled.into_iter().map(Into::into).collect(),
+        skipped: skipped.into_iter().map(Into::into).collect(),
+        blocked_reason,
+    }
+}
+
+fn schedule_task_candidates(
+    database: &mut Database,
+    project_id: &str,
+    tasks: Vec<Task>,
+    workers: &mut [SchedulerWorker],
+    mut project_slots: i64,
+) -> Result<(Vec<SchedulerDecision>, Vec<SchedulerDecision>), String> {
+    let mut scheduled = Vec::new();
+    let mut skipped = Vec::new();
+    let mut agent_slots = HashMap::new();
+    for task in tasks {
+        if project_slots == 0 {
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "blocked",
+                "Project In Progress capacity is reserved or exhausted.",
+            )?);
+            continue;
+        }
+        let Some(agent_id) = task.assigned_agent_id.as_deref() else {
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "skipped",
+                "Assign an agent before this Ready task can be scheduled.",
+            )?);
+            continue;
+        };
+        let Some(agent) = database
+            .get_agent(agent_id)
+            .map_err(|error| format!("Unable to load scheduler agent: {error}"))?
+        else {
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "skipped",
+                "The assigned agent no longer exists.",
+            )?);
+            continue;
+        };
+        if agent.provider != "codex" {
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "skipped",
+                "This agent provider does not support task execution yet.",
+            )?);
+            continue;
+        }
+        let slots = match agent_slots.get(agent_id) {
+            Some(slots) => *slots,
+            None => {
+                let active = database
+                    .active_run_count_for_agent(agent_id)
+                    .map_err(|error| format!("Unable to load agent capacity: {error}"))?;
+                let slots = (agent.max_concurrent_tasks - active).max(0);
+                agent_slots.insert(agent_id.to_owned(), slots);
+                slots
+            }
+        };
+        if slots == 0 {
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "blocked",
+                "The assigned agent is at its concurrency limit.",
+            )?);
+            continue;
+        }
+        let worker_index = workers
+            .iter()
+            .enumerate()
+            .filter(|(_, worker)| {
+                worker.available_slots > 0
+                    && worker.blocked_reason.is_none()
+                    && worker_can_execute(worker, &task, &agent.provider)
+            })
+            .max_by_key(|(_, worker)| (worker.available_slots, worker.id == LOCAL_WORKER_ID))
+            .map(|(index, _)| index);
+        let Some(worker_index) = worker_index else {
+            let reason = scheduling_worker_reason(workers, &task, &agent.provider);
+            skipped.push(record_scheduler_decision(
+                database,
+                project_id,
+                Some(&task.id),
+                None,
+                None,
+                "blocked",
+                &reason,
+            )?);
+            continue;
+        };
+        let worker_id = workers[worker_index].id.clone();
+        let run_id = Uuid::new_v4().to_string();
+        database
+            .enqueue_run(NewRun {
+                id: run_id.clone(),
+                task_id: task.id.clone(),
+                agent_id: agent.id,
+                worker_id: worker_id.clone(),
+            })
+            .map_err(|error| format!("Unable to queue scheduled work: {error}"))?;
+        workers[worker_index].available_slots -= 1;
+        project_slots -= 1;
+        agent_slots.insert(agent_id.to_owned(), slots - 1);
+        let reason = format!(
+            "Selected {} for priority {} work; worker and downstream capacity are available.",
+            workers[worker_index].name,
+            task.priority.as_str()
+        );
+        scheduled.push(record_scheduler_decision(
+            database,
+            project_id,
+            Some(&task.id),
+            Some(&worker_id),
+            Some(&run_id),
+            "scheduled",
+            &reason,
+        )?);
+    }
+    Ok((scheduled, skipped))
+}
+
+fn scheduling_worker_reason(workers: &[SchedulerWorker], task: &Task, provider: &str) -> String {
+    let compatible = workers
+        .iter()
+        .filter(|worker| worker_can_execute(worker, task, provider))
+        .collect::<Vec<_>>();
+    if compatible.is_empty() {
+        return worker_mismatch_reason(workers, task, provider);
+    }
+    compatible
+        .iter()
+        .find_map(|worker| worker.blocked_reason.clone())
+        .unwrap_or_else(|| "All compatible project workers are at execution capacity.".into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_scheduler_decision(
+    database: &mut Database,
+    project_id: &str,
+    task_id: Option<&str>,
+    worker_id: Option<&str>,
+    run_id: Option<&str>,
+    outcome: &str,
+    reason: &str,
+) -> Result<SchedulerDecision, String> {
+    database
+        .record_scheduler_decision(NewSchedulerDecision {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.to_owned(),
+            task_id: task_id.map(str::to_owned),
+            worker_id: worker_id.map(str::to_owned),
+            run_id: run_id.map(str::to_owned),
+            outcome: outcome.to_owned(),
+            reason: reason.to_owned(),
+        })
+        .map_err(|error| format!("Unable to record scheduler decision: {error}"))
 }
 
 fn dispatch_queued_task_runs(
@@ -5376,14 +5814,21 @@ fn get_project_progress(
 
 #[tauri::command]
 fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
-    let title = validate_task_title(&input.title)?;
-    let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
-    let priority = parse_task_priority(&input.priority)?;
     let mut database = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?;
-    validate_assigned_agent(&database, assigned_agent_id.as_deref())?;
+    create_task_record(&mut database, input)
+}
+
+fn create_task_record(
+    database: &mut Database,
+    input: CreateTaskInput,
+) -> Result<TaskResponse, String> {
+    let title = validate_task_title(&input.title)?;
+    let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
+    let priority = parse_task_priority(&input.priority)?;
+    validate_assigned_agent(database, assigned_agent_id.as_deref())?;
     database
         .create_task(NewTask {
             id: Uuid::new_v4().to_string(),
@@ -5398,6 +5843,7 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
             )?,
             implementation_notes: normalize_optional_text(input.implementation_notes),
             relevant_paths: normalize_task_list(input.relevant_paths, "Relevant paths", 50, 500)?,
+            required_capabilities: normalize_task_capabilities(input.required_capabilities)?,
             dependency_ids: normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?,
             assigned_agent_id,
             priority,
@@ -5410,6 +5856,17 @@ fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<Tas
 
 #[tauri::command]
 fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    update_task_record(&mut database, input)
+}
+
+fn update_task_record(
+    database: &mut Database,
+    input: UpdateTaskInput,
+) -> Result<TaskResponse, String> {
     let title = validate_task_title(&input.title)?;
     let dependency_ids = normalize_task_list(input.dependency_ids, "Dependencies", 50, 120)?;
     if dependency_ids
@@ -5420,11 +5877,7 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
     }
     let assigned_agent_id = normalize_optional_text(input.assigned_agent_id);
     let priority = parse_task_priority(&input.priority)?;
-    let mut database = state
-        .database
-        .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?;
-    validate_assigned_agent(&database, assigned_agent_id.as_deref())?;
+    validate_assigned_agent(database, assigned_agent_id.as_deref())?;
     database
         .update_task(
             &input.id,
@@ -5444,6 +5897,7 @@ fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<Tas
                     50,
                     500,
                 )?,
+                required_capabilities: normalize_task_capabilities(input.required_capabilities)?,
                 dependency_ids,
                 assigned_agent_id,
                 priority,
@@ -5654,6 +6108,14 @@ fn normalize_task_list(
         }
     }
     Ok(normalized)
+}
+
+fn normalize_task_capabilities(values: Vec<String>) -> Result<Vec<String>, String> {
+    let normalized = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect();
+    normalize_task_list(normalized, "Required capabilities", 30, 80)
 }
 
 struct ValidatedAgentInput {
@@ -6088,6 +6550,7 @@ fn main() {
             recover_task_run,
             resolve_failed_run,
             get_flow_state,
+            schedule_ready_tasks,
             update_flow_limits,
             export_task_run_log,
             get_task_review,
@@ -6144,12 +6607,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_task_prompt, format_run_log, normalize_workspace_path, parse_agent_review_decision,
-        task_input_question,
+        build_task_prompt, choose_compatible_worker, create_task_record, format_run_log,
+        load_flow_state, normalize_workspace_path, parse_agent_review_decision,
+        schedule_ready_tasks_in_database, task_input_question, update_task_record,
+        worker_can_execute, worker_capabilities, worker_mismatch_reason, CreateTaskInput,
+        SchedulerWorker, UpdateTaskInput,
     };
     use orchestr_db::{
-        Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Run,
-        RunEvent, RunOutput, RunStatus, Task, TaskPriority, TaskStatus,
+        Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Database,
+        FlowLimitUpdate, NewAgent, NewProject, NewTask, Run, RunEvent, RunOutput, RunStatus, Task,
+        TaskPriority, TaskStatus, WorkerProviderStatus,
+    };
+    use orchestr_worker::{ToolCapability, WorkerProfile};
+    use std::{
+        collections::HashSet,
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     #[cfg(windows)]
@@ -6176,6 +6649,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 branch: Some("task/commit-task-work".into()),
@@ -6226,6 +6700,241 @@ mod tests {
         assert!(prompt.contains("ORCHESTR_NEEDS_INPUT"));
         assert!(prompt.contains("ADR-001 Use worktrees"));
         assert!(prompt.contains("Do not contradict them casually"));
+    }
+
+    #[test]
+    fn scheduler_matches_tools_labels_platform_and_provider_readiness() {
+        let capabilities = worker_capabilities(
+            "Windows",
+            "x86_64",
+            &["Android".into()],
+            [("java", true), ("gradle", true), ("docker", false)].into_iter(),
+        );
+        let worker = SchedulerWorker {
+            id: "worker-android".into(),
+            name: "Android builder".into(),
+            capabilities,
+            ready_providers: HashSet::from(["codex".into()]),
+            available_slots: 2,
+            online: true,
+            maintenance: false,
+            blocked_reason: None,
+        };
+        let task = scheduler_test_task(vec!["android", "java", "os:windows"]);
+
+        assert!(worker_can_execute(&worker, &task, "codex"));
+        assert!(!worker.capabilities.contains("docker"));
+        assert!(!worker_can_execute(&worker, &task, "claude"));
+    }
+
+    #[test]
+    fn scheduler_rejects_partial_matches_and_prefers_available_capacity() {
+        let task = scheduler_test_task(vec!["java", "gradle"]);
+        let partial = SchedulerWorker {
+            id: "partial".into(),
+            name: "Partial".into(),
+            capabilities: HashSet::from(["java".into()]),
+            ready_providers: HashSet::from(["codex".into()]),
+            available_slots: 8,
+            online: true,
+            maintenance: false,
+            blocked_reason: None,
+        };
+        let capable = SchedulerWorker {
+            id: "capable".into(),
+            name: "Capable".into(),
+            capabilities: HashSet::from(["java".into(), "gradle".into()]),
+            ready_providers: HashSet::from(["codex".into()]),
+            available_slots: 1,
+            online: true,
+            maintenance: false,
+            blocked_reason: None,
+        };
+
+        assert_eq!(
+            choose_compatible_worker(&[partial.clone(), capable.clone()], &task, "codex")
+                .map(|worker| worker.id.as_str()),
+            Some("capable")
+        );
+        assert!(worker_mismatch_reason(&[partial], &task, "codex").contains("gradle"));
+    }
+
+    #[test]
+    fn scheduler_dispatches_only_matching_ready_work_within_project_capacity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("valid system time")
+            .as_nanos();
+        let database_path = std::env::temp_dir().join(format!("orchestr-scheduler-{nonce}.sqlite"));
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Scheduler".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/scheduler".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "agent-1".into(),
+                name: "Codex".into(),
+                provider: "codex".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 3,
+            })
+            .expect("agent saves");
+        let editable = create_task_record(
+            &mut database,
+            CreateTaskInput {
+                project_id: "project-1".into(),
+                title: "Editable".into(),
+                description: None,
+                acceptance_criteria: vec!["Done".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: vec![" Java ".into()],
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-1".into()),
+                priority: "normal".into(),
+                milestone_id: None,
+                epic_id: None,
+            },
+        )
+        .expect("task command creates");
+        let edited = update_task_record(
+            &mut database,
+            UpdateTaskInput {
+                id: editable.id,
+                title: "Editable revised".into(),
+                description: Some("Updated".into()),
+                acceptance_criteria: vec!["Done".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: vec!["JAVA".into()],
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-1".into()),
+                priority: "high".into(),
+                milestone_id: None,
+                epic_id: None,
+            },
+        )
+        .expect("task command updates");
+        assert_eq!(edited.required_capabilities, ["java"]);
+        for (id, priority, capability) in [
+            ("missing", TaskPriority::Critical, "gradle"),
+            ("selected", TaskPriority::High, "java"),
+            ("normal", TaskPriority::Normal, "java"),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-1".into(),
+                    title: id.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Done".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    required_capabilities: vec![capability.into()],
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: Some("agent-1".into()),
+                    priority,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+            database
+                .move_task(id, TaskStatus::Ready, usize::MAX)
+                .expect("task becomes ready");
+        }
+        database
+            .update_flow_limits(
+                "project-1",
+                "local",
+                FlowLimitUpdate {
+                    worker_max_concurrent_runs: 3,
+                    in_progress_limit: 1,
+                    review_limit: 3,
+                    approved_limit: 2,
+                },
+            )
+            .expect("flow limits save");
+        let (scheduled, skipped) = schedule_ready_tasks_in_database(
+            &mut database,
+            "project-1",
+            WorkerProfile {
+                id: "local".into(),
+                name: "Local".into(),
+                os: "windows".into(),
+                architecture: "x64".into(),
+                status: "online".into(),
+                tools: vec![ToolCapability {
+                    name: "java".into(),
+                    installed: true,
+                    version: Some("21".into()),
+                }],
+            },
+            vec![WorkerProviderStatus {
+                id: "codex".into(),
+                name: "Codex".into(),
+                installed: true,
+                version: Some("1".into()),
+                authentication: "authenticated".into(),
+                readiness: "ready".into(),
+                detail: "Ready".into(),
+            }],
+        )
+        .expect("scheduler completes");
+
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].task_id.as_deref(), Some("selected"));
+        assert_eq!(scheduled[0].worker_id.as_deref(), Some("local"));
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped
+            .iter()
+            .any(|decision| decision.reason.contains("gradle")));
+        assert!(skipped
+            .iter()
+            .any(|decision| decision.reason.contains("In Progress")));
+        let flow = load_flow_state(&database, "project-1").expect("flow response loads");
+        assert_eq!(flow.scheduler_decisions.len(), 3);
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    fn scheduler_test_task(required_capabilities: Vec<&str>) -> Task {
+        Task {
+            id: "task-scheduler".into(),
+            project_id: "project-1".into(),
+            title: "Build Android APK".into(),
+            description: None,
+            acceptance_criteria: vec!["APK builds".into()],
+            implementation_notes: None,
+            relevant_paths: Vec::new(),
+            required_capabilities: required_capabilities
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            dependency_ids: Vec::new(),
+            assigned_agent_id: Some("agent-1".into()),
+            branch: None,
+            worktree_path: None,
+            priority: TaskPriority::High,
+            blocked_reason: None,
+            readiness_blocked: false,
+            milestone_id: None,
+            epic_id: None,
+            status: TaskStatus::Ready,
+            position: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
     }
 
     #[test]

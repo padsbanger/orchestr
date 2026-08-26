@@ -20,6 +20,7 @@ export function TaskDialog({ task, agents, milestones, epics, onClose, onSave }:
   const [acceptanceCriteria, setAcceptanceCriteria] = useState(task ? task.acceptanceCriteria.join("\n") : "");
   const [implementationNotes, setImplementationNotes] = useState(task?.implementationNotes ?? "");
   const [relevantPaths, setRelevantPaths] = useState(task ? task.relevantPaths.join("\n") : "");
+  const [requiredCapabilities, setRequiredCapabilities] = useState(task ? task.requiredCapabilities.join("\n") : "");
   const [dependencyIds, setDependencyIds] = useState(task ? task.dependencyIds.join("\n") : "");
   const [assignedAgentId, setAssignedAgentId] = useState(task?.assignedAgentId ?? "");
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "normal");
@@ -39,6 +40,7 @@ export function TaskDialog({ task, agents, milestones, epics, onClose, onSave }:
         acceptanceCriteria: lines(acceptanceCriteria),
         implementationNotes,
         relevantPaths: lines(relevantPaths),
+        requiredCapabilities: lines(requiredCapabilities),
         dependencyIds: lines(dependencyIds),
         assignedAgentId,
         priority,
@@ -85,6 +87,11 @@ export function TaskDialog({ task, agents, milestones, epics, onClose, onSave }:
             <label>
               Relevant paths / context <span className="field-optional">one per line</span>
               <textarea value={relevantPaths} onChange={(event) => setRelevantPaths(event.target.value)} rows={3} placeholder={"src/auth\ndocs/architecture.md"} />
+            </label>
+            <label>
+              Required worker capabilities <span className="field-optional">one per line</span>
+              <textarea value={requiredCapabilities} onChange={(event) => setRequiredCapabilities(event.target.value)} rows={2} placeholder={"android\njava\ngradle"} />
+              <span className="field-hint">Match installed tools, worker labels, OS, or architecture. Leave empty for any ready worker.</span>
             </label>
             <label>
               Dependencies <span className="field-optional">task IDs, one per line</span>

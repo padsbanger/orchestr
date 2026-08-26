@@ -1,4 +1,4 @@
-import { Gauge, RefreshCw, Square, X } from "lucide-react";
+import { Gauge, Play, RefreshCw, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Agent } from "../../services/agents";
 import type { FlowLimitInput, FlowState } from "../../services/flow";
@@ -11,13 +11,15 @@ type FlowControlPanelProps = {
   agents: Agent[];
   isLoading: boolean;
   isSaving: boolean;
+  isScheduling: boolean;
   onClose: () => void;
   onRefresh: () => void;
   onSave: (limits: FlowLimitInput) => void;
   onCancel: (runId: string) => void;
+  onSchedule: () => void;
 };
 
-export function FlowControlPanel({ flow, tasks, agents, isLoading, isSaving, onClose, onRefresh, onSave, onCancel }: FlowControlPanelProps) {
+export function FlowControlPanel({ flow, tasks, agents, isLoading, isSaving, isScheduling, onClose, onRefresh, onSave, onCancel, onSchedule }: FlowControlPanelProps) {
   const [limits, setLimits] = useState<FlowLimitInput>(() => valuesFrom(flow));
   useEffect(() => setLimits(valuesFrom(flow)), [flow]);
   const taskTitles = new Map(tasks.map((task) => [task.id, task.title]));
@@ -36,6 +38,10 @@ export function FlowControlPanel({ flow, tasks, agents, isLoading, isSaving, onC
         <FlowMeter label="Approved" value={(flow?.approved ?? 0) + (flow?.integrating ?? 0)} limit={flow?.limits.approvedLimit ?? limits.approvedLimit} />
       </section>
       {flow?.blockedReason ? <p className="flow-pressure"><Gauge size={14} /> {flow.blockedReason} Queued work will resume automatically when capacity opens.</p> : <p className="flow-control-hint">Capacity is available. Priority selects among eligible queued tasks; dependencies still require Done.</p>}
+      <section className="scheduler-control">
+        <div><h3>Capability-aware scheduler</h3><p>Pick highest-priority Ready work and dispatch it only to a matching provider-ready worker.</p></div>
+        <button className="primary-button" type="button" disabled={isScheduling || isLoading} onClick={onSchedule}><Play size={14} /> {isScheduling ? "Scheduling..." : "Schedule Ready work"}</button>
+      </section>
       <form className="flow-limit-form" onSubmit={(event) => { event.preventDefault(); onSave(limits); }}>
         <h3>Limits</h3>
         <div className="flow-limit-grid">
@@ -49,6 +55,10 @@ export function FlowControlPanel({ flow, tasks, agents, isLoading, isSaving, onC
       <section>
         <div className="flow-queue-title"><h3>Execution queue</h3><span>{flow?.queued ?? 0}</span></div>
         {!flow || flow.queue.length === 0 ? <p className="flow-control-empty">No implementation runs are waiting.</p> : <ol className="flow-run-list">{flow.queue.map((run, index) => <li key={run.id}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{taskTitles.get(run.taskId) ?? run.taskId}</strong><code>{agentNames.get(run.agentId) ?? run.agentId}</code></div><button className="icon-button" type="button" onClick={() => onCancel(run.id)} aria-label={`Cancel queued run for ${taskTitles.get(run.taskId) ?? run.taskId}`}><Square size={13} /></button></li>)}</ol>}
+      </section>
+      <section>
+        <div className="flow-queue-title"><h3>Scheduler decisions</h3><span>{flow?.schedulerDecisions.length ?? 0}</span></div>
+        {!flow || flow.schedulerDecisions.length === 0 ? <p className="flow-control-empty">No scheduling decisions recorded yet.</p> : <ol className="scheduler-decision-list">{flow.schedulerDecisions.map((decision) => <li className={decision.outcome} key={decision.id}><span>{decision.outcome}</span><div><strong>{decision.taskId ? taskTitles.get(decision.taskId) ?? decision.taskId : "Project flow"}</strong><p>{decision.reason}</p>{decision.workerId && <code>{decision.workerId}</code>}</div></li>)}</ol>}
       </section>
     </div>
   </aside>;

@@ -450,6 +450,32 @@ dispatch. Project Flow state resolves the project's assigned execution worker,
 so its capacity and maintenance pressure no longer incorrectly reflect the
 local worker when a remote mapping is enabled.
 
+## M23 capability-aware scheduler
+
+Task execution requirements are persisted as normalized capability names.
+Operators may use detected tool names such as `java` or `gradle`, worker labels
+such as `android`, raw OS/architecture names, or explicit `os:` and `arch:`
+selectors. Empty requirements mean any otherwise valid project worker.
+
+Manual queueing and project scheduling use the same worker-matching policy.
+A candidate must own a project workspace, be online and outside maintenance,
+report the assigned agent's provider as ready, and satisfy every task
+capability on one machine. The scheduler considers only Ready tasks without an
+active run and evaluates them in critical, high, normal, then low priority
+order.
+
+Dispatch capacity is reserved before runs are queued. Existing queued and
+running work counts against agent and worker concurrency, while project queued
+and In Progress work counts against the In Progress WIP limit. Project health,
+global or task blockers, review pressure, and approved/integration congestion
+remain enforced by the database claim boundary. This preserves the invariant
+that a stale UI or alternate caller cannot bypass flow control.
+
+Every scheduling outcome is written to `scheduler_decisions` with its task,
+worker/run when applicable, outcome, reason, and timestamp. The Flow inspector
+shows this history beside the durable execution queue, making capability and
+backpressure decisions observable instead of implicit.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

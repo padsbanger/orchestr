@@ -43,6 +43,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (19, include_str!("../migrations/0019_remote_workers.sql")),
     (20, include_str!("../migrations/0020_worker_management.sql")),
+    (
+        21,
+        include_str!("../migrations/0021_capability_scheduler.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -640,6 +644,7 @@ pub struct Task {
     pub acceptance_criteria: Vec<String>,
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
+    pub required_capabilities: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
     pub branch: Option<String>,
@@ -663,6 +668,7 @@ pub struct NewTask {
     pub acceptance_criteria: Vec<String>,
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
+    pub required_capabilities: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
     pub priority: TaskPriority,
@@ -676,6 +682,7 @@ pub struct TaskUpdate {
     pub acceptance_criteria: Vec<String>,
     pub implementation_notes: Option<String>,
     pub relevant_paths: Vec<String>,
+    pub required_capabilities: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub assigned_agent_id: Option<String>,
     pub priority: TaskPriority,
@@ -947,6 +954,28 @@ pub struct NewRun {
     pub task_id: String,
     pub agent_id: String,
     pub worker_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerDecision {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub worker_id: Option<String>,
+    pub run_id: Option<String>,
+    pub outcome: String,
+    pub reason: String,
+    pub created_at: String,
+}
+
+pub struct NewSchedulerDecision {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub worker_id: Option<String>,
+    pub run_id: Option<String>,
+    pub outcome: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1718,7 +1747,8 @@ impl Database {
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at
+                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at,
+                    required_capabilities
              FROM tasks WHERE project_id = ?1
              ORDER BY CASE status
                  WHEN 'backlog' THEN 0
@@ -1731,6 +1761,27 @@ impl Database {
                  WHEN 'blocked' THEN 7
                  WHEN 'done' THEN 8
              END, position ASC",
+        )?;
+        let records = statement
+            .query_map([project_id], task_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn list_ready_tasks_for_scheduling(&self, project_id: &str) -> Result<Vec<Task>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
+                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at,
+                    required_capabilities
+             FROM tasks
+             WHERE project_id = ?1 AND status = 'ready'
+               AND NOT EXISTS (
+                   SELECT 1 FROM runs
+                   WHERE runs.task_id = tasks.id AND runs.status IN ('queued', 'running')
+               )
+             ORDER BY CASE priority
+                 WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                 position ASC, created_at ASC, id ASC",
         )?;
         let records = statement
             .query_map([project_id], task_from_row)?
@@ -1863,12 +1914,15 @@ impl Database {
             |row| row.get(0),
         )?;
         let acceptance_criteria = encode_string_list(&new_task.acceptance_criteria)?;
-        let relevant_paths = encode_string_list(&new_task.relevant_paths)?;
+        let (relevant_paths, required_capabilities) = encode_task_execution_context(
+            &new_task.relevant_paths,
+            &new_task.required_capabilities,
+        )?;
         let dependency_ids = encode_string_list(&new_task.dependency_ids)?;
         transaction.execute(
             "INSERT INTO tasks (id, project_id, title, description, acceptance_criteria,
-                                implementation_notes, relevant_paths, dependency_ids, assigned_agent_id, priority, milestone_id, epic_id, status, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'backlog', ?13)",
+                                implementation_notes, relevant_paths, dependency_ids, assigned_agent_id, priority, milestone_id, epic_id, status, position, required_capabilities)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'backlog', ?13, ?14)",
             params![
                 new_task.id,
                 new_task.project_id,
@@ -1882,7 +1936,8 @@ impl Database {
                 new_task.priority.as_str(),
                 new_task.milestone_id,
                 new_task.epic_id,
-                position
+                position,
+                required_capabilities
             ],
         )?;
         transaction.commit()?;
@@ -1902,12 +1957,14 @@ impl Database {
             update.epic_id.as_deref(),
         )?;
         let acceptance_criteria = encode_string_list(&update.acceptance_criteria)?;
-        let relevant_paths = encode_string_list(&update.relevant_paths)?;
+        let (relevant_paths, required_capabilities) =
+            encode_task_execution_context(&update.relevant_paths, &update.required_capabilities)?;
         let dependency_ids = encode_string_list(&update.dependency_ids)?;
         let changed = self.connection.execute(
             "UPDATE tasks SET title = ?1, description = ?2, acceptance_criteria = ?3,
                               implementation_notes = ?4, relevant_paths = ?5, dependency_ids = ?6,
-                              assigned_agent_id = ?7, priority = ?8, milestone_id = ?9, epic_id = ?10, updated_at = CURRENT_TIMESTAMP WHERE id = ?11",
+                              assigned_agent_id = ?7, priority = ?8, milestone_id = ?9, epic_id = ?10,
+                              required_capabilities = ?11, updated_at = CURRENT_TIMESTAMP WHERE id = ?12",
             params![
                 update.title,
                 update.description,
@@ -1919,6 +1976,7 @@ impl Database {
                 update.priority.as_str(),
                 update.milestone_id,
                 update.epic_id,
+                required_capabilities,
                 id
             ],
         )?;
@@ -2142,6 +2200,70 @@ impl Database {
             [worker_id],
             |row| row.get(0),
         )
+    }
+
+    pub fn active_run_count_for_agent(&self, agent_id: &str) -> Result<i64> {
+        self.connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE agent_id = ?1 AND status IN ('queued', 'running')",
+            [agent_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn queued_run_count_for_worker(&self, worker_id: &str) -> Result<i64> {
+        self.connection.query_row(
+            "SELECT COUNT(*) FROM runs WHERE worker_id = ?1 AND status = 'queued'",
+            [worker_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn record_scheduler_decision(
+        &mut self,
+        decision: NewSchedulerDecision,
+    ) -> Result<SchedulerDecision> {
+        if !matches!(
+            decision.outcome.as_str(),
+            "scheduled" | "skipped" | "blocked"
+        ) || decision.reason.trim().is_empty()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "INSERT INTO scheduler_decisions
+                (id, project_id, task_id, worker_id, run_id, outcome, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                decision.id,
+                decision.project_id,
+                decision.task_id,
+                decision.worker_id,
+                decision.run_id,
+                decision.outcome,
+                decision.reason,
+            ],
+        )?;
+        self.scheduler_decision_by_id(&decision.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn list_scheduler_decisions(
+        &self,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SchedulerDecision>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, task_id, worker_id, run_id, outcome, reason, created_at
+             FROM scheduler_decisions WHERE project_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT ?2",
+        )?;
+        let records = statement
+            .query_map(
+                params![project_id, limit.clamp(1, 100)],
+                scheduler_decision_from_row,
+            )?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
     }
 
     pub fn enqueue_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
@@ -3381,10 +3503,22 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
-                    relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at
+                        relevant_paths, dependency_ids, assigned_agent_id, branch, worktree_path, priority, blocked_reason, readiness_blocked, milestone_id, epic_id, status, position, created_at, updated_at,
+                        required_capabilities
                  FROM tasks WHERE id = ?1",
                 [id],
                 task_from_row,
+            )
+            .optional()
+    }
+
+    fn scheduler_decision_by_id(&self, id: &str) -> Result<Option<SchedulerDecision>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, task_id, worker_id, run_id, outcome, reason, created_at
+                 FROM scheduler_decisions WHERE id = ?1",
+                [id],
+                scheduler_decision_from_row,
             )
             .optional()
     }
@@ -3806,6 +3940,12 @@ fn record_task_progress_count(counts: &mut TaskProgressCounts, status: &str, cou
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
+    let mut task = task_from_core_row(row)?;
+    task.required_capabilities = decode_string_list(row.get(20)?)?;
+    Ok(task)
+}
+
+fn task_from_core_row(row: &rusqlite::Row<'_>) -> Result<Task> {
     Ok(Task {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -3827,6 +3967,20 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         position: row.get(17)?,
         created_at: row.get(18)?,
         updated_at: row.get(19)?,
+        required_capabilities: Vec::new(),
+    })
+}
+
+fn scheduler_decision_from_row(row: &rusqlite::Row<'_>) -> Result<SchedulerDecision> {
+    Ok(SchedulerDecision {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        task_id: row.get(2)?,
+        worker_id: row.get(3)?,
+        run_id: row.get(4)?,
+        outcome: row.get(5)?,
+        reason: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -3998,6 +4152,16 @@ fn json_conversion_error(error: serde_json::Error) -> rusqlite::Error {
 fn encode_string_list(values: &[String]) -> Result<String> {
     serde_json::to_string(values)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+}
+
+fn encode_task_execution_context(
+    relevant_paths: &[String],
+    required_capabilities: &[String],
+) -> Result<(String, String)> {
+    Ok((
+        encode_string_list(relevant_paths)?,
+        encode_string_list(required_capabilities)?,
+    ))
 }
 
 fn decode_string_list(value: String) -> Result<Vec<String>> {
@@ -4658,10 +4822,11 @@ mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus, Database,
         FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview, NewArchitectureDecision,
-        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewTask,
-        NewTaskInputRequest, NewValidationCommand, ProjectDeletion, ProjectHealthStatus,
-        RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage,
-        ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
+        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
+        NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, ProjectDeletion,
+        ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
+        ValidationStage, ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus,
+        WorkerToolCapability,
     };
     use std::{
         fs,
@@ -4837,6 +5002,7 @@ mod tests {
                     acceptance_criteria: vec!["Complete task".into()],
                     implementation_notes: None,
                     relevant_paths: Vec::new(),
+                    required_capabilities: Vec::new(),
                     dependency_ids: Vec::new(),
                     assigned_agent_id: None,
                     priority: TaskPriority::Normal,
@@ -4889,6 +5055,7 @@ mod tests {
                     acceptance_criteria: vec!["Task can be revised".into()],
                     implementation_notes: Some("Keep the ordering intact.".into()),
                     relevant_paths: vec!["src/tasks.rs".into()],
+                    required_capabilities: Vec::new(),
                     dependency_ids: vec!["task-2".into()],
                     assigned_agent_id: None,
                     priority: TaskPriority::Normal,
@@ -4945,6 +5112,7 @@ mod tests {
                 acceptance_criteria: vec!["Foundation works".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 priority: TaskPriority::High,
@@ -4961,6 +5129,7 @@ mod tests {
                 acceptance_criteria: vec!["Dependent works".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: vec!["foundation".into()],
                 assigned_agent_id: None,
                 priority: TaskPriority::Normal,
@@ -5011,6 +5180,7 @@ mod tests {
                 acceptance_criteria: vec!["Foundation works".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: vec!["dependent".into()],
                 assigned_agent_id: None,
                 priority: TaskPriority::Critical,
@@ -5106,6 +5276,7 @@ mod tests {
                 acceptance_criteria: vec!["Available to users".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 priority: TaskPriority::High,
@@ -5122,6 +5293,7 @@ mod tests {
             acceptance_criteria: vec!["Never saved".into()],
             implementation_notes: None,
             relevant_paths: Vec::new(),
+            required_capabilities: Vec::new(),
             dependency_ids: Vec::new(),
             assigned_agent_id: None,
             priority: TaskPriority::Normal,
@@ -5184,6 +5356,7 @@ mod tests {
                 acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-1".into()),
                 priority: TaskPriority::Normal,
@@ -5257,6 +5430,7 @@ mod tests {
                 acceptance_criteria: vec!["Works".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("implementer".into()),
                 priority: TaskPriority::Normal,
@@ -5352,6 +5526,7 @@ mod tests {
                 acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-1".into()),
                 priority: TaskPriority::Normal,
@@ -5489,6 +5664,7 @@ mod tests {
                 acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 priority: TaskPriority::Normal,
@@ -5559,6 +5735,7 @@ mod tests {
                 acceptance_criteria: vec!["Complete task".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 priority: TaskPriority::Normal,
@@ -5645,6 +5822,7 @@ mod tests {
                     acceptance_criteria: vec!["Complete the task".into()],
                     implementation_notes: None,
                     relevant_paths: Vec::new(),
+                    required_capabilities: Vec::new(),
                     dependency_ids: Vec::new(),
                     assigned_agent_id: Some(agent_id.into()),
                     priority,
@@ -5804,6 +5982,7 @@ mod tests {
                 acceptance_criteria: vec!["Recovered".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-1".into()),
                 priority: TaskPriority::High,
@@ -5894,6 +6073,7 @@ mod tests {
                 acceptance_criteria: vec!["Integrated".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: None,
                 priority: TaskPriority::Normal,
@@ -6007,6 +6187,7 @@ mod tests {
                     acceptance_criteria: vec!["Outcome is verified".into()],
                     implementation_notes: None,
                     relevant_paths: Vec::new(),
+                    required_capabilities: Vec::new(),
                     dependency_ids: Vec::new(),
                     assigned_agent_id: Some("agent-1".into()),
                     priority: TaskPriority::Normal,
@@ -6199,6 +6380,7 @@ mod tests {
                     acceptance_criteria: vec!["Outcome is verified".into()],
                     implementation_notes: None,
                     relevant_paths: vec![path.into()],
+                    required_capabilities: Vec::new(),
                     dependency_ids: Vec::new(),
                     assigned_agent_id: None,
                     priority: TaskPriority::Normal,
@@ -6397,6 +6579,7 @@ mod tests {
                 acceptance_criteria: vec!["Remote result exists".into()],
                 implementation_notes: None,
                 relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
                 dependency_ids: Vec::new(),
                 assigned_agent_id: Some("agent-remote".into()),
                 priority: TaskPriority::Normal,
@@ -6486,6 +6669,111 @@ mod tests {
             .expect("routing reloads")
             .is_none());
         drop(reopened);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn scheduler_queries_ready_work_by_priority_and_persists_decisions() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-scheduler".into(),
+                name: "Scheduler".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-scheduler".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/scheduler".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "agent-scheduler".into(),
+                name: "Scheduler agent".into(),
+                provider: "codex".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 2,
+            })
+            .expect("agent saves");
+        for (id, priority, capabilities) in [
+            ("normal", TaskPriority::Normal, vec!["cargo".into()]),
+            (
+                "critical",
+                TaskPriority::Critical,
+                vec!["android".into(), "java".into()],
+            ),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-scheduler".into(),
+                    title: id.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Done".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    required_capabilities: capabilities,
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: Some("agent-scheduler".into()),
+                    priority,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+            database
+                .move_task(id, TaskStatus::Ready, usize::MAX)
+                .expect("task becomes ready");
+        }
+
+        let ready = database
+            .list_ready_tasks_for_scheduling("project-scheduler")
+            .expect("Ready tasks load");
+        assert_eq!(ready[0].id, "critical");
+        assert_eq!(ready[0].required_capabilities, ["android", "java"]);
+        assert_eq!(ready[1].id, "normal");
+
+        let decision = database
+            .record_scheduler_decision(NewSchedulerDecision {
+                id: "decision-1".into(),
+                project_id: "project-scheduler".into(),
+                task_id: Some("critical".into()),
+                worker_id: Some("local".into()),
+                run_id: None,
+                outcome: "skipped".into(),
+                reason: "Android capability unavailable.".into(),
+            })
+            .expect("decision saves");
+        assert_eq!(decision.outcome, "skipped");
+        assert_eq!(
+            database
+                .list_scheduler_decisions("project-scheduler", 20)
+                .expect("decisions load")[0]
+                .reason,
+            "Android capability unavailable."
+        );
+        assert!(database
+            .create_task(NewTask {
+                id: "invalid-dependency".into(),
+                project_id: "project-scheduler".into(),
+                title: "Invalid dependency".into(),
+                description: None,
+                acceptance_criteria: vec!["Never scheduled".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
+                dependency_ids: vec!["missing-task".into()],
+                assigned_agent_id: Some("agent-scheduler".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .is_err());
+
+        drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
 }

@@ -13,6 +13,7 @@ export type Task = {
   acceptanceCriteria: string[];
   implementationNotes: string | null;
   relevantPaths: string[];
+  requiredCapabilities: string[];
   dependencyIds: string[];
   assignedAgentId: string | null;
   branch: string | null;
@@ -33,6 +34,7 @@ export type TaskInput = {
   acceptanceCriteria: string[];
   implementationNotes?: string;
   relevantPaths: string[];
+  requiredCapabilities: string[];
   dependencyIds: string[];
   assignedAgentId?: string;
   priority: TaskPriority;

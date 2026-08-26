@@ -12,6 +12,10 @@ machine while their output and lifecycle remain visible in the same timeline.
 The worker inventory exposes editable names and labels, machine capabilities,
 provider readiness, concurrency, connectivity, and scheduler-enforced
 maintenance state for local and remote execution environments.
+Tasks can declare required worker capabilities, and the Flow scheduler now
+selects priority-ordered Ready work only when a matching provider-ready worker,
+agent slot, worker slot, project WIP slot, and downstream capacity are all
+available. Persisted decisions explain why each task was scheduled or held.
 
 ## M0 development
 

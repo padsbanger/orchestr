@@ -8,7 +8,7 @@ const { invokeMock, listenMock } = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
-import { getFlowState, listenToFlowChanges, updateFlowLimits, type FlowState } from "./flow";
+import { getFlowState, listenToFlowChanges, scheduleReadyTasks, updateFlowLimits, type FlowState } from "./flow";
 
 const flow: FlowState = {
   limits: { projectId: "project-1", workerId: "local", workerMaxConcurrentRuns: 4, inProgressLimit: 4, reviewLimit: 3, approvedLimit: 2 },
@@ -20,6 +20,7 @@ const flow: FlowState = {
   queued: 1,
   blockedReason: null,
   queue: [],
+  schedulerDecisions: [],
 };
 
 describe("flow control service", () => {
@@ -49,5 +50,12 @@ describe("flow control service", () => {
     const listener = listenMock.mock.calls[0][1] as (event: { payload: string }) => void;
     listener({ payload: "run-1" });
     expect(handler).toHaveBeenCalledWith("run-1");
+  });
+
+  it("asks the scheduler to select Ready work", async () => {
+    const result = { scheduled: [], skipped: [], blockedReason: "No Ready work." };
+    invokeMock.mockResolvedValue(result);
+    await expect(scheduleReadyTasks("project-1")).resolves.toEqual(result);
+    expect(invokeMock).toHaveBeenCalledWith("schedule_ready_tasks", { projectId: "project-1" });
   });
 });

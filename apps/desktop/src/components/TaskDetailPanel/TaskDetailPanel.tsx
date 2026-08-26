@@ -98,6 +98,9 @@ export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerA
         <TaskSection title="Dependencies" icon={<GitBranch size={14} />} count={task.dependencyIds.length}>
           {task.dependencyIds.length === 0 ? <p className="task-detail-empty">No task dependencies recorded.</p> : <><ul className="token-list">{task.dependencyIds.map((dependency) => <li key={dependency}><code>{dependency}</code></li>)}</ul><p className="task-detail-hint">Dependencies must be Done before this task can run.</p></>}
         </TaskSection>
+        <TaskSection title="Worker capabilities" icon={<Terminal size={14} />} count={task.requiredCapabilities.length}>
+          {task.requiredCapabilities.length === 0 ? <p className="task-detail-empty">Any provider-ready project worker may execute this task.</p> : <><ul className="token-list">{task.requiredCapabilities.map((capability) => <li key={capability}><code>{capability}</code></li>)}</ul><p className="task-detail-hint">The scheduler matches these against tools, labels, OS, and architecture.</p></>}
+        </TaskSection>
         <TaskSection title="Priority"><p className="task-detail-copy"><span className={`task-priority ${task.priority}`}>{task.priority}</span></p></TaskSection>
         {task.status === "blocked" && <TaskSection title="Blocked"><p className="task-blocked-reason">{task.blockedReason || "This task is waiting for workflow requirements."}</p></TaskSection>}
         <TaskSection title="Assigned agent" icon={<Bot size={14} />}>

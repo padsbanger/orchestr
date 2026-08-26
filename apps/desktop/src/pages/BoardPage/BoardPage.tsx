@@ -21,7 +21,7 @@ import { listAgentReviews, listenToAgentReviewEvents, startAgentReview, type Age
 import { integrateNextTask, listIntegrationAttempts, listRevertAttempts, retryIntegrationAttempt, retryIntegrationCleanup, revertIntegration, type IntegrationAttempt, type RevertAttempt } from "../../services/integrations";
 import { createValidationCommand, deleteValidationCommand, getProjectHealth, listValidationAttempts, listValidationCommands, listenToValidationEvents, rerunIntegrationValidation, type ProjectHealth, type ValidationAttempt, type ValidationCommand, type ValidationStage } from "../../services/quality";
 import { listEpics, listMilestones, type Epic, type Milestone } from "../../services/outcomes";
-import { getFlowState, listenToFlowChanges, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
+import { getFlowState, listenToFlowChanges, scheduleReadyTasks, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
 import { answerTaskInput, createProjectBlocker, listProjectBlockers, listTaskInputRequests, requestTaskInput, resolveProjectBlocker, type ProjectBlocker, type TaskInputRequest } from "../../services/interruptions";
 import { createArchitectureDecision, decideArchitectureDecision, listArchitectureDecisions, listRelevantArchitectureDecisions, type ArchitectureDecision, type ArchitectureDecisionInput } from "../../services/knowledge";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
@@ -94,6 +94,7 @@ export function BoardPage() {
   const [flow, setFlow] = useState<FlowState>();
   const [isFlowLoading, setIsFlowLoading] = useState(false);
   const [isFlowSaving, setIsFlowSaving] = useState(false);
+  const [isScheduling, setIsScheduling] = useState(false);
   const [isRerunningIntegrationValidation, setIsRerunningIntegrationValidation] = useState(false);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
@@ -486,6 +487,21 @@ export function BoardPage() {
     }
   };
 
+  const scheduleProject = async () => {
+    if (!projectId) return;
+    setError(undefined);
+    setIsScheduling(true);
+    try {
+      const result = await scheduleReadyTasks(projectId);
+      if (result.scheduled.length === 0) setError(result.blockedReason ?? "No Ready task could be scheduled.");
+      await Promise.all([loadBoard(), loadFlowControl()]);
+    } catch (scheduleError) {
+      setError(errorMessage(scheduleError, "Unable to schedule Ready work."));
+    } finally {
+      setIsScheduling(false);
+    }
+  };
+
   const cancelRun = async (runId: string) => {
     setError(undefined);
     setCancellingRunId(runId);
@@ -832,7 +848,7 @@ export function BoardPage() {
       {activeSidePanel === "repository" && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={closeSidePanel} onRefresh={() => void loadRepository()} />}
       {activeSidePanel === "integration" && <IntegrationQueuePanel attempts={integrationAttempts} reverts={revertAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} recoveringIntegrationId={recoveringIntegrationId} revertingIntegrationId={revertingIntegrationId} onClose={closeSidePanel} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} onRetryCleanup={(attempt) => void retryCleanup(attempt)} onRevert={(attempt, createRepairTask) => void revertMergedIntegration(attempt, createRepairTask)} />}
       {activeSidePanel === "quality" && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={closeSidePanel} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
-      {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} />}
+      {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} isScheduling={isScheduling} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} onSchedule={() => void scheduleProject()} />}
       {activeSidePanel === "blockers" && <ProjectBlockersPanel blockers={projectBlockers} tasks={tasks} isLoading={isBlockersLoading} isSaving={isBlockerSaving} resolvingId={resolvingBlockerId} onClose={closeSidePanel} onRefresh={() => void loadProjectBlockers()} onCreate={(input) => void addProjectBlocker(input)} onResolve={(blockerId) => void clearProjectBlocker(blockerId)} />}
       {activeSidePanel === "knowledge" && <ProjectKnowledgePanel decisions={architectureDecisions} tasks={tasks} previewTaskId={knowledgePreviewTaskId} previewDecisions={knowledgePreviewDecisions} isLoading={isKnowledgeLoading} isPreviewLoading={isKnowledgePreviewLoading} isSaving={isKnowledgeSaving} decidingId={decidingArchitectureId} onClose={closeSidePanel} onRefresh={() => void loadArchitectureDecisions()} onPreviewTask={setKnowledgePreviewTaskId} onCreate={(input) => void addArchitectureDecision(input)} onDecide={(decisionId, status) => void decideArchitecture(decisionId, status)} />}
     </section>

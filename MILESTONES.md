@@ -991,7 +991,7 @@ Users can understand which machines are available and what each can execute.
 
 ---
 
-# M23 — Capability-Aware Scheduler
+# M23 — Capability-Aware Scheduler — Complete
 
 ### Goal
 
@@ -1022,6 +1022,16 @@ requires:
 ### Definition of done
 
 Orchestr selects only Ready work and dispatches it only to capable workers without overwhelming downstream stages.
+
+### Delivered
+
+- task specifications persist explicit required worker capabilities
+- capabilities match installed tools, normalized worker labels, OS, and architecture
+- manual and project-level scheduling share provider-ready worker selection
+- Ready work is ordered by priority and excludes tasks with active runs
+- agent, worker, project WIP, health, blocker, and downstream limits gate dispatch
+- persisted scheduler decisions explain every scheduled, skipped, or blocked task
+- Flow exposes a Schedule Ready work control and recent decision history
 
 ---
 
@@ -1318,10 +1328,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M22 state:
+Continue from the completed M23 state:
 
 ```text
-1. Implement capability-aware worker selection
+1. Implement human-approved milestone, epic, task, dependency, and priority proposals
 ```
 
 Do not let later agents casually contradict accepted technical decisions.
