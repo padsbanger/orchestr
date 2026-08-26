@@ -16,6 +16,9 @@ Tasks can declare required worker capabilities, and the Flow scheduler now
 selects priority-ordered Ready work only when a matching provider-ready worker,
 agent slot, worker slot, project WIP slot, and downstream capacity are all
 available. Persisted decisions explain why each task was scheduled or held.
+The board now includes a read-only planning agent workspace: Codex can turn a
+project goal into a persisted milestone, epic, and dependency-aware task draft,
+while explicit human approval atomically creates the proposed project work.
 
 ## M0 development
 
@@ -56,7 +59,7 @@ npm run crap
 ```
 
 `crap4ts` currently covers the agent-review, flow-control, recovery, knowledge,
-and worker service boundaries. The Rust gate compares against
+planning, and worker service boundaries. The Rust gate compares against
 the checked-in baseline, failing for a regression or for a new function whose
 score reaches 30.
 Refresh that baseline only after reviewing and intentionally accepting a report

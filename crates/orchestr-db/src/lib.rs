@@ -47,6 +47,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         21,
         include_str!("../migrations/0021_capability_scheduler.sql"),
     ),
+    (22, include_str!("../migrations/0022_planning_agent.sql")),
 ];
 
 pub struct Database {
@@ -730,6 +731,122 @@ pub struct NewEpic {
     pub title: String,
     pub description: Option<String>,
     pub status: String,
+}
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanningProposalStatus {
+    Generating,
+    Proposed,
+    Approved,
+    Rejected,
+    Failed,
+    Cancelled,
+}
+
+impl PlanningProposalStatus {
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    fn from_database(value: String) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == value)
+            .ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    format!("Unknown planning proposal status: {value}").into(),
+                )
+            })
+    }
+
+    const ALL: [Self; 6] = [
+        Self::Generating,
+        Self::Proposed,
+        Self::Approved,
+        Self::Rejected,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+    const NAMES: [&'static str; 6] = [
+        "generating",
+        "proposed",
+        "approved",
+        "rejected",
+        "failed",
+        "cancelled",
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningMilestone {
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningEpic {
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningTask {
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub implementation_notes: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub required_capabilities: Vec<String>,
+    pub dependency_keys: Vec<String>,
+    pub priority: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningPlan {
+    pub summary: String,
+    pub milestone: Option<PlanningMilestone>,
+    pub epic: Option<PlanningEpic>,
+    pub tasks: Vec<PlanningTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanningProposal {
+    pub id: String,
+    pub project_id: String,
+    pub agent_id: Option<String>,
+    pub goal: String,
+    pub status: PlanningProposalStatus,
+    pub plan: Option<PlanningPlan>,
+    pub raw_output: String,
+    pub error: Option<String>,
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
+    pub task_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub decided_at: Option<String>,
+}
+
+pub struct NewPlanningProposal {
+    pub id: String,
+    pub project_id: String,
+    pub agent_id: String,
+    pub goal: String,
+}
+
+pub struct PlanningMaterializationIds {
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
+    pub task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1787,6 +1904,144 @@ impl Database {
             .query_map([project_id], task_from_row)?
             .collect::<Result<Vec<_>>>()?;
         Ok(records)
+    }
+
+    pub fn list_planning_proposals(&self, project_id: &str) -> Result<Vec<PlanningProposal>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, agent_id, goal, status, plan_json, raw_output, error,
+                    milestone_id, epic_id, task_ids, created_at, updated_at, completed_at, decided_at
+             FROM planning_proposals WHERE project_id = ?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let proposals = statement
+            .query_map([project_id], planning_proposal_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(proposals)
+    }
+
+    pub fn get_planning_proposal(&self, id: &str) -> Result<Option<PlanningProposal>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, agent_id, goal, status, plan_json, raw_output, error,
+                        milestone_id, epic_id, task_ids, created_at, updated_at, completed_at, decided_at
+                 FROM planning_proposals WHERE id = ?1",
+                [id],
+                planning_proposal_from_row,
+            )
+            .optional()
+    }
+
+    pub fn start_planning_proposal(
+        &mut self,
+        proposal: NewPlanningProposal,
+    ) -> Result<PlanningProposal> {
+        self.connection.execute(
+            "INSERT INTO planning_proposals (id, project_id, agent_id, goal, status)
+             VALUES (?1, ?2, ?3, ?4, 'generating')",
+            params![
+                proposal.id,
+                proposal.project_id,
+                proposal.agent_id,
+                proposal.goal
+            ],
+        )?;
+        self.get_planning_proposal(&proposal.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn append_planning_output(&mut self, id: &str, output: &str) -> Result<bool> {
+        self.connection
+            .execute(
+                "UPDATE planning_proposals
+                 SET raw_output = raw_output || ?1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?2 AND status = 'generating'",
+                params![output, id],
+            )
+            .map(|changed| changed > 0)
+    }
+
+    pub fn finish_planning_proposal(
+        &mut self,
+        id: &str,
+        status: PlanningProposalStatus,
+        plan: Option<&PlanningPlan>,
+        error: Option<&str>,
+    ) -> Result<Option<PlanningProposal>> {
+        if !matches!(
+            status,
+            PlanningProposalStatus::Proposed
+                | PlanningProposalStatus::Failed
+                | PlanningProposalStatus::Cancelled
+        ) {
+            return Err(invalid_planning_plan("Invalid generated proposal outcome."));
+        }
+        if status == PlanningProposalStatus::Proposed {
+            validate_planning_plan(
+                plan.ok_or_else(|| invalid_planning_plan("A proposed plan is required."))?,
+            )?;
+        }
+        let plan_json = plan
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if self.connection.execute(
+            "UPDATE planning_proposals
+             SET status = ?1, plan_json = ?2, error = ?3, completed_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?4 AND status = 'generating'",
+            params![status.as_str(), plan_json, error, id],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        self.get_planning_proposal(id)
+    }
+
+    pub fn reject_planning_proposal(&mut self, id: &str) -> Result<Option<PlanningProposal>> {
+        if self.connection.execute(
+            "UPDATE planning_proposals
+             SET status = 'rejected', decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'proposed'",
+            [id],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        self.get_planning_proposal(id)
+    }
+
+    pub fn approve_planning_proposal(
+        &mut self,
+        id: &str,
+        materialization: PlanningMaterializationIds,
+    ) -> Result<Option<PlanningProposal>> {
+        let Some(proposal) = self.get_planning_proposal(id)? else {
+            return Ok(None);
+        };
+        if proposal.status != PlanningProposalStatus::Proposed {
+            return Ok(None);
+        }
+        let plan = proposal
+            .plan
+            .as_ref()
+            .ok_or_else(|| invalid_planning_plan("The proposal has no structured plan."))?;
+        validate_planning_materialization(plan, &materialization)?;
+        let transaction = self.connection.transaction()?;
+        materialize_planning_outcomes(&transaction, &proposal, plan, &materialization)?;
+        let task_ids_json = encode_string_list(&materialization.task_ids)?;
+        transaction.execute(
+            "UPDATE planning_proposals
+             SET status = 'approved', milestone_id = ?1, epic_id = ?2, task_ids = ?3,
+                 decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?4 AND status = 'proposed'",
+            params![
+                materialization.milestone_id,
+                materialization.epic_id,
+                task_ids_json,
+                id
+            ],
+        )?;
+        transaction.commit()?;
+        self.get_planning_proposal(id)
     }
 
     pub fn list_milestones(&self, project_id: &str) -> Result<Vec<Milestone>> {
@@ -4113,6 +4368,37 @@ fn epic_from_row(row: &rusqlite::Row<'_>) -> Result<Epic> {
     })
 }
 
+fn planning_proposal_from_row(row: &rusqlite::Row<'_>) -> Result<PlanningProposal> {
+    let plan_json = row.get::<_, Option<String>>(5)?;
+    let plan = plan_json
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    Ok(PlanningProposal {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        goal: row.get(3)?,
+        status: PlanningProposalStatus::from_database(row.get(4)?)?,
+        plan,
+        raw_output: row.get(6)?,
+        error: row.get(7)?,
+        milestone_id: row.get(8)?,
+        epic_id: row.get(9)?,
+        task_ids: decode_string_list(row.get(10)?)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        completed_at: row.get(13)?,
+        decided_at: row.get(14)?,
+    })
+}
+
 fn run_from_row(row: &rusqlite::Row<'_>) -> Result<Run> {
     Ok(Run {
         id: row.get(0)?,
@@ -4178,6 +4464,213 @@ fn validate_outcome_status(status: &str) -> Result<()> {
             "Unknown milestone or epic status.".into(),
         ))
     }
+}
+
+pub fn validate_planning_plan(plan: &PlanningPlan) -> Result<()> {
+    validate_planning_text(&plan.summary, "Plan summary", 4000)?;
+    if let Some(milestone) = &plan.milestone {
+        validate_planning_text(&milestone.title, "Milestone title", 200)?;
+    }
+    if let Some(epic) = &plan.epic {
+        validate_planning_text(&epic.title, "Epic title", 200)?;
+    }
+    if plan.tasks.is_empty() || plan.tasks.len() > 100 {
+        return Err(invalid_planning_plan(
+            "A plan must contain between 1 and 100 tasks.",
+        ));
+    }
+    let mut keys = HashSet::new();
+    for task in &plan.tasks {
+        validate_planning_task(task, &mut keys)?;
+    }
+    validate_planning_dependencies(&plan.tasks, &keys)
+}
+
+fn validate_planning_task(task: &PlanningTask, keys: &mut HashSet<String>) -> Result<()> {
+    validate_planning_text(&task.key, "Task key", 80)?;
+    validate_planning_text(&task.title, "Task title", 200)?;
+    if task.acceptance_criteria.is_empty() {
+        return Err(invalid_planning_plan(
+            "Every proposed task must include acceptance criteria.",
+        ));
+    }
+    if !keys.insert(task.key.clone()) {
+        return Err(invalid_planning_plan("Proposed task keys must be unique."));
+    }
+    if TaskPriority::parse(&task.priority).is_none() {
+        return Err(invalid_planning_plan(
+            "Task priority must be critical, high, normal, or low.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_planning_dependencies(tasks: &[PlanningTask], keys: &HashSet<String>) -> Result<()> {
+    for task in tasks {
+        if task.dependency_keys.iter().any(|key| key == &task.key) {
+            return Err(invalid_planning_plan(
+                "A proposed task cannot depend on itself.",
+            ));
+        }
+        if task.dependency_keys.iter().any(|key| !keys.contains(key)) {
+            return Err(invalid_planning_plan(
+                "Every proposed dependency must reference a task key in the same plan.",
+            ));
+        }
+    }
+    let mut remaining = keys.clone();
+    while !remaining.is_empty() {
+        let resolved = tasks
+            .iter()
+            .find(|task| {
+                remaining.contains(&task.key)
+                    && task
+                        .dependency_keys
+                        .iter()
+                        .all(|dependency| !remaining.contains(dependency))
+            })
+            .map(|task| task.key.clone());
+        let Some(resolved) = resolved else {
+            return Err(invalid_planning_plan(
+                "Proposed task dependencies contain a cycle.",
+            ));
+        };
+        remaining.remove(&resolved);
+    }
+    Ok(())
+}
+
+fn validate_planning_materialization(
+    plan: &PlanningPlan,
+    materialization: &PlanningMaterializationIds,
+) -> Result<()> {
+    if plan.milestone.is_some() != materialization.milestone_id.is_some()
+        || plan.epic.is_some() != materialization.epic_id.is_some()
+        || plan.tasks.len() != materialization.task_ids.len()
+    {
+        return Err(invalid_planning_plan(
+            "Materialization identifiers do not match the proposed plan.",
+        ));
+    }
+    let unique_ids = materialization.task_ids.iter().collect::<HashSet<_>>();
+    if unique_ids.len() != materialization.task_ids.len() {
+        return Err(invalid_planning_plan(
+            "Materialized task identifiers must be unique.",
+        ));
+    }
+    Ok(())
+}
+
+fn materialize_planning_outcomes(
+    transaction: &rusqlite::Transaction<'_>,
+    proposal: &PlanningProposal,
+    plan: &PlanningPlan,
+    materialization: &PlanningMaterializationIds,
+) -> Result<()> {
+    if let (Some(milestone), Some(milestone_id)) = (&plan.milestone, &materialization.milestone_id)
+    {
+        transaction.execute(
+            "INSERT INTO milestones (id, project_id, title, description, status)
+             VALUES (?1, ?2, ?3, ?4, 'planned')",
+            params![
+                milestone_id,
+                proposal.project_id,
+                milestone.title,
+                milestone.description
+            ],
+        )?;
+    }
+    if let (Some(epic), Some(epic_id)) = (&plan.epic, &materialization.epic_id) {
+        transaction.execute(
+            "INSERT INTO epics (id, project_id, milestone_id, title, description, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'planned')",
+            params![
+                epic_id,
+                proposal.project_id,
+                materialization.milestone_id,
+                epic.title,
+                epic.description
+            ],
+        )?;
+    }
+    let first_position: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM tasks
+         WHERE project_id = ?1 AND status = 'backlog'",
+        [&proposal.project_id],
+        |row| row.get(0),
+    )?;
+    let id_by_key = plan
+        .tasks
+        .iter()
+        .zip(&materialization.task_ids)
+        .map(|(task, id)| (task.key.as_str(), id.as_str()))
+        .collect::<HashMap<_, _>>();
+    for (offset, (task, task_id)) in plan.tasks.iter().zip(&materialization.task_ids).enumerate() {
+        insert_planning_task(
+            transaction,
+            proposal,
+            task,
+            task_id,
+            first_position + offset as i64,
+            &id_by_key,
+            materialization,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_planning_task(
+    transaction: &rusqlite::Transaction<'_>,
+    proposal: &PlanningProposal,
+    task: &PlanningTask,
+    task_id: &str,
+    position: i64,
+    id_by_key: &HashMap<&str, &str>,
+    materialization: &PlanningMaterializationIds,
+) -> Result<()> {
+    let dependencies = task
+        .dependency_keys
+        .iter()
+        .filter_map(|key| id_by_key.get(key.as_str()).map(|id| (*id).to_owned()))
+        .collect::<Vec<_>>();
+    transaction.execute(
+        "INSERT INTO tasks (id, project_id, title, description, acceptance_criteria,
+                            implementation_notes, relevant_paths, dependency_ids, assigned_agent_id,
+                            priority, milestone_id, epic_id, status, position, required_capabilities)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, 'backlog', ?12, ?13)",
+        params![
+            task_id,
+            proposal.project_id,
+            task.title,
+            task.description,
+            encode_string_list(&task.acceptance_criteria)?,
+            task.implementation_notes,
+            encode_string_list(&task.relevant_paths)?,
+            encode_string_list(&dependencies)?,
+            task.priority,
+            materialization.milestone_id,
+            materialization.epic_id,
+            position,
+            encode_string_list(&task.required_capabilities)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_planning_text(value: &str, field: &str, max_length: usize) -> Result<()> {
+    let length = value.trim().chars().count();
+    if length == 0 || length > max_length {
+        return Err(invalid_planning_plan(&format!(
+            "{field} must contain between 1 and {max_length} characters."
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_planning_plan(message: &str) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into(),
+    )
 }
 
 fn flow_limits_for_connection(
@@ -4822,11 +5315,12 @@ mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus, Database,
         FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview, NewArchitectureDecision,
-        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
-        NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, ProjectDeletion,
-        ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
-        ValidationStage, ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus,
-        WorkerToolCapability,
+        NewEpic, NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker,
+        NewRun, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
+        PlanningEpic, PlanningMaterializationIds, PlanningMilestone, PlanningPlan,
+        PlanningProposalStatus, PlanningTask, ProjectDeletion, ProjectHealthStatus, RevertStatus,
+        RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
+        WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
     };
     use std::{
         fs,
@@ -6775,5 +7269,150 @@ mod tests {
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn planning_proposals_require_human_approval_and_materialize_atomically() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-plan".into(),
+                name: "Planner".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-plan".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/planner".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "planner".into(),
+                name: "Planner".into(),
+                provider: "codex".into(),
+                role: "Planning agent".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+            })
+            .expect("agent saves");
+        let proposal = database
+            .start_planning_proposal(NewPlanningProposal {
+                id: "proposal-1".into(),
+                project_id: "project-plan".into(),
+                agent_id: "planner".into(),
+                goal: "Add OAuth".into(),
+            })
+            .expect("proposal starts");
+        assert_eq!(proposal.status, PlanningProposalStatus::Generating);
+        database
+            .append_planning_output("proposal-1", "planner transcript")
+            .expect("output saves");
+        let plan = PlanningPlan {
+            summary: "Deliver OAuth in two dependency-aware steps.".into(),
+            milestone: Some(PlanningMilestone {
+                title: "OAuth authentication".into(),
+                description: Some("Users can authenticate securely.".into()),
+            }),
+            epic: Some(PlanningEpic {
+                title: "GitHub OAuth".into(),
+                description: None,
+            }),
+            tasks: vec![
+                PlanningTask {
+                    key: "oauth-core".into(),
+                    title: "Implement OAuth callback".into(),
+                    description: None,
+                    acceptance_criteria: vec!["Callback exchanges a valid code.".into()],
+                    implementation_notes: None,
+                    relevant_paths: vec!["src/auth".into()],
+                    required_capabilities: Vec::new(),
+                    dependency_keys: Vec::new(),
+                    priority: "high".into(),
+                },
+                PlanningTask {
+                    key: "oauth-ui".into(),
+                    title: "Add sign-in UI".into(),
+                    description: None,
+                    acceptance_criteria: vec!["A user can start the OAuth flow.".into()],
+                    implementation_notes: None,
+                    relevant_paths: vec!["src/ui".into()],
+                    required_capabilities: Vec::new(),
+                    dependency_keys: vec!["oauth-core".into()],
+                    priority: "normal".into(),
+                },
+            ],
+        };
+        database
+            .finish_planning_proposal(
+                "proposal-1",
+                PlanningProposalStatus::Proposed,
+                Some(&plan),
+                None,
+            )
+            .expect("plan validates");
+        assert!(database
+            .list_tasks("project-plan")
+            .expect("tasks load")
+            .is_empty());
+
+        let approved = database
+            .approve_planning_proposal(
+                "proposal-1",
+                PlanningMaterializationIds {
+                    milestone_id: Some("milestone-oauth".into()),
+                    epic_id: Some("epic-oauth".into()),
+                    task_ids: vec!["task-core".into(), "task-ui".into()],
+                },
+            )
+            .expect("approval succeeds")
+            .expect("proposal remains");
+        assert_eq!(approved.status, PlanningProposalStatus::Approved);
+        assert_eq!(approved.task_ids, ["task-core", "task-ui"]);
+        let tasks = database.list_tasks("project-plan").expect("tasks load");
+        assert_eq!(tasks.len(), 2);
+        let ui = tasks
+            .iter()
+            .find(|task| task.id == "task-ui")
+            .expect("UI exists");
+        assert_eq!(ui.dependency_ids, ["task-core"]);
+        assert_eq!(ui.milestone_id.as_deref(), Some("milestone-oauth"));
+        assert_eq!(ui.epic_id.as_deref(), Some("epic-oauth"));
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn planning_proposals_reject_unknown_and_cyclic_dependencies() {
+        let base_task = |key: &str, dependencies: Vec<String>| PlanningTask {
+            key: key.into(),
+            title: format!("Task {key}"),
+            description: None,
+            acceptance_criteria: vec!["Observable outcome exists.".into()],
+            implementation_notes: None,
+            relevant_paths: Vec::new(),
+            required_capabilities: Vec::new(),
+            dependency_keys: dependencies,
+            priority: "normal".into(),
+        };
+        let plan = |tasks| PlanningPlan {
+            summary: "A valid summary".into(),
+            milestone: None,
+            epic: None,
+            tasks,
+        };
+        assert!(super::validate_planning_plan(&plan(vec![base_task(
+            "one",
+            vec!["missing".into()]
+        )]))
+        .is_err());
+        assert!(super::validate_planning_plan(&plan(vec![
+            base_task("one", vec!["two".into()]),
+            base_task("two", vec!["one".into()]),
+        ]))
+        .is_err());
     }
 }

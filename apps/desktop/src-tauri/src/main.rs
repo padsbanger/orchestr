@@ -11,21 +11,22 @@ use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
     ArchitectureDecisionStatus, Database, Epic, FlowLimitUpdate, FlowLimits, FlowState,
     IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewArchitectureDecision, NewEpic,
-    NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent,
-    NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent,
-    Project, ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker,
-    RevertAttempt, RevertStatus, Run, RunEvent, RunOutput, RunStatus, SchedulerDecision, Task,
-    TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand,
-    ValidationStage, ValidationStatus, WorkerManagement, WorkerManagementUpdate,
-    WorkerProviderStatus, WorkerToolCapability, Workspace,
+    NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
+    NewRunEvent, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
+    NewValidationEvent, PlanningMaterializationIds, PlanningPlan, PlanningProposal,
+    PlanningProposalStatus, Project, ProjectBlocker, ProjectDeletion, ProjectHealth,
+    ProjectProgress, RemoteWorker, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput,
+    RunStatus, SchedulerDecision, Task, TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate,
+    ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, WorkerManagement,
+    WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
     AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
 };
 use orchestr_worker::{
-    LocalWorker, OutputStream, ProcessRequest, RemoteJobRequest, RemoteWorkerClient,
-    RemoteWorkerConfig, WorkerHandle, WorkerRun,
+    LocalWorker, OutputStream, ProcessExit, ProcessRequest, RemoteJobRequest, RemoteWorkerClient,
+    RemoteWorkerConfig, WorkerError, WorkerHandle, WorkerRun,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -478,6 +479,34 @@ struct AgentReviewResponse {
     error: Option<String>,
     started_at: String,
     completed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartPlanningProposalInput {
+    project_id: String,
+    agent_id: String,
+    goal: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanningProposalResponse {
+    id: String,
+    project_id: String,
+    agent_id: Option<String>,
+    goal: String,
+    status: String,
+    plan: Option<PlanningPlan>,
+    raw_output: String,
+    error: Option<String>,
+    milestone_id: Option<String>,
+    epic_id: Option<String>,
+    task_ids: Vec<String>,
+    created_at: String,
+    updated_at: String,
+    completed_at: Option<String>,
+    decided_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1121,6 +1150,28 @@ impl From<AgentReview> for AgentReviewResponse {
             error: review.error,
             started_at: review.started_at,
             completed_at: review.completed_at,
+        }
+    }
+}
+
+impl From<PlanningProposal> for PlanningProposalResponse {
+    fn from(proposal: PlanningProposal) -> Self {
+        Self {
+            id: proposal.id,
+            project_id: proposal.project_id,
+            agent_id: proposal.agent_id,
+            goal: proposal.goal,
+            status: proposal.status.as_str().into(),
+            plan: proposal.plan,
+            raw_output: proposal.raw_output,
+            error: proposal.error,
+            milestone_id: proposal.milestone_id,
+            epic_id: proposal.epic_id,
+            task_ids: proposal.task_ids,
+            created_at: proposal.created_at,
+            updated_at: proposal.updated_at,
+            completed_at: proposal.completed_at,
+            decided_at: proposal.decided_at,
         }
     }
 }
@@ -2343,6 +2394,472 @@ fn list_agent_reviews(
         .list_agent_reviews(&task_id)
         .map(|reviews| reviews.into_iter().map(Into::into).collect())
         .map_err(|error| format!("Unable to load agent reviews: {error}"))
+}
+
+#[tauri::command]
+fn list_planning_proposals(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<PlanningProposalResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())?
+        .list_planning_proposals(&project_id)
+        .map(|proposals| proposals.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load planning proposals: {error}"))
+}
+
+struct PreparedPlanningRun {
+    proposal: NewPlanningProposal,
+    request: ProcessRequest,
+}
+
+struct PlanningContext {
+    project: Project,
+    agent: Agent,
+    tasks: Vec<Task>,
+    milestones: Vec<Milestone>,
+    epics: Vec<Epic>,
+    decisions: Vec<ArchitectureDecision>,
+}
+
+fn prepare_planning_run(
+    input: StartPlanningProposalInput,
+    database: &Arc<Mutex<Database>>,
+) -> Result<PreparedPlanningRun, String> {
+    let context = load_planning_context(database, &input)?;
+    let goal = validate_required_field(input.goal, "Project goal", 4000)?;
+    prepare_loaded_planning_run(goal, context)
+}
+
+fn load_planning_context(
+    database: &Arc<Mutex<Database>>,
+    input: &StartPlanningProposalInput,
+) -> Result<PlanningContext, String> {
+    database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())
+        .and_then(|database| load_planning_context_from_database(&database, input))
+}
+
+fn load_planning_context_from_database(
+    database: &Database,
+    input: &StartPlanningProposalInput,
+) -> Result<PlanningContext, String> {
+    let project = load_planning_project(database, &input.project_id)?;
+    let agent = load_planning_agent(database, &input.agent_id)?;
+    let (tasks, milestones, epics, decisions) = load_planning_records(database, &project.id)?;
+    Ok(PlanningContext {
+        project,
+        agent,
+        tasks,
+        milestones,
+        epics,
+        decisions,
+    })
+}
+
+fn load_planning_project(database: &Database, project_id: &str) -> Result<Project, String> {
+    database
+        .get_project(project_id)
+        .map_err(|error| format!("Unable to load the planning project: {error}"))?
+        .ok_or_else(|| "The project no longer exists.".to_owned())
+}
+
+fn load_planning_agent(database: &Database, agent_id: &str) -> Result<Agent, String> {
+    let agent = database
+        .get_agent(agent_id)
+        .map_err(|error| format!("Unable to load the planning agent: {error}"))?
+        .ok_or_else(|| "The selected planning agent no longer exists.".to_owned())?;
+    if agent.provider != "codex" {
+        return Err("Only Codex agents can create local plans at this stage.".into());
+    }
+    Ok(agent)
+}
+
+type PlanningRecords = (
+    Vec<Task>,
+    Vec<Milestone>,
+    Vec<Epic>,
+    Vec<ArchitectureDecision>,
+);
+
+fn load_planning_records(database: &Database, project_id: &str) -> Result<PlanningRecords, String> {
+    let tasks = database
+        .list_tasks(project_id)
+        .map_err(|error| format!("Unable to load existing project work: {error}"))?;
+    let (milestones, epics) = load_planning_outcomes(database, project_id)?;
+    let decisions = load_accepted_planning_decisions(database, project_id)?;
+    Ok((tasks, milestones, epics, decisions))
+}
+
+fn load_planning_outcomes(
+    database: &Database,
+    project_id: &str,
+) -> Result<(Vec<Milestone>, Vec<Epic>), String> {
+    let milestones = database
+        .list_milestones(project_id)
+        .map_err(|error| format!("Unable to load project milestones: {error}"))?;
+    let epics = database
+        .list_epics(project_id)
+        .map_err(|error| format!("Unable to load project epics: {error}"))?;
+    Ok((milestones, epics))
+}
+
+fn load_accepted_planning_decisions(
+    database: &Database,
+    project_id: &str,
+) -> Result<Vec<ArchitectureDecision>, String> {
+    database
+        .list_architecture_decisions(project_id)
+        .map(|decisions| {
+            decisions
+                .into_iter()
+                .filter(|decision| decision.status == ArchitectureDecisionStatus::Accepted)
+                .collect()
+        })
+        .map_err(|error| format!("Unable to load project knowledge: {error}"))
+}
+
+fn prepare_loaded_planning_run(
+    goal: String,
+    context: PlanningContext,
+) -> Result<PreparedPlanningRun, String> {
+    let workspace_path = context
+        .project
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
+        .map(|workspace| PathBuf::from(&workspace.path))
+        .ok_or_else(|| "The project has no local workspace available for planning.".to_owned())?;
+    ensure_codex_ready_for_planning()?;
+    let request = planning_process_request(&goal, &context, workspace_path)?;
+    Ok(PreparedPlanningRun {
+        proposal: NewPlanningProposal {
+            id: Uuid::new_v4().to_string(),
+            project_id: context.project.id,
+            agent_id: context.agent.id,
+            goal,
+        },
+        request,
+    })
+}
+
+fn ensure_codex_ready_for_planning() -> Result<(), String> {
+    let provider_status = CodexProvider
+        .inspect()
+        .map_err(|error| format!("Unable to inspect Codex before planning: {error}"))?;
+    if !matches!(provider_status.readiness, ProviderReadiness::Ready) {
+        return Err(format!(
+            "Codex is not ready to plan this project. {}",
+            provider_status.detail
+        ));
+    }
+    Ok(())
+}
+
+fn planning_process_request(
+    goal: &str,
+    context: &PlanningContext,
+    workspace_path: PathBuf,
+) -> Result<ProcessRequest, String> {
+    CodexProvider
+        .execution_request(AgentRunInput {
+            model: context.agent.model.clone(),
+            prompt: build_planning_prompt(
+                goal,
+                &context.project,
+                &context.agent,
+                &context.tasks,
+                &context.milestones,
+                &context.epics,
+                &context.decisions,
+            ),
+            working_directory: workspace_path,
+            additional_writable_directories: Vec::new(),
+            read_only: true,
+        })
+        .map_err(|error| format!("Unable to prepare the planning agent: {error}"))
+}
+
+fn launch_planning_worker(
+    database: &Arc<Mutex<Database>>,
+    proposal_id: &str,
+    request: ProcessRequest,
+) -> Result<WorkerRun, String> {
+    LocalWorker::start(request).map_err(|error| {
+        if let Ok(mut database) = database.lock() {
+            let _ = database.finish_planning_proposal(
+                proposal_id,
+                PlanningProposalStatus::Failed,
+                None,
+                Some(&error.to_string()),
+            );
+        }
+        format!("Unable to start Codex for project planning: {error}")
+    })
+}
+
+#[tauri::command]
+fn start_planning_proposal(
+    input: StartPlanningProposalInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<PlanningProposalResponse, String> {
+    let prepared = prepare_planning_run(input, &state.database)?;
+    start_prepared_planning_run(app, &state, prepared)
+}
+
+fn start_prepared_planning_run(
+    app: AppHandle,
+    state: &State<'_, AppState>,
+    prepared: PreparedPlanningRun,
+) -> Result<PlanningProposalResponse, String> {
+    let proposal_id = prepared.proposal.id.clone();
+    let persisted = persist_planning_start(&state.database, prepared.proposal)?;
+    let run = launch_registered_planning_worker(
+        &state.database,
+        &state.local_worker_runs,
+        &proposal_id,
+        prepared.request,
+    )?;
+    monitor_planning_worker(
+        app,
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+        proposal_id,
+        run,
+    );
+    Ok(persisted.into())
+}
+
+fn persist_planning_start(
+    database: &Arc<Mutex<Database>>,
+    proposal: NewPlanningProposal,
+) -> Result<PlanningProposal, String> {
+    database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())?
+        .start_planning_proposal(proposal)
+        .map_err(|error| format!("Unable to record the planning proposal: {error}"))
+}
+
+fn launch_registered_planning_worker(
+    database: &Arc<Mutex<Database>>,
+    active_runs: &Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+    proposal_id: &str,
+    request: ProcessRequest,
+) -> Result<WorkerRun, String> {
+    let run = launch_planning_worker(database, proposal_id, request)?;
+    register_active_planning_run(active_runs, proposal_id, &run.handle)?;
+    Ok(run)
+}
+
+fn register_active_planning_run(
+    active_runs: &Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+    proposal_id: &str,
+    handle: &WorkerHandle,
+) -> Result<(), String> {
+    active_runs
+        .lock()
+        .map_err(|_| "The local worker state is unavailable.".to_owned())?
+        .insert(
+            proposal_id.to_owned(),
+            ActiveLocalRun {
+                handle: handle.clone(),
+                cancel_requested: false,
+            },
+        );
+    Ok(())
+}
+
+fn monitor_planning_worker(
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+    proposal_id: String,
+    run: WorkerRun,
+) {
+    thread::spawn(move || {
+        for output in run.output {
+            if let Ok(mut database) = database.lock() {
+                let _ = database.append_planning_output(&proposal_id, &output.text);
+                let _ = database.append_planning_output(&proposal_id, "\n");
+            }
+            let _ = app.emit("planning://event", proposal_id.clone());
+        }
+        let result = run.handle.wait();
+        let cancelled = active_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(&proposal_id))
+            .is_some_and(|run| run.cancel_requested);
+        finish_planning_worker(&database, &proposal_id, result, cancelled);
+        let _ = app.emit("planning://event", proposal_id);
+    });
+}
+
+fn finish_planning_worker(
+    database: &Arc<Mutex<Database>>,
+    proposal_id: &str,
+    result: Result<ProcessExit, WorkerError>,
+    cancelled: bool,
+) {
+    let Ok(mut database) = database.lock() else {
+        return;
+    };
+    if cancelled {
+        let _ = database.finish_planning_proposal(
+            proposal_id,
+            PlanningProposalStatus::Cancelled,
+            None,
+            Some("Planning run cancelled."),
+        );
+        return;
+    }
+    finish_planning_result(&mut database, proposal_id, result);
+}
+
+fn finish_planning_result(
+    database: &mut Database,
+    proposal_id: &str,
+    result: Result<ProcessExit, WorkerError>,
+) {
+    match result {
+        Ok(exit) => finish_exited_planning_worker(database, proposal_id, exit),
+        Err(error) => fail_planning_worker(database, proposal_id, &error.to_string()),
+    }
+}
+
+fn finish_exited_planning_worker(database: &mut Database, proposal_id: &str, exit: ProcessExit) {
+    if exit.success {
+        finish_successful_planning_worker(database, proposal_id);
+    } else {
+        fail_planning_worker(
+            database,
+            proposal_id,
+            "Codex exited with an error while planning the project.",
+        );
+    }
+}
+
+fn fail_planning_worker(database: &mut Database, proposal_id: &str, error: &str) {
+    let _ = database.finish_planning_proposal(
+        proposal_id,
+        PlanningProposalStatus::Failed,
+        None,
+        Some(error),
+    );
+}
+
+fn finish_successful_planning_worker(database: &mut Database, proposal_id: &str) {
+    let output = database
+        .get_planning_proposal(proposal_id)
+        .ok()
+        .flatten()
+        .map(|proposal| proposal.raw_output)
+        .unwrap_or_default();
+    match parse_planning_plan(&output) {
+        Some(plan) => {
+            let result = database.finish_planning_proposal(
+                proposal_id,
+                PlanningProposalStatus::Proposed,
+                Some(&plan),
+                None,
+            );
+            if let Err(error) = result {
+                let _ = database.finish_planning_proposal(
+                    proposal_id,
+                    PlanningProposalStatus::Failed,
+                    None,
+                    Some(&format!("The generated plan is invalid: {error}")),
+                );
+            }
+        }
+        None => {
+            let _ = database.finish_planning_proposal(
+                proposal_id,
+                PlanningProposalStatus::Failed,
+                None,
+                Some("Codex did not return the required structured planning format."),
+            );
+        }
+    }
+}
+
+#[tauri::command]
+fn approve_planning_proposal(
+    proposal_id: String,
+    state: State<'_, AppState>,
+) -> Result<PlanningProposalResponse, String> {
+    let proposal = load_planning_proposal_for_approval(&state.database, &proposal_id)?;
+    let materialization = planning_materialization(&proposal)?;
+    persist_planning_approval(&state.database, &proposal_id, materialization)
+}
+
+fn load_planning_proposal_for_approval(
+    database: &Arc<Mutex<Database>>,
+    proposal_id: &str,
+) -> Result<PlanningProposal, String> {
+    database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())
+        .and_then(|database| {
+            database
+                .get_planning_proposal(proposal_id)
+                .map_err(|error| format!("Unable to load the planning proposal: {error}"))
+        })
+        .and_then(|proposal| {
+            proposal.ok_or_else(|| "The planning proposal no longer exists.".to_owned())
+        })
+}
+
+fn planning_materialization(
+    proposal: &PlanningProposal,
+) -> Result<PlanningMaterializationIds, String> {
+    let plan = proposal
+        .plan
+        .as_ref()
+        .ok_or_else(|| "The planning proposal has no structured plan.".to_owned())?;
+    Ok(PlanningMaterializationIds {
+        milestone_id: plan.milestone.as_ref().map(|_| Uuid::new_v4().to_string()),
+        epic_id: plan.epic.as_ref().map(|_| Uuid::new_v4().to_string()),
+        task_ids: plan
+            .tasks
+            .iter()
+            .map(|_| Uuid::new_v4().to_string())
+            .collect(),
+    })
+}
+
+fn persist_planning_approval(
+    database: &Arc<Mutex<Database>>,
+    proposal_id: &str,
+    materialization: PlanningMaterializationIds,
+) -> Result<PlanningProposalResponse, String> {
+    database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())?
+        .approve_planning_proposal(&proposal_id, materialization)
+        .map_err(|error| format!("Unable to approve the planning proposal: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "Only a pending planning proposal can be approved.".into())
+}
+
+#[tauri::command]
+fn reject_planning_proposal(
+    proposal_id: String,
+    state: State<'_, AppState>,
+) -> Result<PlanningProposalResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local planning store is unavailable.".to_owned())?
+        .reject_planning_proposal(&proposal_id)
+        .map_err(|error| format!("Unable to reject the planning proposal: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "Only a pending planning proposal can be rejected.".into())
 }
 
 #[tauri::command]
@@ -6178,6 +6695,80 @@ fn validate_assigned_agent(database: &Database, agent_id: Option<&str>) -> Resul
     Ok(())
 }
 
+fn build_planning_prompt(
+    goal: &str,
+    project: &Project,
+    agent: &Agent,
+    tasks: &[Task],
+    milestones: &[Milestone],
+    epics: &[Epic],
+    decisions: &[ArchitectureDecision],
+) -> String {
+    let existing_tasks = tasks
+        .iter()
+        .map(|task| {
+            format!(
+                "- [{}] {} ({})",
+                task.priority.as_str(),
+                task.title,
+                task.status.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let existing_outcomes = milestones
+        .iter()
+        .map(|milestone| format!("- Milestone: {} ({})", milestone.title, milestone.status))
+        .chain(
+            epics
+                .iter()
+                .map(|epic| format!("- Epic: {} ({})", epic.title, epic.status)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    let agent_instructions = agent
+        .system_prompt
+        .as_deref()
+        .map(|prompt| format!("\n\n# Planner instructions\n{prompt}"))
+        .unwrap_or_default();
+    format!(
+        "You are {agent_name}, acting as {role}. Produce an implementation plan for the project goal below. This is a read-only planning run: inspect repository instructions, source, tests, and architecture documentation, but do not modify files. Avoid duplicating existing work. Make tasks independently reviewable, give every task observable acceptance criteria, and express only real prerequisite dependencies. Accepted architecture decisions are authoritative.\n\n# Project\n{name}\n{description}\nIntegration branch: {branch}\n\n# Goal\n{goal}\n\n# Existing outcomes\n{outcomes}\n\n# Existing work\n{tasks}\n\n# Accepted architecture decisions\n{decisions}{agent_instructions}\n\n# Output contract\nReturn exactly one agent-message line beginning `ORCHESTR_PLAN_JSON: ` followed by one valid compact JSON object. Do not wrap it in Markdown. Use this exact camelCase shape:\n{{\"summary\":\"why this decomposition delivers the goal\",\"milestone\":{{\"title\":\"major outcome\",\"description\":\"optional description\"}},\"epic\":{{\"title\":\"cohesive feature\",\"description\":\"optional description\"}},\"tasks\":[{{\"key\":\"stable-local-key\",\"title\":\"task title\",\"description\":\"implementation context\",\"acceptanceCriteria\":[\"observable result\"],\"implementationNotes\":\"optional constraints\",\"relevantPaths\":[\"repository/relative/path\"],\"requiredCapabilities\":[\"tool or platform capability only when required\"],\"dependencyKeys\":[\"another-local-key\"],\"priority\":\"critical|high|normal|low\"}}]}}\nUse null for milestone or epic when the goal does not justify creating one, and null for optional text. Include between 1 and 100 tasks. Dependency keys must reference tasks in this plan and must be acyclic.",
+        agent_name = agent.name,
+        role = agent.role,
+        name = project.name,
+        description = project.description.as_deref().unwrap_or("No project description recorded."),
+        branch = project.default_branch,
+        outcomes = if existing_outcomes.is_empty() { "No milestones or epics recorded." } else { &existing_outcomes },
+        tasks = if existing_tasks.is_empty() { "No existing tasks recorded." } else { &existing_tasks },
+        decisions = format_architecture_decisions(decisions),
+    )
+}
+
+fn parse_planning_plan(output: &str) -> Option<PlanningPlan> {
+    let messages = output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| {
+            event
+                .get("item")
+                .filter(|item| {
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("agent_message")
+                })
+                .and_then(|item| item.get("text").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+        });
+    for message in messages {
+        let Some(position) = message.find("ORCHESTR_PLAN_JSON:") else {
+            continue;
+        };
+        let json = message[position + "ORCHESTR_PLAN_JSON:".len()..].trim();
+        if let Ok(plan) = serde_json::from_str::<PlanningPlan>(json) {
+            return Some(plan);
+        }
+    }
+    None
+}
+
 fn build_task_prompt(
     task: &Task,
     agent: &Agent,
@@ -6556,6 +7147,10 @@ fn main() {
             get_task_review,
             list_agent_reviews,
             start_agent_review,
+            list_planning_proposals,
+            start_planning_proposal,
+            approve_planning_proposal,
+            reject_planning_proposal,
             approve_task_review,
             request_task_changes,
             list_integration_attempts,
@@ -6609,9 +7204,9 @@ mod tests {
     use super::{
         build_task_prompt, choose_compatible_worker, create_task_record, format_run_log,
         load_flow_state, normalize_workspace_path, parse_agent_review_decision,
-        schedule_ready_tasks_in_database, task_input_question, update_task_record,
-        worker_can_execute, worker_capabilities, worker_mismatch_reason, CreateTaskInput,
-        SchedulerWorker, UpdateTaskInput,
+        parse_planning_plan, schedule_ready_tasks_in_database, task_input_question,
+        update_task_record, worker_can_execute, worker_capabilities, worker_mismatch_reason,
+        CreateTaskInput, SchedulerWorker, UpdateTaskInput,
     };
     use orchestr_db::{
         Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Database,
@@ -6995,6 +7590,24 @@ mod tests {
             ))
         );
         assert!(parse_agent_review_decision("ORCHESTR_REVIEW_DECISION: maybe").is_none());
+    }
+
+    #[test]
+    fn parses_plans_only_from_structured_codex_agent_messages() {
+        let json = r#"{"summary":"Ship OAuth safely","milestone":{"title":"OAuth","description":null},"epic":{"title":"GitHub sign-in","description":null},"tasks":[{"key":"callback","title":"Implement callback","description":null,"acceptanceCriteria":["Valid codes create a session"],"implementationNotes":null,"relevantPaths":["src/auth"],"requiredCapabilities":[],"dependencyKeys":[],"priority":"high"}]}"#;
+        let command_event = serde_json::json!({
+            "type": "item.completed",
+            "item": { "type": "command_execution", "text": format!("ORCHESTR_PLAN_JSON: {json}") }
+        });
+        let agent_event = serde_json::json!({
+            "type": "item.completed",
+            "item": { "type": "agent_message", "text": format!("ORCHESTR_PLAN_JSON: {json}") }
+        });
+        let output = format!("{command_event}\n{agent_event}");
+        let plan = parse_planning_plan(&output).expect("structured plan parses");
+        assert_eq!(plan.summary, "Ship OAuth safely");
+        assert_eq!(plan.tasks[0].key, "callback");
+        assert!(parse_planning_plan(&command_event.to_string()).is_none());
     }
 
     #[test]

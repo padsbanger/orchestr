@@ -1035,7 +1035,9 @@ Orchestr selects only Ready work and dispatches it only to capable workers witho
 
 ---
 
-# M24 — Planning Agent
+# M24 — Planning Agent — Complete
+
+**Completed:** 2026-08-26
 
 ### Goal
 
@@ -1072,6 +1074,15 @@ TASK-106 Add tests
 ### Definition of done
 
 A user can approve an AI-generated implementation plan that becomes structured, dependency-aware project work.
+
+### Delivered
+
+- read-only Codex planning against repository context, existing work, and accepted ADRs
+- durable proposal lifecycle with raw transcript, structured plan, failure, cancellation, and human decision history
+- validated milestone, epic, task, acceptance-criteria, capability, priority, and dependency proposals
+- rejection of missing, self-referential, unknown, or cyclic task dependencies
+- atomic human approval that materializes the full hierarchy or none of it
+- right-hand planning workspace with live state, transcript, proposal inspection, approve, reject, and cancel actions
 
 ---
 
@@ -1328,10 +1339,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M23 state:
+Continue from the completed M24 state:
 
 ```text
-1. Implement human-approved milestone, epic, task, dependency, and priority proposals
+1. Implement persisted, auditable agent comments, requests, blockers, references, and escalations
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

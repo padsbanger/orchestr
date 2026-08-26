@@ -38,10 +38,11 @@ Completed milestones:
 - M21 — Remote Worker Protocol
 - M22 — Worker Management
 - M23 — Capability-Aware Scheduler
+- M24 — Planning Agent
 
 Immediate next milestone:
 
-**M24 — Planning Agent**
+**M25 — Agent Collaboration**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1281,7 +1282,7 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M24 — Planning Agent**
+**M25 — Agent Collaboration**
 
 Do not prioritize:
 
@@ -1292,8 +1293,8 @@ Do not prioritize:
 
 before accepted work can reliably land on a healthy integration branch.
 
-With capability-aware scheduling complete, prioritize human-approved,
-dependency-aware work planning before broader agent collaboration or autonomy.
+With human-approved, dependency-aware planning complete, prioritize durable,
+auditable agent collaboration before broader autonomy.
 
 ---
 

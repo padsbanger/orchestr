@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, BookOpenCheck, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, BookOpenCheck, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -10,6 +10,7 @@ import { QualityGatesPanel } from "../../components/QualityGatesPanel/QualityGat
 import { FlowControlPanel } from "../../components/FlowControlPanel/FlowControlPanel";
 import { ProjectBlockersPanel } from "../../components/ProjectBlockersPanel/ProjectBlockersPanel";
 import { ProjectKnowledgePanel } from "../../components/ProjectKnowledgePanel/ProjectKnowledgePanel";
+import { PlanningPanel } from "../../components/PlanningPanel/PlanningPanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
@@ -24,6 +25,7 @@ import { listEpics, listMilestones, type Epic, type Milestone } from "../../serv
 import { getFlowState, listenToFlowChanges, scheduleReadyTasks, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
 import { answerTaskInput, createProjectBlocker, listProjectBlockers, listTaskInputRequests, requestTaskInput, resolveProjectBlocker, type ProjectBlocker, type TaskInputRequest } from "../../services/interruptions";
 import { createArchitectureDecision, decideArchitectureDecision, listArchitectureDecisions, listRelevantArchitectureDecisions, type ArchitectureDecision, type ArchitectureDecisionInput } from "../../services/knowledge";
+import { approvePlanningProposal, cancelPlanningProposal, listPlanningProposals, listenToPlanningEvents, rejectPlanningProposal, startPlanningProposal, type PlanningProposal } from "../../services/planning";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -40,7 +42,7 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   done: { label: "Done", tone: "green" },
 };
 
-type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers" | "knowledge";
+type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers" | "knowledge" | "planning";
 
 export function BoardPage() {
   const { projectId } = useParams();
@@ -86,6 +88,10 @@ export function BoardPage() {
   const [isKnowledgePreviewLoading, setIsKnowledgePreviewLoading] = useState(false);
   const [isKnowledgeSaving, setIsKnowledgeSaving] = useState(false);
   const [decidingArchitectureId, setDecidingArchitectureId] = useState<string>();
+  const [planningProposals, setPlanningProposals] = useState<PlanningProposal[]>([]);
+  const [isPlanningLoading, setIsPlanningLoading] = useState(false);
+  const [isPlanningStarting, setIsPlanningStarting] = useState(false);
+  const [planningActionId, setPlanningActionId] = useState<string>();
   const [health, setHealth] = useState<ProjectHealth>();
   const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
   const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
@@ -236,6 +242,20 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadPlanningProposals = useCallback(async () => {
+    if (!projectId) return;
+    setIsPlanningLoading(true);
+    try {
+      const loaded = await listPlanningProposals(projectId);
+      setPlanningProposals(loaded);
+      setPlanningActionId((current) => current && loaded.some((proposal) => proposal.id === current && proposal.status === "generating") ? current : undefined);
+    } catch (loadError) {
+      setError(errorMessage(loadError, "Unable to load planning proposals."));
+    } finally {
+      setIsPlanningLoading(false);
+    }
+  }, [projectId]);
+
   const loadBoard = useCallback(async (showLoading = false) => {
     if (!projectId) return;
     if (showLoading) setIsLoading(true);
@@ -252,16 +272,26 @@ export function BoardPage() {
       void loadFlowControl();
       void loadProjectBlockers();
       void loadArchitectureDecisions();
+      void loadPlanningProposals();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       if (showLoading) setIsLoading(false);
     }
-  }, [loadArchitectureDecisions, loadFlowControl, loadIntegrationQueue, loadOutcomes, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
+  }, [loadArchitectureDecisions, loadFlowControl, loadIntegrationQueue, loadOutcomes, loadPlanningProposals, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard(true);
   }, [loadBoard]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listenToPlanningEvents(() => { void loadPlanningProposals(); }).then((stopListening) => {
+      if (disposed) stopListening(); else unlisten = stopListening;
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, [loadPlanningProposals]);
 
   useEffect(() => {
     if (!inspectedTask) {
@@ -638,6 +668,48 @@ export function BoardPage() {
     } finally { setDecidingArchitectureId(undefined); }
   };
 
+  const generatePlanningProposal = async (agentId: string, goal: string) => {
+    if (!projectId) return;
+    setIsPlanningStarting(true); setError(undefined);
+    try {
+      const proposal = await startPlanningProposal(projectId, agentId, goal);
+      setPlanningProposals((current) => [proposal, ...current]);
+    } catch (planningError) {
+      setError(errorMessage(planningError, "Unable to start the planning agent."));
+      await loadPlanningProposals();
+    } finally { setIsPlanningStarting(false); }
+  };
+
+  const approvePlan = async (proposalId: string) => {
+    setPlanningActionId(proposalId); setError(undefined);
+    try {
+      await approvePlanningProposal(proposalId);
+      await Promise.all([loadPlanningProposals(), loadBoard(false), loadOutcomes()]);
+    } catch (planningError) {
+      setError(errorMessage(planningError, "Unable to approve the planning proposal."));
+    } finally { setPlanningActionId(undefined); }
+  };
+
+  const rejectPlan = async (proposalId: string) => {
+    setPlanningActionId(proposalId); setError(undefined);
+    try {
+      await rejectPlanningProposal(proposalId);
+      await loadPlanningProposals();
+    } catch (planningError) {
+      setError(errorMessage(planningError, "Unable to reject the planning proposal."));
+    } finally { setPlanningActionId(undefined); }
+  };
+
+  const cancelPlan = async (proposalId: string) => {
+    setPlanningActionId(proposalId); setError(undefined);
+    try {
+      await cancelPlanningProposal(proposalId);
+    } catch (planningError) {
+      setError(errorMessage(planningError, "Unable to cancel the planning agent."));
+      setPlanningActionId(undefined);
+    }
+  };
+
   const saveFlowLimits = async (limits: FlowLimitInput) => {
     if (!projectId) return;
     setIsFlowSaving(true);
@@ -810,6 +882,7 @@ export function BoardPage() {
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
             <Link className="secondary-button" to={`/projects/${project.id}/progress`}><ChartNoAxesCombined size={15} /> Progress</Link>
+            <button className="secondary-button" type="button" onClick={() => openSidePanel("planning")}><Sparkles size={15} /> Plan <span>{planningProposals.filter((proposal) => proposal.status === "proposed").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{architectureDecisions.filter((decision) => decision.status === "accepted").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("blockers")}><ShieldAlert size={15} /> Blockers <span>{projectBlockers.filter((blocker) => blocker.status === "active").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("flow")}><Gauge size={15} /> Flow <span>{flow?.activeWorkerRuns ?? 0}/{flow?.limits.workerMaxConcurrentRuns ?? 4}</span>{Boolean(flow?.queued) && <span>+{flow?.queued}</span>}</button>
@@ -851,6 +924,7 @@ export function BoardPage() {
       {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} isScheduling={isScheduling} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} onSchedule={() => void scheduleProject()} />}
       {activeSidePanel === "blockers" && <ProjectBlockersPanel blockers={projectBlockers} tasks={tasks} isLoading={isBlockersLoading} isSaving={isBlockerSaving} resolvingId={resolvingBlockerId} onClose={closeSidePanel} onRefresh={() => void loadProjectBlockers()} onCreate={(input) => void addProjectBlocker(input)} onResolve={(blockerId) => void clearProjectBlocker(blockerId)} />}
       {activeSidePanel === "knowledge" && <ProjectKnowledgePanel decisions={architectureDecisions} tasks={tasks} previewTaskId={knowledgePreviewTaskId} previewDecisions={knowledgePreviewDecisions} isLoading={isKnowledgeLoading} isPreviewLoading={isKnowledgePreviewLoading} isSaving={isKnowledgeSaving} decidingId={decidingArchitectureId} onClose={closeSidePanel} onRefresh={() => void loadArchitectureDecisions()} onPreviewTask={setKnowledgePreviewTaskId} onCreate={(input) => void addArchitectureDecision(input)} onDecide={(decisionId, status) => void decideArchitecture(decisionId, status)} />}
+      {activeSidePanel === "planning" && <PlanningPanel proposals={planningProposals} agents={agents.filter((agent) => agent.provider === "codex")} isLoading={isPlanningLoading} isStarting={isPlanningStarting} actionId={planningActionId} onClose={closeSidePanel} onRefresh={() => void loadPlanningProposals()} onStart={(agentId, goal) => void generatePlanningProposal(agentId, goal)} onApprove={(proposalId) => void approvePlan(proposalId)} onReject={(proposalId) => void rejectPlan(proposalId)} onCancel={(proposalId) => void cancelPlan(proposalId)} />}
     </section>
   );
 }
