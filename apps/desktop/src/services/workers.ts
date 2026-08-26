@@ -10,10 +10,25 @@ export type ToolCapability = {
 export type WorkerProfile = {
   id: string;
   name: string;
+  reportedName: string;
   os: string;
   architecture: string;
   status: "online" | "busy";
   tools: ToolCapability[];
+  providers: ProviderStatus[];
+  labels: string[];
+  maintenance: boolean;
+  maxConcurrentRuns: number;
+};
+
+export type ProviderStatus = {
+  id: string;
+  name: string;
+  installed: boolean;
+  version: string | null;
+  authentication: "authenticated" | "unauthenticated" | "unavailable" | "unknown";
+  readiness: "ready" | "needs_authentication" | "unavailable" | "unknown";
+  detail: string;
 };
 
 export type RemoteWorkerWorkspace = {
@@ -25,6 +40,7 @@ export type RemoteWorkerWorkspace = {
 export type RemoteWorker = {
   id: string;
   name: string;
+  reportedName: string;
   endpoint: string;
   tokenEnvironmentVariable: string;
   hasCustomCa: boolean;
@@ -33,8 +49,20 @@ export type RemoteWorker = {
   status: "online" | "offline";
   protocolVersion: number;
   tools: ToolCapability[];
+  providers: ProviderStatus[];
+  labels: string[];
+  maintenance: boolean;
+  maxConcurrentRuns: number;
   workspaces: RemoteWorkerWorkspace[];
   lastSeenAt: string;
+};
+
+export type WorkerManagement = {
+  workerId: string;
+  displayName: string;
+  labels: string[];
+  maintenance: boolean;
+  maxConcurrentRuns: number;
 };
 
 export type WorkerRunEvent = {
@@ -57,6 +85,16 @@ export function getLocalWorkerProfile(): Promise<WorkerProfile> {
 
 export function listRemoteWorkers(): Promise<RemoteWorker[]> {
   return invoke<RemoteWorker[]>("list_remote_workers");
+}
+
+export function updateWorkerManagement(input: {
+  workerId: string;
+  displayName: string;
+  labels: string[];
+  maintenance: boolean;
+  maxConcurrentRuns: number;
+}): Promise<WorkerManagement> {
+  return invoke<WorkerManagement>("update_worker_management", { input });
 }
 
 export function registerRemoteWorker(input: {

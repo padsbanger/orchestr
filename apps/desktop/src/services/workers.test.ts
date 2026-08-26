@@ -4,7 +4,7 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { deleteRemoteWorker, listRemoteWorkers, refreshRemoteWorker, registerRemoteWorker } from "./workers";
+import { deleteRemoteWorker, listRemoteWorkers, refreshRemoteWorker, registerRemoteWorker, updateWorkerManagement } from "./workers";
 
 describe("remote worker service", () => {
   beforeEach(() => invokeMock.mockReset());
@@ -30,5 +30,18 @@ describe("remote worker service", () => {
     expect(invokeMock).toHaveBeenLastCalledWith("refresh_remote_worker", { workerId: "worker-1" });
     await deleteRemoteWorker("worker-1");
     expect(invokeMock).toHaveBeenLastCalledWith("delete_remote_worker", { workerId: "worker-1" });
+  });
+
+  it("updates worker identity, labels, capacity, and maintenance", async () => {
+    invokeMock.mockResolvedValue({ workerId: "worker-1" });
+    const input = {
+      workerId: "worker-1",
+      displayName: "Linux CI",
+      labels: ["linux", "docker"],
+      maintenance: true,
+      maxConcurrentRuns: 2,
+    };
+    await updateWorkerManagement(input);
+    expect(invokeMock).toHaveBeenLastCalledWith("update_worker_management", { input });
   });
 });

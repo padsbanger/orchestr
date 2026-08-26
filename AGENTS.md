@@ -36,10 +36,11 @@ Completed milestones:
 - M19 — Project Blockers + Needs Input
 - M20 — Architecture Decisions / Project Knowledge
 - M21 — Remote Worker Protocol
+- M22 — Worker Management
 
 Immediate next milestone:
 
-**M22 — Worker Management**
+**M23 — Capability-Aware Scheduler**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1279,21 +1280,21 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M22 — Worker Management**
+**M23 — Capability-Aware Scheduler**
 
 Do not prioritize:
 
-- architect agent
-- autonomous planning
-- capability-aware scheduling
+- autonomous project mode
+- planning agents
+- remote Git hosting
 - cloud sync
 - GitHub integration
 
 before accepted work can reliably land on a healthy integration branch.
 
-After the authenticated remote-worker protocol, prioritize clear worker
-inventory, status, capability, and maintenance controls before automatic
-capability-based worker selection.
+With authenticated workers and their management inventory complete, prioritize
+explicit task requirements and capability-aware selection before planning or
+broader autonomy.
 
 ---
 

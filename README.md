@@ -9,6 +9,9 @@ automatic scheduling until their shared cause is resolved. Accepted ADRs now
 provide durable, task-relevant project knowledge to implementers and reviewers.
 Authenticated TLS remote workers can execute project-assigned tasks on another
 machine while their output and lifecycle remain visible in the same timeline.
+The worker inventory exposes editable names and labels, machine capabilities,
+provider readiness, concurrency, connectivity, and scheduler-enforced
+maintenance state for local and remote execution environments.
 
 ## M0 development
 

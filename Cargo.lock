@@ -2427,6 +2427,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-server",
+ "orchestr-provider",
  "orchestr-worker",
  "serde",
  "subtle",

@@ -428,6 +428,28 @@ a shared or mounted path reachable by both machines. Independent workspace
 replication is deliberately deferred rather than hiding file transfer inside
 the process protocol.
 
+## M22 worker management
+
+Worker identity has two layers: the runtime reports a stable machine ID and
+host name, while `worker_management` stores the operator's display name,
+normalized labels, and maintenance state. Global concurrency continues to use
+the existing `worker_flow_limits` table, avoiding a second source of truth.
+The same management overlay applies to the built-in local worker and every
+registered remote worker.
+
+The remote heartbeat now reports generic provider installation,
+authentication, and readiness metadata alongside tool capabilities. Only
+status strings and diagnostic detail cross the protocol; credentials remain
+owned by the worker. Local provider state is inspected through the same
+provider abstraction when the inventory loads.
+
+Maintenance is an execution gate, not a destructive transition. Existing runs
+continue and queued runs remain durable, but database claim operations return
+no new work for that worker. Removing maintenance immediately invokes queue
+dispatch. Project Flow state resolves the project's assigned execution worker,
+so its capacity and maintenance pressure no longer incorrectly reflect the
+local worker when a remote mapping is enabled.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

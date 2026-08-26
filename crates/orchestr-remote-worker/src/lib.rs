@@ -13,9 +13,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use orchestr_provider::{AgentProvider, CodexProvider, ProviderStatus};
 use orchestr_worker::{
-    LocalWorker, RemoteJobEvent, RemoteJobRequest, RemoteJobSnapshot, RemoteWorkerHandshake,
-    WorkerHandle,
+    LocalWorker, ProviderCapability, RemoteJobEvent, RemoteJobRequest, RemoteJobSnapshot,
+    RemoteWorkerHandshake, WorkerHandle,
 };
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
@@ -89,6 +90,7 @@ fn build_state(config: &ServerConfig) -> Result<ServerState, String> {
         profile: RemoteWorkerHandshake {
             protocol_version: PROTOCOL_VERSION,
             profile,
+            providers: Vec::new(),
         },
         jobs: Arc::new(Mutex::new(HashMap::new())),
     })
@@ -116,8 +118,39 @@ async fn worker_handshake(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     match authorize(&headers, &state.token) {
-        Ok(()) => (StatusCode::OK, Json(state.profile)).into_response(),
+        Ok(()) => {
+            let mut handshake = state.profile;
+            handshake.providers = provider_capabilities();
+            (StatusCode::OK, Json(handshake)).into_response()
+        }
         Err(status) => status.into_response(),
+    }
+}
+
+fn provider_capabilities() -> Vec<ProviderCapability> {
+    vec![match CodexProvider.inspect() {
+        Ok(status) => provider_capability(status),
+        Err(error) => ProviderCapability {
+            id: "codex".into(),
+            name: "Codex".into(),
+            installed: false,
+            version: None,
+            authentication: "unknown".into(),
+            readiness: "unknown".into(),
+            detail: error.to_string(),
+        },
+    }]
+}
+
+fn provider_capability(status: ProviderStatus) -> ProviderCapability {
+    ProviderCapability {
+        id: status.id,
+        name: status.name,
+        installed: status.installed,
+        version: status.version,
+        authentication: status.authentication.as_str().into(),
+        readiness: status.readiness.as_str().into(),
+        detail: status.detail,
     }
 }
 
@@ -339,10 +372,11 @@ fn internal_state_error() -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize, build_state, canonical_workspace_roots, snapshot_job, start_job,
-        validate_job_workspace, ServerConfig,
+        authorize, build_state, canonical_workspace_roots, provider_capability, snapshot_job,
+        start_job, validate_job_workspace, ServerConfig,
     };
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue, StatusCode};
+    use orchestr_provider::{AuthenticationStatus, ProviderReadiness, ProviderStatus};
     use orchestr_worker::{ProcessRequest, RemoteJobRequest};
 
     #[test]
@@ -355,6 +389,26 @@ mod tests {
         );
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer correct"));
         assert_eq!(authorize(&headers, "correct"), Ok(()));
+    }
+
+    #[test]
+    fn provider_status_is_reported_without_credentials() {
+        let capability = provider_capability(ProviderStatus {
+            id: "codex".into(),
+            name: "Codex".into(),
+            installed: true,
+            version: Some("1.0".into()),
+            authentication: AuthenticationStatus::Authenticated,
+            readiness: ProviderReadiness::Ready,
+            detail: "Ready".into(),
+        });
+        assert_eq!(capability.authentication, "authenticated");
+        assert_eq!(capability.readiness, "ready");
+        assert_eq!(AuthenticationStatus::Unavailable.as_str(), "unavailable");
+        assert_eq!(
+            ProviderReadiness::NeedsAuthentication.as_str(),
+            "needs_authentication"
+        );
     }
 
     #[test]

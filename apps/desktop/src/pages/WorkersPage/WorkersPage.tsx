@@ -1,4 +1,4 @@
-import { Activity, Cpu, Play, Plus, RefreshCw, Server, Square, Terminal, Trash2 } from "lucide-react";
+import { Activity, Cpu, Play, Plus, RefreshCw, Save, Server, Settings2, ShieldCheck, Square, Terminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
 import { errorMessage, runConfirmedDestructiveAction } from "../../services/confirmations";
 import { listProjects, type Project } from "../../services/projects";
@@ -11,6 +11,8 @@ import {
   refreshRemoteWorker,
   registerRemoteWorker,
   runLocalDiagnostic,
+  updateWorkerManagement,
+  type ProviderStatus,
   type RemoteWorker,
   type WorkerProfile,
   type WorkerRunEvent,
@@ -29,6 +31,15 @@ type RegistrationForm = {
   caCertificatePath: string;
   projectId: string;
   workspacePath: string;
+};
+
+type ManagementTarget = {
+  id: string;
+  name: string;
+  reportedName: string;
+  labels: string[];
+  maintenance: boolean;
+  maxConcurrentRuns: number;
 };
 
 const emptyRegistration: RegistrationForm = {
@@ -143,6 +154,23 @@ export function WorkersPage() {
     }
   };
 
+  const saveManagement = async (input: {
+    workerId: string;
+    displayName: string;
+    labels: string[];
+    maintenance: boolean;
+    maxConcurrentRuns: number;
+  }) => {
+    setError(undefined);
+    try {
+      await updateWorkerManagement(input);
+      await loadWorkers();
+    } catch (managementError) {
+      setError(errorMessage(managementError, "Unable to update worker settings."));
+      throw managementError;
+    }
+  };
+
   const startDiagnostic = async () => {
     setError(undefined);
     try {
@@ -185,13 +213,15 @@ export function WorkersPage() {
       {isLoading && !worker ? <div className="empty-state"><span className="empty-index">SYNC</span><h2>Inspecting workers</h2></div> : worker && <>
         <section className="worker-card" aria-label="Local worker">
           <div className="worker-icon"><Cpu size={20} /></div>
-          <div className="worker-title"><h2>{worker.name}</h2><p>Local · {worker.os} / {worker.architecture}</p></div>
-          <span className={worker.status === "busy" ? "worker-status busy" : "worker-status online"}><i /> {worker.status === "busy" ? "Busy" : "Ready"}</span>
+          <div className="worker-title"><h2>{worker.name}</h2><p>Local / {worker.reportedName} / {worker.os} / {worker.architecture}</p><WorkerLabels labels={worker.labels} /></div>
+          <span className={worker.maintenance ? "worker-status maintenance" : worker.status === "busy" ? "worker-status busy" : "worker-status online"}><i /> {worker.maintenance ? "Maintenance" : worker.status === "busy" ? "Busy" : "Ready"}</span>
         </section>
 
         <section className="worker-section">
           <header><div><Activity size={15} /><h2>Local capabilities</h2></div><span>{worker.tools.filter((tool) => tool.installed).length} / {worker.tools.length} installed</span></header>
+          <ProviderGrid providers={worker.providers} />
           <ToolGrid tools={worker.tools} />
+          <WorkerManagementForm worker={worker} onSave={saveManagement} />
         </section>
       </>}
 
@@ -200,18 +230,18 @@ export function WorkersPage() {
         <form className="remote-worker-form" onSubmit={(event) => void submitRegistration(event)}>
           <label>HTTPS endpoint<input required type="url" value={registration.endpoint} onChange={(event) => setRegistration((current) => ({ ...current, endpoint: event.target.value }))} placeholder="https://worker.example:9443" /></label>
           <label>Token environment variable<input required value={registration.tokenEnvironmentVariable} onChange={(event) => setRegistration((current) => ({ ...current, tokenEnvironmentVariable: event.target.value }))} /></label>
-          <label>Custom CA certificate path <span>optional</span><input value={registration.caCertificatePath} onChange={(event) => setRegistration((current) => ({ ...current, caCertificatePath: event.target.value }))} placeholder="C:\certs\worker-ca.pem" /></label>
+          <label>Custom CA certificate path <span>optional</span><input value={registration.caCertificatePath} onChange={(event) => setRegistration((current) => ({ ...current, caCertificatePath: event.target.value }))} placeholder="C:\\certs\\worker-ca.pem" /></label>
           <label>Project<select required value={registration.projectId} onChange={(event) => setRegistration((current) => ({ ...current, projectId: event.target.value }))}><option value="">Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
-          <label className="workspace-field">Remote workspace path<input required value={registration.workspacePath} onChange={(event) => setRegistration((current) => ({ ...current, workspacePath: event.target.value }))} placeholder="\\worker\projects\my-project" /><small>The path must be inside the worker's allowed roots and reachable by this desktop for Git review and integration.</small></label>
-          <button className="primary-button register-worker-button" type="submit" disabled={isRegistering || projects.length === 0}><Plus size={15} /> {isRegistering ? "Connecting…" : "Register worker"}</button>
+          <label className="workspace-field">Remote workspace path<input required value={registration.workspacePath} onChange={(event) => setRegistration((current) => ({ ...current, workspacePath: event.target.value }))} placeholder="\\\\worker\\projects\\my-project" /><small>The path must be inside the worker's allowed roots and reachable by this desktop for Git review and integration.</small></label>
+          <button className="primary-button register-worker-button" type="submit" disabled={isRegistering || projects.length === 0}><Plus size={15} /> {isRegistering ? "Connecting..." : "Register worker"}</button>
         </form>
 
         {remoteWorkers.length === 0 ? <div className="remote-empty">No remote workers registered.</div> : <div className="remote-worker-list">
           {remoteWorkers.map((remoteWorker) => <article className="remote-worker-card" key={remoteWorker.id}>
             <div className="remote-worker-heading">
               <div className="worker-icon remote"><Server size={19} /></div>
-              <div className="worker-title"><h2>{remoteWorker.name}</h2><p>{remoteWorker.endpoint} · protocol v{remoteWorker.protocolVersion}</p></div>
-              <span className={`worker-status ${remoteWorker.status}`}><i /> {remoteWorker.status}</span>
+              <div className="worker-title"><h2>{remoteWorker.name}</h2><p>{remoteWorker.reportedName} / {remoteWorker.endpoint} / protocol v{remoteWorker.protocolVersion}</p><WorkerLabels labels={remoteWorker.labels} /></div>
+              <span className={`worker-status ${remoteWorker.maintenance ? "maintenance" : remoteWorker.status}`}><i /> {remoteWorker.maintenance ? "maintenance" : remoteWorker.status}</span>
               <div className="remote-worker-actions">
                 <button className="icon-button" type="button" onClick={() => void heartbeatWorker(remoteWorker.id)} disabled={refreshingId === remoteWorker.id} aria-label={`Refresh ${remoteWorker.name}`}><RefreshCw size={15} className={refreshingId === remoteWorker.id ? "spin" : undefined} /></button>
                 <button className="icon-button danger" type="button" onClick={() => void removeWorker(remoteWorker)} aria-label={`Remove ${remoteWorker.name}`}><Trash2 size={15} /></button>
@@ -219,7 +249,9 @@ export function WorkersPage() {
             </div>
             <div className="remote-worker-meta"><span>{remoteWorker.os} / {remoteWorker.architecture}</span><span>Token: ${remoteWorker.tokenEnvironmentVariable}</span><span>Last seen: {new Date(remoteWorker.lastSeenAt).toLocaleString()}</span></div>
             <div className="remote-workspaces">{remoteWorker.workspaces.map((workspace) => <span key={workspace.projectId}>{projects.find((project) => project.id === workspace.projectId)?.name ?? workspace.projectId}<code>{workspace.workspacePath}</code></span>)}</div>
+            <ProviderGrid providers={remoteWorker.providers} />
             <ToolGrid tools={remoteWorker.tools} />
+            <WorkerManagementForm worker={remoteWorker} onSave={saveManagement} />
           </article>)}
         </div>}
       </section>
@@ -235,6 +267,49 @@ export function WorkersPage() {
 
 function ToolGrid({ tools }: { tools: WorkerProfile["tools"] }) {
   return <div className="tool-grid">{tools.map((tool) => <div className={tool.installed ? "tool-capability installed" : "tool-capability"} key={tool.name}><strong>{tool.name}</strong><span>{tool.installed ? tool.version ?? "Installed" : "Not installed"}</span></div>)}</div>;
+}
+
+function ProviderGrid({ providers }: { providers: ProviderStatus[] }) {
+  return <div className="provider-grid">{providers.map((provider) => <div className={`provider-capability ${provider.readiness}`} key={provider.id}><ShieldCheck size={15} /><div><strong>{provider.name}</strong><span>{provider.authentication.replace("_", " ")} / {provider.readiness.replace("_", " ")}</span><small>{provider.detail}</small></div></div>)}</div>;
+}
+
+function WorkerLabels({ labels }: { labels: string[] }) {
+  return labels.length > 0 ? <span className="worker-labels">{labels.map((label) => <i key={label}>{label}</i>)}</span> : null;
+}
+
+function WorkerManagementForm({ worker, onSave }: { worker: ManagementTarget; onSave: (input: { workerId: string; displayName: string; labels: string[]; maintenance: boolean; maxConcurrentRuns: number }) => Promise<void> }) {
+  const [displayName, setDisplayName] = useState(worker.name);
+  const [labels, setLabels] = useState(worker.labels.join(", "));
+  const [maintenance, setMaintenance] = useState(worker.maintenance);
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(worker.maxConcurrentRuns);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDisplayName(worker.name);
+    setLabels(worker.labels.join(", "));
+    setMaintenance(worker.maintenance);
+    setMaxConcurrentRuns(worker.maxConcurrentRuns);
+  }, [worker.name, worker.labels, worker.maintenance, worker.maxConcurrentRuns]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await onSave({
+        workerId: worker.id,
+        displayName,
+        labels: labels.split(",").map((label) => label.trim()).filter(Boolean),
+        maintenance,
+        maxConcurrentRuns,
+      });
+    } catch {
+      // The page owns the visible error state.
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <details className="worker-management"><summary><Settings2 size={14} /> Manage worker</summary><form onSubmit={(event) => void submit(event)}><label>Display name<input required value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label><label>Labels<input value={labels} onChange={(event) => setLabels(event.target.value)} placeholder="linux, docker, gpu" /></label><label>Concurrent runs<input type="number" min={1} max={64} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(Number(event.target.value))} /></label><label className="maintenance-toggle"><input type="checkbox" checked={maintenance} onChange={(event) => setMaintenance(event.target.checked)} /><span>Maintenance mode</span><small>Current runs continue; new queued work will not start.</small></label><button className="secondary-button" type="submit" disabled={saving}><Save size={14} /> {saving ? "Saving..." : "Save settings"}</button></form></details>;
 }
 
 function applyRunEvent(event: WorkerRunEvent, setRuns: Dispatch<SetStateAction<Record<string, RunView>>>) {

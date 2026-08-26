@@ -13,6 +13,7 @@
 .worker-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .worker-status.busy, .run-status.running { border-color: #685337; color: #dca65c; }
 .worker-status.offline { border-color: #5a4542; color: #c47f72; }
+.worker-status.maintenance { border-color: #6c5e39; color: #e0b95f; }
 .run-status.completed { border-color: #3c4b42; color: #73bd88; }
 .run-status.failed { border-color: #764638; color: #e18572; }
 .run-status.cancelled { border-color: #4b5155; color: #aeb8bd; }
@@ -50,6 +51,23 @@
 .remote-workspaces { display: grid; gap: 6px; }
 .remote-workspaces > span { display: grid; grid-template-columns: minmax(120px, .3fr) minmax(0, 1fr); gap: 12px; color: #aeb7bc; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
 .remote-workspaces code { overflow: hidden; color: #8dbed7; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.worker-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.worker-labels i { padding: 2px 5px; border: 1px solid #39454c; color: #99aab3; font-style: normal; font-size: 9px; text-transform: lowercase; }
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.provider-capability { display: flex; gap: 10px; padding: 11px; border: 1px solid #493e3b; background: #1e1918; color: #c48476; }
+.provider-capability.ready { border-color: #364c3d; background: #171d19; color: #74bd88; }
+.provider-capability > div { display: grid; min-width: 0; gap: 3px; }
+.provider-capability strong { color: #d4dadd; font-size: 12px; }
+.provider-capability span, .provider-capability small { overflow: hidden; color: #879198; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.worker-management { border: 1px solid #30383d; background: #131719; }
+.worker-management summary { display: flex; align-items: center; gap: 7px; padding: 10px 12px; color: #aab4ba; cursor: pointer; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.worker-management form { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(180px, 1fr) 130px; gap: 10px; padding: 12px; border-top: 1px solid #30383d; }
+.worker-management label { display: grid; gap: 6px; color: #879198; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-transform: uppercase; }
+.worker-management input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid #374047; background: #101315; color: #d5dbde; font: 12px "SFMono-Regular", Consolas, monospace; }
+.worker-management .maintenance-toggle { grid-column: 1 / -1; grid-template-columns: auto 1fr; align-items: center; text-transform: none; }
+.maintenance-toggle input { width: 16px; height: 16px; padding: 0; }
+.maintenance-toggle small { grid-column: 2; color: #6f7a80; }
+.worker-management .secondary-button { justify-self: start; }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -62,4 +80,5 @@
   .remote-worker-heading .worker-status { grid-column: 1 / 3; }
   .remote-worker-actions { grid-column: 3; grid-row: 1 / 3; }
   .remote-workspaces > span { grid-template-columns: 1fr; gap: 4px; }
+  .worker-management form { grid-template-columns: 1fr; }
 }

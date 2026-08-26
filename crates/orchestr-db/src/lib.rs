@@ -42,6 +42,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0018_architecture_decisions.sql"),
     ),
     (19, include_str!("../migrations/0019_remote_workers.sql")),
+    (20, include_str!("../migrations/0020_worker_management.sql")),
 ];
 
 pub struct Database {
@@ -560,6 +561,34 @@ pub struct WorkerToolCapability {
     pub version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WorkerProviderStatus {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub authentication: String,
+    pub readiness: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerManagement {
+    pub worker_id: String,
+    pub display_name: String,
+    pub labels: Vec<String>,
+    pub maintenance: bool,
+    pub max_concurrent_runs: i64,
+}
+
+pub struct WorkerManagementUpdate {
+    pub worker_id: String,
+    pub display_name: String,
+    pub labels: Vec<String>,
+    pub maintenance: bool,
+    pub max_concurrent_runs: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteWorkerWorkspace {
     pub project_id: String,
@@ -579,6 +608,8 @@ pub struct RemoteWorker {
     pub status: String,
     pub protocol_version: i64,
     pub tools: Vec<WorkerToolCapability>,
+    pub providers: Vec<WorkerProviderStatus>,
+    pub management: WorkerManagement,
     pub workspaces: Vec<RemoteWorkerWorkspace>,
     pub last_seen_at: String,
     pub created_at: String,
@@ -595,6 +626,7 @@ pub struct NewRemoteWorker {
     pub architecture: String,
     pub protocol_version: i64,
     pub tools: Vec<WorkerToolCapability>,
+    pub providers: Vec<WorkerProviderStatus>,
     pub project_id: String,
     pub workspace_path: String,
 }
@@ -1519,7 +1551,7 @@ impl Database {
     pub fn list_remote_workers(&self) -> Result<Vec<RemoteWorker>> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, endpoint, token_environment_variable, ca_certificate_pem,
-                    os, architecture, status, protocol_version, tools, last_seen_at,
+                    os, architecture, status, protocol_version, tools, providers, last_seen_at,
                     created_at, updated_at
              FROM remote_workers ORDER BY name ASC, id ASC",
         )?;
@@ -1537,7 +1569,7 @@ impl Database {
             .connection
             .query_row(
                 "SELECT id, name, endpoint, token_environment_variable, ca_certificate_pem,
-                        os, architecture, status, protocol_version, tools, last_seen_at,
+                        os, architecture, status, protocol_version, tools, providers, last_seen_at,
                         created_at, updated_at
                  FROM remote_workers WHERE id = ?1",
                 [worker_id],
@@ -1568,20 +1600,22 @@ impl Database {
     pub fn register_remote_worker(&mut self, worker: NewRemoteWorker) -> Result<RemoteWorker> {
         validate_new_remote_worker(&self.connection, &worker)?;
         let tools = serde_json::to_string(&worker.tools).map_err(json_conversion_error)?;
+        let providers = serde_json::to_string(&worker.providers).map_err(json_conversion_error)?;
         let worker_id = worker.id.clone();
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO remote_workers
                 (id, name, endpoint, token_environment_variable, ca_certificate_pem,
-                 os, architecture, status, protocol_version, tools)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'online', ?8, ?9)
+                 os, architecture, status, protocol_version, tools, providers)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'online', ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name, endpoint = excluded.endpoint,
                  token_environment_variable = excluded.token_environment_variable,
                  ca_certificate_pem = excluded.ca_certificate_pem,
                  os = excluded.os, architecture = excluded.architecture,
                  status = 'online', protocol_version = excluded.protocol_version,
-                 tools = excluded.tools, last_seen_at = CURRENT_TIMESTAMP,
+                 tools = excluded.tools, providers = excluded.providers,
+                 last_seen_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP",
             params![
                 worker.id,
@@ -1593,7 +1627,13 @@ impl Database {
                 worker.architecture,
                 worker.protocol_version,
                 tools,
+                providers,
             ],
+        )?;
+        transaction.execute(
+            "INSERT INTO worker_management (worker_id, display_name)
+             VALUES (?1, ?2) ON CONFLICT(worker_id) DO NOTHING",
+            params![worker_id, worker.name],
         )?;
         transaction.execute(
             "UPDATE remote_worker_projects SET enabled = 0, updated_at = CURRENT_TIMESTAMP
@@ -1622,10 +1662,57 @@ impl Database {
     }
 
     pub fn delete_remote_worker(&mut self, worker_id: &str) -> Result<bool> {
-        Ok(self
-            .connection
-            .execute("DELETE FROM remote_workers WHERE id = ?1", [worker_id])?
-            > 0)
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM worker_management WHERE worker_id = ?1",
+            [worker_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM worker_flow_limits WHERE worker_id = ?1",
+            [worker_id],
+        )?;
+        let deleted =
+            transaction.execute("DELETE FROM remote_workers WHERE id = ?1", [worker_id])?;
+        transaction.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn worker_management(
+        &self,
+        worker_id: &str,
+        default_display_name: &str,
+    ) -> Result<WorkerManagement> {
+        worker_management_for_connection(&self.connection, worker_id, default_display_name)
+    }
+
+    pub fn update_worker_management(
+        &mut self,
+        update: WorkerManagementUpdate,
+    ) -> Result<WorkerManagement> {
+        validate_worker_management_update(&update)?;
+        let labels = encode_string_list(&normalized_labels(&update.labels))?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO worker_management (worker_id, display_name, labels, maintenance)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(worker_id) DO UPDATE SET display_name = excluded.display_name,
+                 labels = excluded.labels, maintenance = excluded.maintenance,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![
+                update.worker_id,
+                update.display_name.trim(),
+                labels,
+                update.maintenance
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO worker_flow_limits (worker_id, max_concurrent_runs) VALUES (?1, ?2)
+             ON CONFLICT(worker_id) DO UPDATE SET max_concurrent_runs = excluded.max_concurrent_runs,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![update.worker_id, update.max_concurrent_runs],
+        )?;
+        transaction.commit()?;
+        self.worker_management(&update.worker_id, update.display_name.trim())
     }
 
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
@@ -2107,6 +2194,9 @@ impl Database {
 
     pub fn claim_next_run(&mut self, worker_id: &str) -> Result<Option<(Run, Task)>> {
         let transaction = self.connection.transaction()?;
+        if worker_in_maintenance(&transaction, worker_id)? {
+            return Ok(None);
+        }
         let worker_limit = worker_limit_in_transaction(&transaction, worker_id)?;
         let active_worker_runs: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM runs WHERE worker_id = ?1 AND status = 'running'",
@@ -3372,6 +3462,7 @@ impl Database {
                 })
             })?
             .collect::<Result<Vec<_>>>()?;
+        worker.management = self.worker_management(&worker.id, &worker.name)?;
         Ok(worker)
     }
 
@@ -3670,9 +3761,14 @@ fn remote_worker_from_row(row: &rusqlite::Row<'_>) -> Result<RemoteWorker> {
     let tools = serde_json::from_str(&row.get::<_, String>(9)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, error.into())
     })?;
+    let providers = serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
+    })?;
+    let id = row.get::<_, String>(0)?;
+    let name = row.get::<_, String>(1)?;
     Ok(RemoteWorker {
-        id: row.get(0)?,
-        name: row.get(1)?,
+        id: id.clone(),
+        name: name.clone(),
         endpoint: row.get(2)?,
         token_environment_variable: row.get(3)?,
         ca_certificate_pem: row.get(4)?,
@@ -3681,10 +3777,18 @@ fn remote_worker_from_row(row: &rusqlite::Row<'_>) -> Result<RemoteWorker> {
         status: row.get(7)?,
         protocol_version: row.get(8)?,
         tools,
+        providers,
+        management: WorkerManagement {
+            worker_id: id,
+            display_name: name,
+            labels: Vec::new(),
+            maintenance: false,
+            max_concurrent_runs: 4,
+        },
         workspaces: Vec::new(),
-        last_seen_at: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        last_seen_at: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -3937,15 +4041,78 @@ fn flow_limits_for_connection(
     )
 }
 
-fn worker_limit_in_transaction(
-    transaction: &rusqlite::Transaction<'_>,
+fn worker_management_for_connection(
+    connection: &Connection,
     worker_id: &str,
-) -> Result<i64> {
-    transaction.query_row(
+    default_display_name: &str,
+) -> Result<WorkerManagement> {
+    let stored = connection
+        .query_row(
+            "SELECT display_name, labels, maintenance FROM worker_management WHERE worker_id = ?1",
+            [worker_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let max_concurrent_runs = worker_limit_for_connection(connection, worker_id)?;
+    let (display_name, labels, maintenance) =
+        stored.unwrap_or_else(|| (default_display_name.to_owned(), "[]".to_owned(), false));
+    Ok(WorkerManagement {
+        worker_id: worker_id.to_owned(),
+        display_name,
+        labels: decode_string_list(labels)?,
+        maintenance,
+        max_concurrent_runs,
+    })
+}
+
+fn validate_worker_management_update(update: &WorkerManagementUpdate) -> Result<()> {
+    if update.worker_id.trim().is_empty()
+        || update.display_name.trim().is_empty()
+        || !(1..=64).contains(&update.max_concurrent_runs)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn normalized_labels(labels: &[String]) -> Vec<String> {
+    let mut labels = labels
+        .iter()
+        .map(|label| label.trim().to_lowercase())
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn worker_limit_for_connection(connection: &Connection, worker_id: &str) -> Result<i64> {
+    connection.query_row(
         "SELECT COALESCE((SELECT max_concurrent_runs FROM worker_flow_limits WHERE worker_id = ?1), 4)",
         [worker_id],
         |row| row.get(0),
     )
+}
+
+fn worker_in_maintenance(connection: &Connection, worker_id: &str) -> Result<bool> {
+    connection.query_row(
+        "SELECT COALESCE((SELECT maintenance FROM worker_management WHERE worker_id = ?1), 0)",
+        [worker_id],
+        |row| row.get(0),
+    )
+}
+
+fn worker_limit_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    worker_id: &str,
+) -> Result<i64> {
+    worker_limit_for_connection(transaction, worker_id)
 }
 
 fn project_flow_counts(connection: &Connection, project_id: &str) -> Result<(i64, i64, i64, i64)> {
@@ -4320,9 +4487,11 @@ fn flow_state_for_connection(
         |row| row.get(0),
     )?;
     let (in_progress, review, approved, integrating) = project_flow_counts(connection, project_id)?;
-    let blocked_reason = if active_worker_runs >= limits.worker_max_concurrent_runs {
+    let blocked_reason = if worker_in_maintenance(connection, worker_id)? {
+        Some("The execution worker is in maintenance; automatic starts are paused.".into())
+    } else if active_worker_runs >= limits.worker_max_concurrent_runs {
         Some(format!(
-            "The local worker is at capacity ({active_worker_runs}/{}).",
+            "The execution worker is at capacity ({active_worker_runs}/{}).",
             limits.worker_max_concurrent_runs
         ))
     } else {
@@ -4492,7 +4661,7 @@ mod tests {
         NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewTask,
         NewTaskInputRequest, NewValidationCommand, ProjectDeletion, ProjectHealthStatus,
         RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage,
-        ValidationStatus, WorkerToolCapability,
+        ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
     };
     use std::{
         fs,
@@ -6161,12 +6330,22 @@ mod tests {
                     installed: true,
                     version: Some("git version 2.50".into()),
                 }],
+                providers: vec![WorkerProviderStatus {
+                    id: "codex".into(),
+                    name: "Codex".into(),
+                    installed: true,
+                    version: Some("codex-cli 1".into()),
+                    authentication: "authenticated".into(),
+                    readiness: "ready".into(),
+                    detail: "Ready".into(),
+                }],
                 project_id: "project-1".into(),
                 workspace_path: "/srv/orchestr/project".into(),
             })
             .expect("worker registers");
         assert_eq!(worker.status, "online");
         assert_eq!(worker.tools[0].name, "git");
+        assert_eq!(worker.providers[0].readiness, "ready");
         assert_eq!(worker.workspaces[0].project_id, "project-1");
         assert_eq!(
             database
@@ -6176,6 +6355,96 @@ mod tests {
                 .id,
             "worker-linux"
         );
+        let management = database
+            .update_worker_management(WorkerManagementUpdate {
+                worker_id: "worker-linux".into(),
+                display_name: "Linux CI".into(),
+                labels: vec![" Docker ".into(), "linux".into(), "docker".into()],
+                maintenance: true,
+                max_concurrent_runs: 2,
+            })
+            .expect("worker management saves");
+        assert_eq!(management.display_name, "Linux CI");
+        assert_eq!(management.labels, ["docker", "linux"]);
+        assert!(management.maintenance);
+        assert_eq!(management.max_concurrent_runs, 2);
+        assert_eq!(
+            database
+                .flow_state("project-1", "worker-linux")
+                .expect("managed flow state loads")
+                .blocked_reason
+                .as_deref(),
+            Some("The execution worker is in maintenance; automatic starts are paused.")
+        );
+        database
+            .create_agent(NewAgent {
+                id: "agent-remote".into(),
+                name: "Remote agent".into(),
+                provider: "codex".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+            })
+            .expect("agent saves");
+        database
+            .create_task(NewTask {
+                id: "task-remote".into(),
+                project_id: "project-1".into(),
+                title: "Run remotely".into(),
+                description: None,
+                acceptance_criteria: vec!["Remote result exists".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("agent-remote".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("task saves");
+        database
+            .move_task("task-remote", TaskStatus::Ready, 0)
+            .expect("task becomes ready");
+        database
+            .enqueue_run(NewRun {
+                id: "run-remote".into(),
+                task_id: "task-remote".into(),
+                agent_id: "agent-remote".into(),
+                worker_id: "worker-linux".into(),
+            })
+            .expect("remote run queues");
+        assert!(database
+            .claim_next_run("worker-linux")
+            .expect("maintenance is checked")
+            .is_none());
+        database
+            .update_worker_management(WorkerManagementUpdate {
+                worker_id: "worker-linux".into(),
+                display_name: "Linux CI".into(),
+                labels: vec!["docker".into(), "linux".into()],
+                maintenance: false,
+                max_concurrent_runs: 2,
+            })
+            .expect("maintenance ends");
+        assert_eq!(
+            database
+                .claim_next_run("worker-linux")
+                .expect("worker claims")
+                .expect("run is available")
+                .0
+                .id,
+            "run-remote"
+        );
+        database
+            .finish_run(
+                "run-remote",
+                RunStatus::Failed,
+                Some(1),
+                Some("test complete"),
+            )
+            .expect("run finishes");
         database
             .mark_remote_worker_offline("worker-linux")
             .expect("worker goes offline");
@@ -6190,9 +6459,12 @@ mod tests {
         drop(database);
 
         let mut reopened = Database::open(&database_path).expect("database reopens");
+        let persisted_workers = reopened.list_remote_workers().expect("workers load");
+        assert_eq!(persisted_workers.len(), 1);
+        assert_eq!(persisted_workers[0].management.display_name, "Linux CI");
         assert_eq!(
-            reopened.list_remote_workers().expect("workers load").len(),
-            1
+            persisted_workers[0].providers[0].authentication,
+            "authenticated"
         );
         assert_eq!(
             reopened

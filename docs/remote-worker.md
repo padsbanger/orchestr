@@ -40,8 +40,10 @@ Open **Workers**, then enter:
 
 Orchestr stores only the environment-variable name and public CA certificate.
 It authenticates a heartbeat, verifies protocol version 1, and records the
-reported OS, architecture, and installed tools. A project with an enabled
-remote registration sends new Codex task runs to that worker.
+reported OS, architecture, installed tools, and Codex authentication/readiness.
+A project with an enabled remote registration sends new Codex task runs to that
+worker. The Workers page also manages display names, labels, concurrency, and
+maintenance without changing the daemon's stable machine identity.
 
 ## Workspace requirement
 

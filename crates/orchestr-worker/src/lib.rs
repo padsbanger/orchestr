@@ -111,6 +111,20 @@ pub struct RemoteJobSnapshot {
 pub struct RemoteWorkerHandshake {
     pub protocol_version: u32,
     pub profile: WorkerProfile,
+    #[serde(default)]
+    pub providers: Vec<ProviderCapability>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapability {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub authentication: String,
+    pub readiness: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone)]

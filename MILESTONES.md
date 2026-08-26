@@ -951,7 +951,9 @@ A task can execute on another computer while state remains visible in Orchestr.
 
 ---
 
-# M22 — Worker Management
+# M22 — Worker Management — Complete
+
+**Completed:** 2026-08-26
 
 ### Goal
 
@@ -1316,10 +1318,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M21 state:
+Continue from the completed M22 state:
 
 ```text
-1. Implement heterogeneous worker management
+1. Implement capability-aware worker selection
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

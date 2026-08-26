@@ -16,7 +16,8 @@ use orchestr_db::{
     ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker, RevertAttempt, RevertStatus,
     Run, RunEvent, RunOutput, RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus,
     TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus,
-    WorkerToolCapability, Workspace,
+    WorkerManagement, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
+    Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -24,7 +25,7 @@ use orchestr_provider::{
 };
 use orchestr_worker::{
     LocalWorker, OutputStream, ProcessRequest, RemoteJobRequest, RemoteWorkerClient,
-    RemoteWorkerConfig, WorkerHandle, WorkerProfile, WorkerRun,
+    RemoteWorkerConfig, WorkerHandle, WorkerRun,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -285,6 +286,17 @@ struct RegisterRemoteWorkerInput {
     workspace_path: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateWorkerManagementInput {
+    worker_id: String,
+    display_name: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    maintenance: bool,
+    max_concurrent_runs: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskInputRequestResponse {
@@ -352,6 +364,7 @@ struct RemoteWorkerWorkspaceResponse {
 struct RemoteWorkerResponse {
     id: String,
     name: String,
+    reported_name: String,
     endpoint: String,
     token_environment_variable: String,
     has_custom_ca: bool,
@@ -360,8 +373,38 @@ struct RemoteWorkerResponse {
     status: String,
     protocol_version: i64,
     tools: Vec<WorkerToolCapability>,
+    providers: Vec<WorkerProviderStatus>,
+    labels: Vec<String>,
+    maintenance: bool,
+    max_concurrent_runs: i64,
     workspaces: Vec<RemoteWorkerWorkspaceResponse>,
     last_seen_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalWorkerResponse {
+    id: String,
+    name: String,
+    reported_name: String,
+    os: String,
+    architecture: String,
+    status: String,
+    tools: Vec<orchestr_worker::ToolCapability>,
+    providers: Vec<WorkerProviderStatus>,
+    labels: Vec<String>,
+    maintenance: bool,
+    max_concurrent_runs: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerManagementResponse {
+    worker_id: String,
+    display_name: String,
+    labels: Vec<String>,
+    maintenance: bool,
+    max_concurrent_runs: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -789,9 +832,11 @@ impl From<ArchitectureDecision> for ArchitectureDecisionResponse {
 
 impl From<RemoteWorker> for RemoteWorkerResponse {
     fn from(worker: RemoteWorker) -> Self {
+        let management = worker.management;
         Self {
             id: worker.id,
-            name: worker.name,
+            name: management.display_name,
+            reported_name: worker.name,
             endpoint: worker.endpoint,
             token_environment_variable: worker.token_environment_variable,
             has_custom_ca: worker.ca_certificate_pem.is_some(),
@@ -800,6 +845,10 @@ impl From<RemoteWorker> for RemoteWorkerResponse {
             status: worker.status,
             protocol_version: worker.protocol_version,
             tools: worker.tools,
+            providers: worker.providers,
+            labels: management.labels,
+            maintenance: management.maintenance,
+            max_concurrent_runs: management.max_concurrent_runs,
             workspaces: worker
                 .workspaces
                 .into_iter()
@@ -810,6 +859,18 @@ impl From<RemoteWorker> for RemoteWorkerResponse {
                 })
                 .collect(),
             last_seen_at: worker.last_seen_at,
+        }
+    }
+}
+
+impl From<WorkerManagement> for WorkerManagementResponse {
+    fn from(worker: WorkerManagement) -> Self {
+        Self {
+            worker_id: worker.worker_id,
+            display_name: worker.display_name,
+            labels: worker.labels,
+            maintenance: worker.maintenance,
+            max_concurrent_runs: worker.max_concurrent_runs,
         }
     }
 }
@@ -1198,7 +1259,11 @@ fn get_repository_file_preview(
 }
 
 #[tauri::command]
-fn get_local_worker_profile(state: State<'_, AppState>) -> Result<WorkerProfile, String> {
+fn get_local_worker_profile(state: State<'_, AppState>) -> Result<LocalWorkerResponse, String> {
+    local_worker_profile(&state).and_then(|profile| managed_local_worker(&state, profile))
+}
+
+fn local_worker_profile(state: &AppState) -> Result<orchestr_worker::WorkerProfile, String> {
     let mut profile = LocalWorker::profile();
     if !state
         .local_worker_runs
@@ -1209,6 +1274,111 @@ fn get_local_worker_profile(state: State<'_, AppState>) -> Result<WorkerProfile,
         profile.status = "busy".into();
     }
     Ok(profile)
+}
+
+fn managed_local_worker(
+    state: &AppState,
+    profile: orchestr_worker::WorkerProfile,
+) -> Result<LocalWorkerResponse, String> {
+    let management = state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?
+        .worker_management(LOCAL_WORKER_ID, &profile.name)
+        .map_err(|error| format!("Unable to load local worker settings: {error}"))?;
+    Ok(LocalWorkerResponse {
+        id: profile.id,
+        name: management.display_name,
+        reported_name: profile.name,
+        os: profile.os,
+        architecture: profile.architecture,
+        status: profile.status,
+        tools: profile.tools,
+        providers: local_provider_statuses(),
+        labels: management.labels,
+        maintenance: management.maintenance,
+        max_concurrent_runs: management.max_concurrent_runs,
+    })
+}
+
+#[tauri::command]
+fn update_worker_management(
+    input: UpdateWorkerManagementInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WorkerManagementResponse, String> {
+    let management = save_worker_management(&state, input)?;
+    if !management.maintenance {
+        let _ = dispatch_queued_task_runs(
+            app,
+            Arc::clone(&state.database),
+            Arc::clone(&state.local_worker_runs),
+        );
+    }
+    Ok(management.into())
+}
+
+fn save_worker_management(
+    state: &AppState,
+    input: UpdateWorkerManagementInput,
+) -> Result<WorkerManagement, String> {
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| "The worker registry is unavailable.".to_owned())?;
+    ensure_managed_worker_exists(&database, &input.worker_id)?;
+    database
+        .update_worker_management(WorkerManagementUpdate {
+            worker_id: input.worker_id,
+            display_name: input.display_name,
+            labels: input.labels,
+            maintenance: input.maintenance,
+            max_concurrent_runs: input.max_concurrent_runs,
+        })
+        .map_err(|error| format!("Unable to update worker management: {error}"))
+}
+
+fn ensure_managed_worker_exists(database: &Database, worker_id: &str) -> Result<(), String> {
+    if worker_id == LOCAL_WORKER_ID {
+        Ok(())
+    } else {
+        ensure_remote_worker_exists(database, worker_id)
+    }
+}
+
+fn ensure_remote_worker_exists(database: &Database, worker_id: &str) -> Result<(), String> {
+    database
+        .get_remote_worker(worker_id)
+        .map_err(|error| format!("Unable to verify the worker: {error}"))?
+        .map(|_| ())
+        .ok_or_else(|| "The worker no longer exists.".into())
+}
+
+fn local_provider_statuses() -> Vec<WorkerProviderStatus> {
+    vec![match CodexProvider.inspect() {
+        Ok(status) => stored_provider_status(status),
+        Err(error) => WorkerProviderStatus {
+            id: "codex".into(),
+            name: "Codex".into(),
+            installed: false,
+            version: None,
+            authentication: "unknown".into(),
+            readiness: "unknown".into(),
+            detail: error.to_string(),
+        },
+    }]
+}
+
+fn stored_provider_status(status: ProviderStatus) -> WorkerProviderStatus {
+    WorkerProviderStatus {
+        id: status.id,
+        name: status.name,
+        installed: status.installed,
+        version: status.version,
+        authentication: status.authentication.as_str().into(),
+        readiness: status.readiness.as_str().into(),
+        detail: status.detail,
+    }
 }
 
 #[tauri::command]
@@ -1351,6 +1521,7 @@ fn persist_remote_worker(
             architecture: handshake.profile.architecture,
             protocol_version: i64::from(handshake.protocol_version),
             tools: stored_worker_tools(handshake.profile.tools),
+            providers: stored_remote_provider_statuses(handshake.providers),
             project_id: input.project_id,
             workspace_path: input.workspace_path,
         })
@@ -1378,6 +1549,7 @@ fn persist_remote_worker_record(
             architecture: handshake.profile.architecture,
             protocol_version: i64::from(handshake.protocol_version),
             tools: stored_worker_tools(handshake.profile.tools),
+            providers: stored_remote_provider_statuses(handshake.providers),
             project_id: workspace.project_id.clone(),
             workspace_path: workspace.workspace_path.clone(),
         })
@@ -1392,6 +1564,23 @@ fn stored_worker_tools(tools: Vec<orchestr_worker::ToolCapability>) -> Vec<Worke
             name: tool.name,
             installed: tool.installed,
             version: tool.version,
+        })
+        .collect()
+}
+
+fn stored_remote_provider_statuses(
+    providers: Vec<orchestr_worker::ProviderCapability>,
+) -> Vec<WorkerProviderStatus> {
+    providers
+        .into_iter()
+        .map(|provider| WorkerProviderStatus {
+            id: provider.id,
+            name: provider.name,
+            installed: provider.installed,
+            version: provider.version,
+            authentication: provider.authentication,
+            readiness: provider.readiness,
+            detail: provider.detail,
         })
         .collect()
 }
@@ -1896,6 +2085,7 @@ fn resolve_failed_run(
 }
 
 fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateResponse, String> {
+    let worker_id = project_execution_worker_id(database, project_id)?;
     let FlowState {
         limits,
         active_worker_runs,
@@ -1906,7 +2096,7 @@ fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateRes
         queued,
         blocked_reason,
     } = database
-        .flow_state(project_id, LOCAL_WORKER_ID)
+        .flow_state(project_id, &worker_id)
         .map_err(|error| format!("Unable to load flow control: {error}"))?;
     let queue = database
         .list_queued_runs(project_id)
@@ -1958,12 +2148,14 @@ fn save_flow_limit_update(
     database: &Arc<Mutex<Database>>,
     input: &UpdateFlowLimitsInput,
 ) -> Result<(), String> {
-    database
+    let mut database = database
         .lock()
-        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let worker_id = project_execution_worker_id(&database, &input.project_id)?;
+    database
         .update_flow_limits(
             &input.project_id,
-            LOCAL_WORKER_ID,
+            &worker_id,
             FlowLimitUpdate {
                 worker_max_concurrent_runs: input.worker_max_concurrent_runs,
                 in_progress_limit: input.in_progress_limit,
@@ -1973,6 +2165,13 @@ fn save_flow_limit_update(
         )
         .map(|_| ())
         .map_err(|error| format!("Unable to update flow limits: {error}"))
+}
+
+fn project_execution_worker_id(database: &Database, project_id: &str) -> Result<String, String> {
+    database
+        .remote_worker_for_project(project_id)
+        .map(|worker| worker.map_or_else(|| LOCAL_WORKER_ID.to_owned(), |worker| worker.id))
+        .map_err(|error| format!("Unable to resolve the project's execution worker: {error}"))
 }
 
 fn load_flow_state_from_store(
@@ -3717,26 +3916,26 @@ fn verify_remote_task_worker(worker: &RemoteWorker) -> Result<(), String> {
         );
     }
     remote_worker_handshake(worker)
-        .and_then(verified_remote_profile)
+        .and_then(verified_remote_handshake)
         .and_then(verify_remote_codex)
 }
 
-fn verified_remote_profile(
+fn verified_remote_handshake(
     handshake: orchestr_worker::RemoteWorkerHandshake,
-) -> Result<WorkerProfile, String> {
+) -> Result<orchestr_worker::RemoteWorkerHandshake, String> {
     validate_remote_protocol(handshake.protocol_version)?;
-    Ok(handshake.profile)
+    Ok(handshake)
 }
 
-fn verify_remote_codex(profile: WorkerProfile) -> Result<(), String> {
-    if profile
-        .tools
+fn verify_remote_codex(handshake: orchestr_worker::RemoteWorkerHandshake) -> Result<(), String> {
+    if handshake
+        .providers
         .iter()
-        .any(|tool| tool.name == "codex" && tool.installed)
+        .any(|provider| provider.id == "codex" && provider.readiness == "ready")
     {
         Ok(())
     } else {
-        Err("Codex is not installed on the project's remote worker.".into())
+        Err("Codex is not ready on the project's remote worker. Check its provider authentication state from Workers.".into())
     }
 }
 
@@ -5873,6 +6072,7 @@ fn main() {
             get_repository_diff,
             get_repository_file_preview,
             get_local_worker_profile,
+            update_worker_management,
             list_remote_workers,
             register_remote_worker,
             refresh_remote_worker,

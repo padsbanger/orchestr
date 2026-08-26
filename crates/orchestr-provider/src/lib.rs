@@ -30,6 +30,17 @@ pub enum AuthenticationStatus {
     Unknown,
 }
 
+impl AuthenticationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Authenticated => "authenticated",
+            Self::Unauthenticated => "unauthenticated",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderReadiness {
@@ -37,6 +48,17 @@ pub enum ProviderReadiness {
     NeedsAuthentication,
     Unavailable,
     Unknown,
+}
+
+impl ProviderReadiness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NeedsAuthentication => "needs_authentication",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -361,7 +383,7 @@ fn classify_authentication(succeeded: bool, output: &str) -> AuthenticationStatu
 mod tests {
     use super::{
         classify_authentication, AgentProvider, AgentRunInput, AuthenticationStatus, CodexProvider,
-        ProviderAction,
+        ProviderAction, ProviderReadiness,
     };
 
     #[test]
@@ -375,6 +397,27 @@ mod tests {
             provider.action_request(ProviderAction::Logout).arguments,
             ["logout"]
         );
+    }
+
+    #[test]
+    fn provider_states_have_stable_protocol_names() {
+        assert_eq!(
+            AuthenticationStatus::Authenticated.as_str(),
+            "authenticated"
+        );
+        assert_eq!(
+            AuthenticationStatus::Unauthenticated.as_str(),
+            "unauthenticated"
+        );
+        assert_eq!(AuthenticationStatus::Unavailable.as_str(), "unavailable");
+        assert_eq!(AuthenticationStatus::Unknown.as_str(), "unknown");
+        assert_eq!(ProviderReadiness::Ready.as_str(), "ready");
+        assert_eq!(
+            ProviderReadiness::NeedsAuthentication.as_str(),
+            "needs_authentication"
+        );
+        assert_eq!(ProviderReadiness::Unavailable.as_str(), "unavailable");
+        assert_eq!(ProviderReadiness::Unknown.as_str(), "unknown");
     }
 
     #[test]
