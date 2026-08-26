@@ -284,9 +284,8 @@ assigned implementation agent as reviewer.
 
 The desktop prepares the reviewer with task context, acceptance criteria,
 relevant paths, the branch diff and commits, the latest implementation-run
-summary, and implementation-validation history. Project decision records are
-not introduced until M20, so the prompt explicitly identifies that absence
-rather than fabricating policy. Codex runs in its `read-only` sandbox with no
+summary, implementation-validation history, and every accepted ADR relevant
+to the task. Codex runs in its `read-only` sandbox with no
 additional writable Git directories. Only an `agent_message` containing the
 strict `ORCHESTR_REVIEW_DECISION` and `ORCHESTR_REVIEW_NOTES` protocol is
 accepted; command output or repository content cannot impersonate a decision.
@@ -381,6 +380,23 @@ but cannot be claimed while affected; resolving the blocker immediately asks
 the scheduler to fill available capacity. Project-wide blockers also appear
 as flow pressure and pause all automatic starts without conflating the shared
 cause with repeated task failures.
+
+## M20 architecture decisions and project knowledge
+
+Architecture decisions are durable, project-scoped ADR records with stable
+`ADR-NNN` numbers, context, the authoritative decision, consequences, and an
+explicit lifecycle: Proposed, Accepted, Superseded, or Rejected. A replacement
+proposal references the accepted ADR it supersedes; accepting the replacement
+atomically retires the previous decision while preserving both records.
+
+ADR relevance may be project-wide, tied to explicit tasks, or matched against
+repository-relative task paths. Only accepted, relevant decisions enter an
+agent's managed context. The same selection is visible in the project
+Knowledge inspector and each task inspector, and is injected into both
+implementation and read-only architect-review prompts. Agents are told to
+request human input when completing a task would require contradicting an
+accepted decision so that the change can be captured as an explicit
+superseding ADR.
 
 ## Planned extraction points
 

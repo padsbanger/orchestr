@@ -34,10 +34,11 @@ Completed milestones:
 - M17 — Parallel Local Agents + WIP Limits
 - M18 — Failure Recovery + Revert
 - M19 — Project Blockers + Needs Input
+- M20 — Architecture Decisions / Project Knowledge
 
 Immediate next milestone:
 
-**M20 — Architecture Decisions / Project Knowledge**
+**M21 — Remote Worker Protocol**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1277,7 +1278,7 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M20 — Architecture Decisions / Project Knowledge**
+**M21 — Remote Worker Protocol**
 
 Do not prioritize:
 

@@ -874,7 +874,9 @@ Orchestr can stop and ask rather than allowing many agents to repeatedly fail or
 
 ---
 
-# M20 — Architecture Decisions / Project Knowledge
+# M20 — Architecture Decisions / Project Knowledge — Complete
+
+**Completed:** 2026-08-26
 
 ### Goal
 
@@ -1312,10 +1314,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M19 state:
+Continue from the completed M20 state:
 
 ```text
-1. Add architecture decisions and durable project knowledge
+1. Implement the authenticated remote worker protocol
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

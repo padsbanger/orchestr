@@ -5,7 +5,8 @@ Kanban work, and human-supervised AI workers. The current workflow includes
 bounded parallel execution, durable run and integration recovery, and
 traceable Git reverts for integrated regressions. Agents can pause with a
 persisted Needs Input request, while scoped project blockers suppress unsafe
-automatic scheduling until their shared cause is resolved.
+automatic scheduling until their shared cause is resolved. Accepted ADRs now
+provide durable, task-relevant project knowledge to implementers and reviewers.
 
 ## M0 development
 

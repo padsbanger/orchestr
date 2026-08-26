@@ -8,19 +8,22 @@ use std::{
 };
 
 use orchestr_db::{
-    Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, Epic,
-    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
-    NewAgentReview, NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRun, NewRunEvent,
-    NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent, Project,
-    ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RevertAttempt, RevertStatus,
-    Run, RunEvent, RunOutput, RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus,
-    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, Workspace,
+    Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
+    ArchitectureDecisionStatus, Database, Epic, FlowLimitUpdate, FlowLimits, FlowState,
+    IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewArchitectureDecision, NewEpic,
+    NewMilestone, NewProject, NewProjectBlocker, NewRun, NewRunEvent, NewTask, NewTaskInputRequest,
+    NewValidationCommand, NewValidationEvent, Project, ProjectBlocker, ProjectDeletion,
+    ProjectHealth, ProjectProgress, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput,
+    RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt,
+    ValidationCommand, ValidationStage, ValidationStatus, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
     AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
 };
-use orchestr_worker::{LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile};
+use orchestr_worker::{
+    LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile, WorkerRun,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -255,6 +258,21 @@ struct CreateProjectBlockerInput {
     affected_task_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateArchitectureDecisionInput {
+    project_id: String,
+    title: String,
+    context: String,
+    decision: String,
+    consequences: Option<String>,
+    supersedes_decision_id: Option<String>,
+    #[serde(default)]
+    relevant_paths: Vec<String>,
+    #[serde(default)]
+    relevant_task_ids: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskInputRequestResponse {
@@ -288,6 +306,25 @@ struct ProjectBlockerResponse {
     status: String,
     created_at: String,
     resolved_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchitectureDecisionResponse {
+    id: String,
+    project_id: String,
+    decision_number: i64,
+    title: String,
+    context: String,
+    decision: String,
+    consequences: Option<String>,
+    status: String,
+    supersedes_decision_id: Option<String>,
+    relevant_paths: Vec<String>,
+    relevant_task_ids: Vec<String>,
+    created_at: String,
+    updated_at: String,
+    decided_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -688,6 +725,27 @@ impl From<ProjectBlocker> for ProjectBlockerResponse {
             status: blocker.status,
             created_at: blocker.created_at,
             resolved_at: blocker.resolved_at,
+        }
+    }
+}
+
+impl From<ArchitectureDecision> for ArchitectureDecisionResponse {
+    fn from(decision: ArchitectureDecision) -> Self {
+        Self {
+            id: decision.id,
+            project_id: decision.project_id,
+            decision_number: decision.decision_number,
+            title: decision.title,
+            context: decision.context,
+            decision: decision.decision,
+            consequences: decision.consequences,
+            status: decision.status.as_str().to_owned(),
+            supersedes_decision_id: decision.supersedes_decision_id,
+            relevant_paths: decision.relevant_paths,
+            relevant_task_ids: decision.relevant_task_ids,
+            created_at: decision.created_at,
+            updated_at: decision.updated_at,
+            decided_at: decision.decided_at,
         }
     }
 }
@@ -1735,7 +1793,7 @@ fn start_agent_review(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentReviewResponse, String> {
-    let (task, reviewer, default_branch, recent_runs, validation_attempts) = {
+    let (task, reviewer, default_branch, recent_runs, validation_attempts, architecture_decisions) = {
         let database = state
             .database
             .lock()
@@ -1766,18 +1824,15 @@ fn start_agent_review(
         let recent_runs = database
             .list_runs_for_task(&task.id)
             .map_err(|error| format!("Unable to load the implementation run summary: {error}"))?;
-        let validation_attempts = database
-            .list_validation_attempts(&task.project_id, 20)
-            .map_err(|error| format!("Unable to load implementation validation: {error}"))?
-            .into_iter()
-            .filter(|attempt| attempt.task_id.as_deref() == Some(task.id.as_str()))
-            .collect::<Vec<_>>();
+        let (validation_attempts, architecture_decisions) =
+            load_agent_review_project_context(&database, &task)?;
         (
             task,
             reviewer,
             project.default_branch,
             recent_runs,
             validation_attempts,
+            architecture_decisions,
         )
     };
     let worktree_path = task
@@ -1814,6 +1869,7 @@ fn start_agent_review(
             &task_review,
             &recent_runs,
             &validation_attempts,
+            &architecture_decisions,
         ),
         working_directory: PathBuf::from(&worktree_path),
         additional_writable_directories: Vec::new(),
@@ -1957,6 +2013,22 @@ fn start_agent_review(
         let _ = dispatch_queued_task_runs(app, database, active_runs);
     });
     Ok(persisted_review.into())
+}
+
+fn load_agent_review_project_context(
+    database: &Database,
+    task: &Task,
+) -> Result<(Vec<ValidationAttempt>, Vec<ArchitectureDecision>), String> {
+    let validation_attempts = database
+        .list_validation_attempts(&task.project_id, 20)
+        .map_err(|error| format!("Unable to load implementation validation: {error}"))?
+        .into_iter()
+        .filter(|attempt| attempt.task_id.as_deref() == Some(task.id.as_str()))
+        .collect::<Vec<_>>();
+    let decisions = database
+        .list_relevant_architecture_decisions(&task.id)
+        .map_err(|error| format!("Unable to load project knowledge for review: {error}"))?;
+    Ok((validation_attempts, decisions))
 }
 
 #[tauri::command]
@@ -3431,10 +3503,14 @@ fn launch_claimed_task_run(
     database: Arc<Mutex<Database>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
 ) -> Result<(), String> {
+    let architecture_decisions = load_task_architecture_context(&database, &task.id)?;
     let prepared = prepare_task_run_worktree(&task, &workspace_path, &default_branch, &database)?;
-    let request = prepare_task_process_request(&task, &agent, &prepared.worktree_path)?;
-    let run = LocalWorker::start(request)
-        .map_err(|error| format!("Unable to start Codex for this task: {error}"))?;
+    let run = start_task_worker(
+        &task,
+        &agent,
+        &architecture_decisions,
+        &prepared.worktree_path,
+    )?;
     record_task_worktree_events(&database, &persisted_run.id, &prepared);
     register_task_worker(
         run,
@@ -3446,6 +3522,28 @@ fn launch_claimed_task_run(
         database,
         active_runs,
     )
+}
+
+fn start_task_worker(
+    task: &Task,
+    agent: &Agent,
+    architecture_decisions: &[ArchitectureDecision],
+    worktree_path: &str,
+) -> Result<WorkerRun, String> {
+    let request = prepare_task_process_request(task, agent, architecture_decisions, worktree_path)?;
+    LocalWorker::start(request)
+        .map_err(|error| format!("Unable to start Codex for this task: {error}"))
+}
+
+fn load_task_architecture_context(
+    database: &Arc<Mutex<Database>>,
+    task_id: &str,
+) -> Result<Vec<ArchitectureDecision>, String> {
+    database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_relevant_architecture_decisions(task_id)
+        .map_err(|error| format!("Unable to prepare project knowledge: {error}"))
 }
 
 struct PreparedTaskRun {
@@ -3576,6 +3674,7 @@ fn assign_prepared_task_worktree(
 fn prepare_task_process_request(
     task: &Task,
     agent: &Agent,
+    architecture_decisions: &[ArchitectureDecision],
     worktree_path: &str,
 ) -> Result<ProcessRequest, String> {
     let additional_writable_directories =
@@ -3585,7 +3684,7 @@ fn prepare_task_process_request(
     CodexProvider
         .execution_request(AgentRunInput {
             model: agent.model.clone(),
-            prompt: build_task_prompt(&task, &agent),
+            prompt: build_task_prompt(task, agent, architecture_decisions),
             working_directory: PathBuf::from(worktree_path),
             additional_writable_directories,
             read_only: false,
@@ -4269,6 +4368,100 @@ fn resume_project_after_blocker(state: &AppState, app: AppHandle) -> Result<(), 
 }
 
 #[tauri::command]
+fn list_architecture_decisions(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ArchitectureDecisionResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_architecture_decisions(&project_id)
+        .map(|decisions| decisions.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load architecture decisions: {error}"))
+}
+
+#[tauri::command]
+fn list_relevant_architecture_decisions(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ArchitectureDecisionResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .list_relevant_architecture_decisions(&task_id)
+        .map(|decisions| decisions.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to preview task knowledge: {error}"))
+}
+
+#[tauri::command]
+fn create_architecture_decision(
+    input: CreateArchitectureDecisionInput,
+    state: State<'_, AppState>,
+) -> Result<ArchitectureDecisionResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .create_architecture_decision(NewArchitectureDecision {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            title: input.title,
+            context: input.context,
+            decision: input.decision,
+            consequences: normalize_optional_text(input.consequences),
+            supersedes_decision_id: input.supersedes_decision_id,
+            relevant_paths: input.relevant_paths,
+            relevant_task_ids: input.relevant_task_ids,
+        })
+        .map(Into::into)
+        .map_err(|_| {
+            "An ADR needs a title, context, decision, and valid project-scoped relevance."
+                .to_owned()
+        })
+}
+
+#[tauri::command]
+fn decide_architecture_decision(
+    decision_id: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<ArchitectureDecisionResponse, String> {
+    persist_architecture_decision_status(&state.database, &decision_id, &status).map(Into::into)
+}
+
+fn persist_architecture_decision_status(
+    database: &Arc<Mutex<Database>>,
+    decision_id: &str,
+    status: &str,
+) -> Result<ArchitectureDecision, String> {
+    parse_architecture_decision_status(status)
+        .and_then(|status| update_architecture_decision_status(database, decision_id, status))
+}
+
+fn parse_architecture_decision_status(status: &str) -> Result<ArchitectureDecisionStatus, String> {
+    match status {
+        "accepted" => Ok(ArchitectureDecisionStatus::Accepted),
+        "rejected" => Ok(ArchitectureDecisionStatus::Rejected),
+        _ => Err("A proposed ADR can only be accepted or rejected.".into()),
+    }
+}
+
+fn update_architecture_decision_status(
+    database: &Arc<Mutex<Database>>,
+    decision_id: &str,
+    status: ArchitectureDecisionStatus,
+) -> Result<ArchitectureDecision, String> {
+    database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .decide_architecture_decision(decision_id, status)
+        .map_err(|error| format!("Unable to decide the architecture proposal: {error}"))?
+        .ok_or_else(|| "The architecture decision is no longer proposed.".into())
+}
+
+#[tauri::command]
 fn list_milestones(
     project_id: String,
     state: State<'_, AppState>,
@@ -4720,7 +4913,11 @@ fn validate_assigned_agent(database: &Database, agent_id: Option<&str>) -> Resul
     Ok(())
 }
 
-fn build_task_prompt(task: &Task, agent: &Agent) -> String {
+fn build_task_prompt(
+    task: &Task,
+    agent: &Agent,
+    architecture_decisions: &[ArchitectureDecision],
+) -> String {
     let mut prompt = format!(
         "You are {name}, acting as {role} in this repository. Implement the task below. \
          Inspect the existing project instructions and conventions before making changes. \
@@ -4753,6 +4950,11 @@ fn build_task_prompt(task: &Task, agent: &Agent) -> String {
             prompt.push_str(&format!("\n- {dependency_id}"));
         }
     }
+    prompt.push_str("\n\n## Accepted project decisions\n");
+    prompt.push_str(&format_architecture_decisions(architecture_decisions));
+    prompt.push_str(
+        "\nTreat accepted decisions as authoritative project constraints. Do not contradict them casually. If this task requires changing one, stop and request a human decision so a superseding ADR can be recorded.",
+    );
     if let Some(system_prompt) = &agent.system_prompt {
         prompt.push_str(&format!("\n\n## Agent instructions\n{system_prompt}"));
     }
@@ -4778,6 +4980,7 @@ fn build_agent_review_prompt(
     review: &orchestr_git::TaskReview,
     runs: &[Run],
     validations: &[ValidationAttempt],
+    architecture_decisions: &[ArchitectureDecision],
 ) -> String {
     let acceptance_criteria = if task.acceptance_criteria.is_empty() {
         "- No acceptance criteria recorded.".to_owned()
@@ -4829,7 +5032,7 @@ fn build_agent_review_prompt(
             .join("\n")
     };
     format!(
-        "You are {name}, a logically separate technical reviewer. You must not change files, run destructive commands, or approve your own implementation. Review this task only from the supplied evidence.\n\n# Task\n{title}\n{description}\n\n# Acceptance criteria\n{acceptance_criteria}\n\n# Relevant paths\n{paths}\n\n# Project decisions\nNo persisted architecture-decision registry is available yet. Treat the task specification and repository instructions as authoritative.\n\n# Implementation run\n{run_summary}\n\n# Implementation validation\n{validation_summary}\n\n# Branch evidence\nBranch: {branch}\nBase: {base}\nCommits:\n{commits}\n\n# Diff\n{diff}\n\nDecide whether the implementation satisfies the acceptance criteria and is safe to send to normal integration. Return exactly these two single-line fields, with no alternative decision wording:\nORCHESTR_REVIEW_DECISION: approve | request_changes\nORCHESTR_REVIEW_NOTES: concise evidence-based review notes",
+        "You are {name}, a logically separate technical reviewer. You must not change files, run destructive commands, or approve your own implementation. Review this task only from the supplied evidence.\n\n# Task\n{title}\n{description}\n\n# Acceptance criteria\n{acceptance_criteria}\n\n# Relevant paths\n{paths}\n\n# Accepted project decisions\n{project_decisions}\n\nTreat accepted decisions as authoritative constraints. Request changes if the implementation contradicts one without an explicit superseding decision.\n\n# Implementation run\n{run_summary}\n\n# Implementation validation\n{validation_summary}\n\n# Branch evidence\nBranch: {branch}\nBase: {base}\nCommits:\n{commits}\n\n# Diff\n{diff}\n\nDecide whether the implementation satisfies the acceptance criteria and is safe to send to normal integration. Return exactly these two single-line fields, with no alternative decision wording:\nORCHESTR_REVIEW_DECISION: approve | request_changes\nORCHESTR_REVIEW_NOTES: concise evidence-based review notes",
         name = reviewer.name,
         title = task.title,
         description = task.description.as_deref().unwrap_or("No description provided."),
@@ -4838,10 +5041,35 @@ fn build_agent_review_prompt(
         } else {
             task.relevant_paths.join("\n")
         },
+        project_decisions = format_architecture_decisions(architecture_decisions),
         branch = review.branch,
         base = review.base_branch,
         diff = if review.diff.is_empty() { "No diff available." } else { &review.diff },
     )
+}
+
+fn format_architecture_decisions(decisions: &[ArchitectureDecision]) -> String {
+    if decisions.is_empty() {
+        return "No accepted managed ADRs apply to this task. Inspect repository instructions and architecture documentation before proceeding.".into();
+    }
+    decisions
+        .iter()
+        .map(|decision| {
+            let consequences = decision
+                .consequences
+                .as_deref()
+                .map(|value| format!("\nConsequences: {value}"))
+                .unwrap_or_default();
+            format!(
+                "### ADR-{number:03} {title}\nContext: {context}\nDecision: {body}{consequences}",
+                number = decision.decision_number,
+                title = decision.title,
+                context = decision.context,
+                body = decision.decision,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn parse_agent_review_decision(output: &str) -> Option<(AgentReviewDecision, String)> {
@@ -5080,6 +5308,10 @@ fn main() {
             list_project_blockers,
             create_project_blocker,
             resolve_project_blocker,
+            list_architecture_decisions,
+            list_relevant_architecture_decisions,
+            create_architecture_decision,
+            decide_architecture_decision,
             list_milestones,
             create_milestone,
             update_milestone_status,
@@ -5103,8 +5335,8 @@ mod tests {
         task_input_question,
     };
     use orchestr_db::{
-        Agent, AgentReviewDecision, Run, RunEvent, RunOutput, RunStatus, Task, TaskPriority,
-        TaskStatus,
+        Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Run,
+        RunEvent, RunOutput, RunStatus, Task, TaskPriority, TaskStatus,
     };
 
     #[cfg(windows)]
@@ -5157,12 +5389,30 @@ mod tests {
                 created_at: String::new(),
                 updated_at: String::new(),
             },
+            &[ArchitectureDecision {
+                id: "adr-1".into(),
+                project_id: "project-1".into(),
+                decision_number: 1,
+                title: "Use worktrees".into(),
+                context: "Parallel task isolation is required.".into(),
+                decision: "Every implementation task uses a Git worktree.".into(),
+                consequences: Some("Cleanup happens only after integration.".into()),
+                status: ArchitectureDecisionStatus::Accepted,
+                supersedes_decision_id: None,
+                relevant_paths: Vec::new(),
+                relevant_task_ids: Vec::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                decided_at: Some(String::new()),
+            }],
         );
         assert!(prompt.contains("commit every task-related change"));
         assert!(prompt.contains("Do not leave staged or unstaged task changes behind"));
         assert!(prompt.contains("Do not modify filesystem permissions"));
         assert!(prompt.contains("low-level Git plumbing"));
         assert!(prompt.contains("ORCHESTR_NEEDS_INPUT"));
+        assert!(prompt.contains("ADR-001 Use worktrees"));
+        assert!(prompt.contains("Do not contradict them casually"));
     }
 
     #[test]

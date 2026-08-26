@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, MessageSquareText, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
+import { BookOpenCheck, Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, MessageSquareText, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
@@ -7,6 +7,7 @@ import type { Task } from "../../services/tasks";
 import type { TaskReview } from "../../services/reviews";
 import type { AgentReview } from "../../services/agentReviews";
 import type { TaskInputRequest } from "../../services/interruptions";
+import type { ArchitectureDecision } from "../../services/knowledge";
 import "./TaskDetailPanel.css";
 
 type TaskDetailPanelProps = {
@@ -16,6 +17,7 @@ type TaskDetailPanelProps = {
   reviewerAgents: Agent[];
   agentReviews: AgentReview[];
   inputRequests: TaskInputRequest[];
+  architectureDecisions: ArchitectureDecision[];
   isAgentReviewStarting: boolean;
   runs: TaskRun[];
   isStartingRun: boolean;
@@ -43,7 +45,7 @@ type TaskDetailPanelProps = {
   onStartAgentReview: (agentId: string) => void;
 };
 
-export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, inputRequests, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, inputAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onRequestInput, onAnswerInput, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
+export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, inputRequests, architectureDecisions, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, inputAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onRequestInput, onAnswerInput, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
   const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
   const activeAgentReview = agentReviews.find((review) => review.status === "running");
   const latestRun = activeRun ?? runs[0];
@@ -88,6 +90,10 @@ export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerA
         </TaskSection>
         <TaskSection title="Relevant paths / context" icon={<FileCode2 size={14} />} count={task.relevantPaths.length}>
           {task.relevantPaths.length === 0 ? <p className="task-detail-empty">No relevant paths recorded.</p> : <ul className="token-list">{task.relevantPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>}
+        </TaskSection>
+        <TaskSection title="Architecture context" icon={<BookOpenCheck size={14} />} count={architectureDecisions.length}>
+          {architectureDecisions.length === 0 ? <p className="task-detail-empty">No accepted managed ADRs apply. Repository instructions and architecture docs still apply.</p> : <div className="task-architecture-context">{architectureDecisions.map((item) => <article key={item.id}><header><code>ADR-{String(item.decisionNumber).padStart(3, "0")}</code><strong>{item.title}</strong></header><p>{item.decision}</p>{item.consequences && <small>{item.consequences}</small>}</article>)}</div>}
+          <p className="task-detail-hint">This is the managed decision context injected into implementation and architect-review runs.</p>
         </TaskSection>
         <TaskSection title="Dependencies" icon={<GitBranch size={14} />} count={task.dependencyIds.length}>
           {task.dependencyIds.length === 0 ? <p className="task-detail-empty">No task dependencies recorded.</p> : <><ul className="token-list">{task.dependencyIds.map((dependency) => <li key={dependency}><code>{dependency}</code></li>)}</ul><p className="task-detail-hint">Dependencies must be Done before this task can run.</p></>}

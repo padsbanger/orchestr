@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, BookOpenCheck, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -9,6 +9,7 @@ import { IntegrationQueuePanel } from "../../components/IntegrationQueuePanel/In
 import { QualityGatesPanel } from "../../components/QualityGatesPanel/QualityGatesPanel";
 import { FlowControlPanel } from "../../components/FlowControlPanel/FlowControlPanel";
 import { ProjectBlockersPanel } from "../../components/ProjectBlockersPanel/ProjectBlockersPanel";
+import { ProjectKnowledgePanel } from "../../components/ProjectKnowledgePanel/ProjectKnowledgePanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
@@ -22,6 +23,7 @@ import { createValidationCommand, deleteValidationCommand, getProjectHealth, lis
 import { listEpics, listMilestones, type Epic, type Milestone } from "../../services/outcomes";
 import { getFlowState, listenToFlowChanges, updateFlowLimits, type FlowLimitInput, type FlowState } from "../../services/flow";
 import { answerTaskInput, createProjectBlocker, listProjectBlockers, listTaskInputRequests, requestTaskInput, resolveProjectBlocker, type ProjectBlocker, type TaskInputRequest } from "../../services/interruptions";
+import { createArchitectureDecision, decideArchitectureDecision, listArchitectureDecisions, listRelevantArchitectureDecisions, type ArchitectureDecision, type ArchitectureDecisionInput } from "../../services/knowledge";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -38,7 +40,7 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   done: { label: "Done", tone: "green" },
 };
 
-type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers";
+type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers" | "knowledge";
 
 export function BoardPage() {
   const { projectId } = useParams();
@@ -76,6 +78,14 @@ export function BoardPage() {
   const [isBlockersLoading, setIsBlockersLoading] = useState(false);
   const [isBlockerSaving, setIsBlockerSaving] = useState(false);
   const [resolvingBlockerId, setResolvingBlockerId] = useState<string>();
+  const [architectureDecisions, setArchitectureDecisions] = useState<ArchitectureDecision[]>([]);
+  const [taskArchitectureDecisions, setTaskArchitectureDecisions] = useState<ArchitectureDecision[]>([]);
+  const [knowledgePreviewTaskId, setKnowledgePreviewTaskId] = useState<string>();
+  const [knowledgePreviewDecisions, setKnowledgePreviewDecisions] = useState<ArchitectureDecision[]>([]);
+  const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false);
+  const [isKnowledgePreviewLoading, setIsKnowledgePreviewLoading] = useState(false);
+  const [isKnowledgeSaving, setIsKnowledgeSaving] = useState(false);
+  const [decidingArchitectureId, setDecidingArchitectureId] = useState<string>();
   const [health, setHealth] = useState<ProjectHealth>();
   const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
   const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
@@ -213,6 +223,18 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadArchitectureDecisions = useCallback(async () => {
+    if (!projectId) return;
+    setIsKnowledgeLoading(true);
+    try {
+      setArchitectureDecisions(await listArchitectureDecisions(projectId));
+    } catch (loadError) {
+      setError(errorMessage(loadError, "Unable to load architecture decisions."));
+    } finally {
+      setIsKnowledgeLoading(false);
+    }
+  }, [projectId]);
+
   const loadBoard = useCallback(async (showLoading = false) => {
     if (!projectId) return;
     if (showLoading) setIsLoading(true);
@@ -228,12 +250,13 @@ export function BoardPage() {
       void loadOutcomes();
       void loadFlowControl();
       void loadProjectBlockers();
+      void loadArchitectureDecisions();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       if (showLoading) setIsLoading(false);
     }
-  }, [loadFlowControl, loadIntegrationQueue, loadOutcomes, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
+  }, [loadArchitectureDecisions, loadFlowControl, loadIntegrationQueue, loadOutcomes, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard(true);
@@ -255,6 +278,21 @@ export function BoardPage() {
       setError(errorMessage(loadError, "Unable to load task input requests."));
     });
   }, [inspectedTask?.id, inspectedTask?.status]);
+
+  useEffect(() => {
+    if (!inspectedTask) { setTaskArchitectureDecisions([]); return; }
+    void listRelevantArchitectureDecisions(inspectedTask.id).then(setTaskArchitectureDecisions).catch((loadError: unknown) => {
+      setError(errorMessage(loadError, "Unable to load task architecture context."));
+    });
+  }, [inspectedTask?.id]);
+
+  useEffect(() => {
+    if (!knowledgePreviewTaskId) { setKnowledgePreviewDecisions([]); return; }
+    setIsKnowledgePreviewLoading(true);
+    void listRelevantArchitectureDecisions(knowledgePreviewTaskId).then(setKnowledgePreviewDecisions).catch((loadError: unknown) => {
+      setError(errorMessage(loadError, "Unable to preview task knowledge."));
+    }).finally(() => setIsKnowledgePreviewLoading(false));
+  }, [architectureDecisions, knowledgePreviewTaskId]);
 
   useEffect(() => {
     if (!inspectedTask || inspectedTask.status !== "review") { setReview(undefined); setReviewError(undefined); return; }
@@ -563,6 +601,27 @@ export function BoardPage() {
     } finally { setResolvingBlockerId(undefined); }
   };
 
+  const addArchitectureDecision = async (input: Omit<ArchitectureDecisionInput, "projectId">) => {
+    if (!projectId) return;
+    setIsKnowledgeSaving(true); setError(undefined);
+    try {
+      await createArchitectureDecision({ projectId, ...input });
+      await loadArchitectureDecisions();
+    } catch (knowledgeError) {
+      setError(errorMessage(knowledgeError, "Unable to record the architecture proposal."));
+    } finally { setIsKnowledgeSaving(false); }
+  };
+
+  const decideArchitecture = async (decisionId: string, status: "accepted" | "rejected") => {
+    setDecidingArchitectureId(decisionId); setError(undefined);
+    try {
+      await decideArchitectureDecision(decisionId, status);
+      await loadArchitectureDecisions();
+    } catch (knowledgeError) {
+      setError(errorMessage(knowledgeError, "Unable to decide the architecture proposal."));
+    } finally { setDecidingArchitectureId(undefined); }
+  };
+
   const saveFlowLimits = async (limits: FlowLimitInput) => {
     if (!projectId) return;
     setIsFlowSaving(true);
@@ -735,6 +794,7 @@ export function BoardPage() {
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
             <Link className="secondary-button" to={`/projects/${project.id}/progress`}><ChartNoAxesCombined size={15} /> Progress</Link>
+            <button className="secondary-button" type="button" onClick={() => openSidePanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{architectureDecisions.filter((decision) => decision.status === "accepted").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("blockers")}><ShieldAlert size={15} /> Blockers <span>{projectBlockers.filter((blocker) => blocker.status === "active").length}</span></button>
             <button className="secondary-button" type="button" onClick={() => openSidePanel("flow")}><Gauge size={15} /> Flow <span>{flow?.activeWorkerRuns ?? 0}/{flow?.limits.workerMaxConcurrentRuns ?? 4}</span>{Boolean(flow?.queued) && <span>+{flow?.queued}</span>}</button>
             <button className={`secondary-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => openSidePanel("quality")}><Activity size={15} /> {health?.status ?? "unknown"}</button>
@@ -768,12 +828,13 @@ export function BoardPage() {
         </DndContext>
       </div>
       {(isCreating || editingTask) && <TaskDialog task={editingTask ?? undefined} agents={agents} milestones={milestones} epics={epics} onClose={() => { setIsCreating(false); setEditingTask(null); }} onSave={saveTask} />}
-      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} recoveryAgents={agents.filter((agent) => agent.provider === "codex")} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} inputRequests={inputRequests} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} runRecoveryAction={runRecoveryAction} inputAction={inputAction} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onRecoverRun={(runId, mode, agentId) => void recoverRun(runId, mode, agentId)} onResolveRunFailure={(runId, action) => void resolveRunFailure(runId, action)} onRequestInput={(question, runId) => void requestHumanInput(question, runId)} onAnswerInput={(requestId, answer) => void answerHumanInput(requestId, answer)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
+      {activeSidePanel === "task" && inspectedTask && <TaskDetailPanel task={inspectedTask} assignedAgent={agents.find((agent) => agent.id === inspectedTask.assignedAgentId)} recoveryAgents={agents.filter((agent) => agent.provider === "codex")} reviewerAgents={agents.filter((agent) => agent.id !== inspectedTask.assignedAgentId && agent.provider === "codex")} agentReviews={agentReviews} inputRequests={inputRequests} architectureDecisions={taskArchitectureDecisions} isAgentReviewStarting={isAgentReviewStarting} runs={runs} isStartingRun={isStartingRun} runRecoveryAction={runRecoveryAction} inputAction={inputAction} cancellingRunId={cancellingRunId} isCleaningWorktree={isCleaningWorktree} isOpeningWorktree={isOpeningWorktree} review={review} reviewError={reviewError} isReviewLoading={isReviewLoading} isReviewActionPending={isReviewActionPending} onClose={closeSidePanel} onEdit={(task) => { closeSidePanel(); setEditingTask(task); }} onStartRun={() => void startRun()} onCancelRun={(runId) => void cancelRun(runId)} onRecoverRun={(runId, mode, agentId) => void recoverRun(runId, mode, agentId)} onResolveRunFailure={(runId, action) => void resolveRunFailure(runId, action)} onRequestInput={(question, runId) => void requestHumanInput(question, runId)} onAnswerInput={(requestId, answer) => void answerHumanInput(requestId, answer)} onCleanupWorktree={() => void cleanupWorktree()} onOpenWorktree={() => void openWorktree()} onApproveReview={() => void resolveReview("approve")} onRequestChanges={() => void resolveReview("changes")} onStartAgentReview={(agentId) => void runArchitectReview(agentId)} />}
       {activeSidePanel === "repository" && projectId && <RepositoryInspector projectId={projectId} repository={repository} error={repositoryError} isLoading={isRepositoryLoading} onClose={closeSidePanel} onRefresh={() => void loadRepository()} />}
       {activeSidePanel === "integration" && <IntegrationQueuePanel attempts={integrationAttempts} reverts={revertAttempts} tasks={tasks} isLoading={isIntegrationQueueLoading} isIntegrating={isIntegrating} recoveringIntegrationId={recoveringIntegrationId} revertingIntegrationId={revertingIntegrationId} onClose={closeSidePanel} onRefresh={() => void loadIntegrationQueue()} onIntegrateNext={() => void integrateNext()} onRetry={(attempt) => void retryIntegration(attempt)} onRetryCleanup={(attempt) => void retryCleanup(attempt)} onRevert={(attempt, createRepairTask) => void revertMergedIntegration(attempt, createRepairTask)} />}
       {activeSidePanel === "quality" && <QualityGatesPanel health={health} implementationCommands={implementationCommands} integrationCommands={integrationCommands} attempts={validationAttempts} isLoading={isQualityLoading} isRunning={isRerunningIntegrationValidation} onClose={closeSidePanel} onRefresh={() => void loadQualityGates()} onAddCommand={addValidationCommand} onDeleteCommand={(id) => void removeValidationCommand(id)} onRerunIntegration={() => void rerunQualityGates()} />}
       {activeSidePanel === "flow" && <FlowControlPanel flow={flow} tasks={tasks} agents={agents} isLoading={isFlowLoading} isSaving={isFlowSaving} onClose={closeSidePanel} onRefresh={() => void loadFlowControl()} onSave={(limits) => void saveFlowLimits(limits)} onCancel={(runId) => void cancelRun(runId)} />}
       {activeSidePanel === "blockers" && <ProjectBlockersPanel blockers={projectBlockers} tasks={tasks} isLoading={isBlockersLoading} isSaving={isBlockerSaving} resolvingId={resolvingBlockerId} onClose={closeSidePanel} onRefresh={() => void loadProjectBlockers()} onCreate={(input) => void addProjectBlocker(input)} onResolve={(blockerId) => void clearProjectBlocker(blockerId)} />}
+      {activeSidePanel === "knowledge" && <ProjectKnowledgePanel decisions={architectureDecisions} tasks={tasks} previewTaskId={knowledgePreviewTaskId} previewDecisions={knowledgePreviewDecisions} isLoading={isKnowledgeLoading} isPreviewLoading={isKnowledgePreviewLoading} isSaving={isKnowledgeSaving} decidingId={decidingArchitectureId} onClose={closeSidePanel} onRefresh={() => void loadArchitectureDecisions()} onPreviewTask={setKnowledgePreviewTaskId} onCreate={(input) => void addArchitectureDecision(input)} onDecide={(decisionId, status) => void decideArchitecture(decisionId, status)} />}
     </section>
   );
 }

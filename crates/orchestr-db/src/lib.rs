@@ -37,6 +37,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         17,
         include_str!("../migrations/0017_project_blockers_needs_input.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_architecture_decisions.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -477,6 +481,75 @@ pub struct NewProjectBlocker {
     pub description: Option<String>,
     pub affects_all_tasks: bool,
     pub affected_task_ids: Vec<String>,
+}
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchitectureDecisionStatus {
+    Proposed,
+    Accepted,
+    Superseded,
+    Rejected,
+}
+
+impl ArchitectureDecisionStatus {
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == value)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    const ALL: [Self; 4] = [
+        Self::Proposed,
+        Self::Accepted,
+        Self::Superseded,
+        Self::Rejected,
+    ];
+    const NAMES: [&'static str; 4] = ["proposed", "accepted", "superseded", "rejected"];
+
+    fn from_database(value: String) -> Result<Self> {
+        Self::parse(&value).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                format!("Unknown architecture decision status: {value}").into(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureDecision {
+    pub id: String,
+    pub project_id: String,
+    pub decision_number: i64,
+    pub title: String,
+    pub context: String,
+    pub decision: String,
+    pub consequences: Option<String>,
+    pub status: ArchitectureDecisionStatus,
+    pub supersedes_decision_id: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub relevant_task_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub decided_at: Option<String>,
+}
+
+pub struct NewArchitectureDecision {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub context: String,
+    pub decision: String,
+    pub consequences: Option<String>,
+    pub supersedes_decision_id: Option<String>,
+    pub relevant_paths: Vec<String>,
+    pub relevant_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1284,6 +1357,116 @@ impl Database {
         )?;
         self.recalculate_project_task_readiness(&project_id)?;
         self.project_blocker_by_id(blocker_id)
+    }
+
+    pub fn list_architecture_decisions(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ArchitectureDecision>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, decision_number, title, context, decision, consequences,
+                    status, supersedes_decision_id, relevant_paths, created_at, updated_at, decided_at
+             FROM architecture_decisions WHERE project_id = ?1
+             ORDER BY decision_number DESC",
+        )?;
+        let decisions = statement
+            .query_map([project_id], architecture_decision_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        decisions
+            .into_iter()
+            .map(|decision| self.with_architecture_decision_tasks(decision))
+            .collect()
+    }
+
+    pub fn list_relevant_architecture_decisions(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<ArchitectureDecision>> {
+        let task = self
+            .task_by_id(task_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        Ok(self
+            .list_architecture_decisions(&task.project_id)?
+            .into_iter()
+            .filter(|decision| {
+                decision.status == ArchitectureDecisionStatus::Accepted
+                    && architecture_decision_applies(decision, &task)
+            })
+            .collect())
+    }
+
+    pub fn create_architecture_decision(
+        &mut self,
+        decision: NewArchitectureDecision,
+    ) -> Result<ArchitectureDecision> {
+        validate_new_architecture_decision(&self.connection, &decision)?;
+        let relevant_paths = encode_string_list(&decision.relevant_paths)?;
+        let transaction = self.connection.transaction()?;
+        let decision_number: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(decision_number) + 1, 1)
+             FROM architecture_decisions WHERE project_id = ?1",
+            [&decision.project_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO architecture_decisions
+                (id, project_id, decision_number, title, context, decision, consequences,
+                 supersedes_decision_id, relevant_paths)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                decision.id,
+                decision.project_id,
+                decision_number,
+                decision.title.trim(),
+                decision.context.trim(),
+                decision.decision.trim(),
+                trimmed_optional(decision.consequences.as_deref()),
+                decision.supersedes_decision_id,
+                relevant_paths,
+            ],
+        )?;
+        for task_id in &decision.relevant_task_ids {
+            transaction.execute(
+                "INSERT INTO architecture_decision_tasks (decision_id, task_id) VALUES (?1, ?2)",
+                params![decision.id, task_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.architecture_decision_by_id(&decision.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn decide_architecture_decision(
+        &mut self,
+        decision_id: &str,
+        status: ArchitectureDecisionStatus,
+    ) -> Result<Option<ArchitectureDecision>> {
+        if !matches!(
+            status,
+            ArchitectureDecisionStatus::Accepted | ArchitectureDecisionStatus::Rejected
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self.connection.transaction()?;
+        let context = proposed_architecture_decision_context(&transaction, decision_id)?;
+        let Some((project_id, supersedes_id)) = context else {
+            return Ok(None);
+        };
+        if status == ArchitectureDecisionStatus::Accepted {
+            supersede_previous_architecture_decision(
+                &transaction,
+                &project_id,
+                supersedes_id.as_deref(),
+            )?;
+        }
+        transaction.execute(
+            "UPDATE architecture_decisions
+             SET status = ?1, decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status = 'proposed'",
+            params![status.as_str(), decision_id],
+        )?;
+        transaction.commit()?;
+        self.architecture_decision_by_id(decision_id)
     }
 
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
@@ -2958,6 +3141,36 @@ impl Database {
         Ok(blocker)
     }
 
+    fn architecture_decision_by_id(&self, id: &str) -> Result<Option<ArchitectureDecision>> {
+        let decision = self
+            .connection
+            .query_row(
+                "SELECT id, project_id, decision_number, title, context, decision, consequences,
+                        status, supersedes_decision_id, relevant_paths, created_at, updated_at, decided_at
+                 FROM architecture_decisions WHERE id = ?1",
+                [id],
+                architecture_decision_from_row,
+            )
+            .optional()?;
+        decision
+            .map(|record| self.with_architecture_decision_tasks(record))
+            .transpose()
+    }
+
+    fn with_architecture_decision_tasks(
+        &self,
+        mut decision: ArchitectureDecision,
+    ) -> Result<ArchitectureDecision> {
+        let mut statement = self.connection.prepare(
+            "SELECT task_id FROM architecture_decision_tasks
+             WHERE decision_id = ?1 ORDER BY task_id",
+        )?;
+        decision.relevant_task_ids = statement
+            .query_map([&decision.id], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(decision)
+    }
+
     fn blocker_task_ids(&self, blocker_id: &str) -> Result<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT task_id FROM project_blocker_tasks WHERE blocker_id = ?1 ORDER BY task_id",
@@ -3227,6 +3440,25 @@ fn project_blocker_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectBlocker> {
         status: row.get(5)?,
         created_at: row.get(6)?,
         resolved_at: row.get(7)?,
+    })
+}
+
+fn architecture_decision_from_row(row: &rusqlite::Row<'_>) -> Result<ArchitectureDecision> {
+    Ok(ArchitectureDecision {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        decision_number: row.get(2)?,
+        title: row.get(3)?,
+        context: row.get(4)?,
+        decision: row.get(5)?,
+        consequences: row.get(6)?,
+        status: ArchitectureDecisionStatus::from_database(row.get(7)?)?,
+        supersedes_decision_id: row.get(8)?,
+        relevant_paths: decode_string_list(row.get(9)?)?,
+        relevant_task_ids: Vec::new(),
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        decided_at: row.get(12)?,
     })
 }
 
@@ -3594,6 +3826,144 @@ fn validate_new_project_blocker(
     Ok(())
 }
 
+fn validate_new_architecture_decision(
+    connection: &Connection,
+    decision: &NewArchitectureDecision,
+) -> Result<()> {
+    if decision.title.trim().is_empty()
+        || decision.context.trim().is_empty()
+        || decision.decision.trim().is_empty()
+        || decision
+            .relevant_paths
+            .iter()
+            .any(|path| path.trim().is_empty())
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    validate_architecture_decision_tasks(connection, decision)?;
+    validate_superseded_architecture_decision(connection, decision)?;
+    Ok(())
+}
+
+fn validate_architecture_decision_tasks(
+    connection: &Connection,
+    decision: &NewArchitectureDecision,
+) -> Result<()> {
+    let unique_tasks = decision.relevant_task_ids.iter().collect::<HashSet<_>>();
+    let unique_paths = decision.relevant_paths.iter().collect::<HashSet<_>>();
+    if unique_tasks.len() != decision.relevant_task_ids.len()
+        || unique_paths.len() != decision.relevant_paths.len()
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    for task_id in unique_tasks {
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND project_id = ?2)",
+            params![task_id, decision.project_id],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
+
+fn validate_superseded_architecture_decision(
+    connection: &Connection,
+    decision: &NewArchitectureDecision,
+) -> Result<()> {
+    let Some(supersedes_id) = decision.supersedes_decision_id.as_deref() else {
+        return Ok(());
+    };
+    let valid: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM architecture_decisions
+            WHERE id = ?1 AND project_id = ?2 AND status = 'accepted'
+         )",
+        params![supersedes_id, decision.project_id],
+        |row| row.get(0),
+    )?;
+    if valid {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
+    }
+}
+
+fn proposed_architecture_decision_context(
+    transaction: &rusqlite::Transaction<'_>,
+    decision_id: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    transaction
+        .query_row(
+            "SELECT project_id, supersedes_decision_id FROM architecture_decisions
+             WHERE id = ?1 AND status = 'proposed'",
+            [decision_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+}
+
+fn supersede_previous_architecture_decision(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    supersedes_id: Option<&str>,
+) -> Result<()> {
+    let Some(supersedes_id) = supersedes_id else {
+        return Ok(());
+    };
+    let changed = transaction.execute(
+        "UPDATE architecture_decisions
+         SET status = 'superseded', decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1 AND project_id = ?2 AND status = 'accepted'",
+        params![supersedes_id, project_id],
+    )?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
+    }
+}
+
+fn architecture_decision_applies(decision: &ArchitectureDecision, task: &Task) -> bool {
+    let project_wide = decision.relevant_task_ids.is_empty() && decision.relevant_paths.is_empty();
+    project_wide
+        || decision
+            .relevant_task_ids
+            .iter()
+            .any(|task_id| task_id == &task.id)
+        || decision.relevant_paths.iter().any(|decision_path| {
+            task.relevant_paths
+                .iter()
+                .any(|task_path| repository_paths_overlap(decision_path, task_path))
+        })
+}
+
+fn repository_paths_overlap(left: &str, right: &str) -> bool {
+    let left = normalized_repository_path(left);
+    let right = normalized_repository_path(right);
+    left == right
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn normalized_repository_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn trimmed_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn active_task_blocker_reason(
     connection: &Connection,
     task_id: &str,
@@ -3865,11 +4235,11 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentReviewDecision, AgentReviewStatus, AgentUpdate, Database, FlowLimitUpdate,
-        IntegrationStatus, NewAgent, NewAgentReview, NewEpic, NewMilestone, NewProject,
-        NewProjectBlocker, NewRun, NewTask, NewTaskInputRequest, NewValidationCommand,
-        ProjectDeletion, ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus,
-        TaskUpdate, ValidationStage, ValidationStatus,
+        AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus, Database,
+        FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview, NewArchitectureDecision,
+        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRun, NewTask, NewTaskInputRequest,
+        NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RevertStatus, RunStatus,
+        TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
     };
     use std::{
         fs,
@@ -5359,12 +5729,144 @@ mod tests {
             .list_task_input_requests("task-input")
             .expect("input history persists");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].answer.as_deref(), Some("Use device authorization."));
+        assert_eq!(
+            requests[0].answer.as_deref(),
+            Some("Use device authorization.")
+        );
         let blockers = reopened
             .list_project_blockers("project-1")
             .expect("blockers persist");
         assert_eq!(blockers.len(), 3);
         assert_eq!(blockers[0].id, "blocker-global");
+        drop(reopened);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn architecture_decisions_are_scoped_accepted_and_superseded_explicitly() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Knowledge project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-1".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/knowledge-project".into(),
+            })
+            .expect("project saves");
+        for (id, path) in [
+            ("task-auth", "src/auth/session.ts"),
+            ("task-docs", "docs/guide.md"),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-1".into(),
+                    title: id.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Outcome is verified".into()],
+                    implementation_notes: None,
+                    relevant_paths: vec![path.into()],
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: None,
+                    priority: TaskPriority::Normal,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+        }
+
+        let original = database
+            .create_architecture_decision(NewArchitectureDecision {
+                id: "adr-global".into(),
+                project_id: "project-1".into(),
+                title: "Use SQLite".into(),
+                context: "Project state must remain local-first.".into(),
+                decision: "Persist control-plane metadata in SQLite.".into(),
+                consequences: Some("Schema changes require migrations.".into()),
+                supersedes_decision_id: None,
+                relevant_paths: Vec::new(),
+                relevant_task_ids: Vec::new(),
+            })
+            .expect("proposal saves");
+        assert_eq!(original.decision_number, 1);
+        assert_eq!(original.status, ArchitectureDecisionStatus::Proposed);
+        assert!(database
+            .list_relevant_architecture_decisions("task-auth")
+            .expect("context loads")
+            .is_empty());
+        database
+            .decide_architecture_decision("adr-global", ArchitectureDecisionStatus::Accepted)
+            .expect("proposal accepts")
+            .expect("proposal exists");
+
+        let path_decision = database
+            .create_architecture_decision(NewArchitectureDecision {
+                id: "adr-auth".into(),
+                project_id: "project-1".into(),
+                title: "Centralize sessions".into(),
+                context: "Authentication has multiple consumers.".into(),
+                decision: "Keep session behavior under src/auth.".into(),
+                consequences: None,
+                supersedes_decision_id: None,
+                relevant_paths: vec!["src/auth".into()],
+                relevant_task_ids: Vec::new(),
+            })
+            .expect("path proposal saves");
+        assert_eq!(path_decision.decision_number, 2);
+        database
+            .decide_architecture_decision("adr-auth", ArchitectureDecisionStatus::Accepted)
+            .expect("path proposal accepts");
+        let auth_context = database
+            .list_relevant_architecture_decisions("task-auth")
+            .expect("auth context loads");
+        assert_eq!(auth_context.len(), 2);
+        assert_eq!(
+            database
+                .list_relevant_architecture_decisions("task-docs")
+                .expect("docs context loads")
+                .len(),
+            1
+        );
+
+        database
+            .create_architecture_decision(NewArchitectureDecision {
+                id: "adr-replacement".into(),
+                project_id: "project-1".into(),
+                title: "Use encrypted SQLite".into(),
+                context: "Stored project metadata may be sensitive.".into(),
+                decision: "Use the encrypted SQLite adapter.".into(),
+                consequences: None,
+                supersedes_decision_id: Some("adr-global".into()),
+                relevant_paths: Vec::new(),
+                relevant_task_ids: Vec::new(),
+            })
+            .expect("replacement proposal saves");
+        database
+            .decide_architecture_decision("adr-replacement", ArchitectureDecisionStatus::Accepted)
+            .expect("replacement accepts");
+        let history = database
+            .list_architecture_decisions("project-1")
+            .expect("history loads");
+        assert_eq!(history[0].status, ArchitectureDecisionStatus::Accepted);
+        assert_eq!(history[2].status, ArchitectureDecisionStatus::Superseded);
+
+        drop(database);
+        let mut reopened = Database::open(&database_path).expect("database reopens");
+        let persisted = reopened
+            .list_relevant_architecture_decisions("task-docs")
+            .expect("persisted context loads");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, "adr-replacement");
+        assert_eq!(
+            reopened
+                .delete_project("project-1")
+                .expect("project with ADR history deletes"),
+            ProjectDeletion::Deleted
+        );
         drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }
