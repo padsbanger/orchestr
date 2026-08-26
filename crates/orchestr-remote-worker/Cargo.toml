@@ -1,0 +1,14 @@
+[package]
+name = "orchestr-remote-worker"
+version = "0.1.0"
+description = "Authenticated HTTPS execution service for Orchestr workers"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+orchestr-worker = { path = "../orchestr-worker" }
+serde.workspace = true
+subtle = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

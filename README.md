@@ -7,6 +7,8 @@ traceable Git reverts for integrated regressions. Agents can pause with a
 persisted Needs Input request, while scoped project blockers suppress unsafe
 automatic scheduling until their shared cause is resolved. Accepted ADRs now
 provide durable, task-relevant project knowledge to implementers and reviewers.
+Authenticated TLS remote workers can execute project-assigned tasks on another
+machine while their output and lifecycle remain visible in the same timeline.
 
 ## M0 development
 
@@ -31,6 +33,9 @@ cargo test -p orchestr-db
 cargo test -p orchestr-git
 ```
 
+See [remote worker setup](docs/remote-worker.md) to configure the M21 worker
+daemon, authentication, TLS trust, and shared workspace.
+
 ## CRAP quality gates
 
 The Tauri workflow runs coverage-backed CRAP checks for both the desktop
@@ -43,8 +48,8 @@ npm run crap:rust
 npm run crap
 ```
 
-`crap4ts` currently covers the agent-review, flow-control, and recovery service
-boundaries, which have dedicated Vitest tests. The Rust gate compares against
+`crap4ts` currently covers the agent-review, flow-control, recovery, knowledge,
+and worker service boundaries. The Rust gate compares against
 the checked-in baseline, failing for a regression or for a new function whose
 score reaches 30.
 Refresh that baseline only after reviewing and intentionally accepting a report

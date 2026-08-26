@@ -11,18 +11,20 @@ use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
     ArchitectureDecisionStatus, Database, Epic, FlowLimitUpdate, FlowLimits, FlowState,
     IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewArchitectureDecision, NewEpic,
-    NewMilestone, NewProject, NewProjectBlocker, NewRun, NewRunEvent, NewTask, NewTaskInputRequest,
-    NewValidationCommand, NewValidationEvent, Project, ProjectBlocker, ProjectDeletion,
-    ProjectHealth, ProjectProgress, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput,
-    RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt,
-    ValidationCommand, ValidationStage, ValidationStatus, Workspace,
+    NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent, NewTask,
+    NewTaskInputRequest, NewValidationCommand, NewValidationEvent, Project, ProjectBlocker,
+    ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker, RevertAttempt, RevertStatus,
+    Run, RunEvent, RunOutput, RunStatus, Task, TaskInputRequest, TaskPriority, TaskStatus,
+    TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus,
+    WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
     AgentProvider, AgentRunInput, CodexProvider, ProviderAction, ProviderReadiness, ProviderStatus,
 };
 use orchestr_worker::{
-    LocalWorker, OutputStream, ProcessRequest, WorkerHandle, WorkerProfile, WorkerRun,
+    LocalWorker, OutputStream, ProcessRequest, RemoteJobRequest, RemoteWorkerClient,
+    RemoteWorkerConfig, WorkerHandle, WorkerProfile, WorkerRun,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -273,6 +275,16 @@ struct CreateArchitectureDecisionInput {
     relevant_task_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterRemoteWorkerInput {
+    endpoint: String,
+    token_environment_variable: String,
+    ca_certificate_path: Option<String>,
+    project_id: String,
+    workspace_path: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskInputRequestResponse {
@@ -325,6 +337,31 @@ struct ArchitectureDecisionResponse {
     created_at: String,
     updated_at: String,
     decided_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteWorkerWorkspaceResponse {
+    project_id: String,
+    workspace_path: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteWorkerResponse {
+    id: String,
+    name: String,
+    endpoint: String,
+    token_environment_variable: String,
+    has_custom_ca: bool,
+    os: String,
+    architecture: String,
+    status: String,
+    protocol_version: i64,
+    tools: Vec<WorkerToolCapability>,
+    workspaces: Vec<RemoteWorkerWorkspaceResponse>,
+    last_seen_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -750,6 +787,33 @@ impl From<ArchitectureDecision> for ArchitectureDecisionResponse {
     }
 }
 
+impl From<RemoteWorker> for RemoteWorkerResponse {
+    fn from(worker: RemoteWorker) -> Self {
+        Self {
+            id: worker.id,
+            name: worker.name,
+            endpoint: worker.endpoint,
+            token_environment_variable: worker.token_environment_variable,
+            has_custom_ca: worker.ca_certificate_pem.is_some(),
+            os: worker.os,
+            architecture: worker.architecture,
+            status: worker.status,
+            protocol_version: worker.protocol_version,
+            tools: worker.tools,
+            workspaces: worker
+                .workspaces
+                .into_iter()
+                .map(|workspace| RemoteWorkerWorkspaceResponse {
+                    project_id: workspace.project_id,
+                    workspace_path: workspace.workspace_path,
+                    enabled: workspace.enabled,
+                })
+                .collect(),
+            last_seen_at: worker.last_seen_at,
+        }
+    }
+}
+
 impl From<Milestone> for MilestoneResponse {
     fn from(value: Milestone) -> Self {
         Self {
@@ -1148,6 +1212,253 @@ fn get_local_worker_profile(state: State<'_, AppState>) -> Result<WorkerProfile,
 }
 
 #[tauri::command]
+fn list_remote_workers(state: State<'_, AppState>) -> Result<Vec<RemoteWorkerResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?
+        .list_remote_workers()
+        .map(|workers| workers.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load remote workers: {error}"))
+}
+
+#[tauri::command]
+fn register_remote_worker(
+    input: RegisterRemoteWorkerInput,
+    state: State<'_, AppState>,
+) -> Result<RemoteWorkerResponse, String> {
+    let (client, ca_certificate_pem) = remote_registration_client(&input)?;
+    let handshake = authenticated_remote_worker(&client)?;
+    persist_remote_worker(&state, input, ca_certificate_pem, handshake)
+}
+
+fn remote_registration_client(
+    input: &RegisterRemoteWorkerInput,
+) -> Result<(RemoteWorkerClient, Option<String>), String> {
+    let token = remote_worker_token(&input.token_environment_variable)?;
+    let ca_certificate_pem = read_ca_certificate(input.ca_certificate_path.as_deref())?;
+    let client = RemoteWorkerClient::connect(RemoteWorkerConfig {
+        endpoint: input.endpoint.clone(),
+        token,
+        ca_certificate_pem: ca_certificate_pem.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    Ok((client, ca_certificate_pem))
+}
+
+fn authenticated_remote_worker(
+    client: &RemoteWorkerClient,
+) -> Result<orchestr_worker::RemoteWorkerHandshake, String> {
+    let handshake = client
+        .handshake()
+        .map_err(|error| format!("Unable to authenticate with the remote worker: {error}"))?;
+    validate_remote_protocol(handshake.protocol_version)?;
+    Ok(handshake)
+}
+
+#[tauri::command]
+fn refresh_remote_worker(
+    worker_id: String,
+    state: State<'_, AppState>,
+) -> Result<RemoteWorkerResponse, String> {
+    required_remote_worker(&state, &worker_id)
+        .and_then(|worker| refresh_remote_worker_record(&state, &worker))
+}
+
+fn refresh_remote_worker_record(
+    state: &AppState,
+    worker: &RemoteWorker,
+) -> Result<RemoteWorkerResponse, String> {
+    let handshake = refresh_remote_handshake(state, worker)?;
+    let workspace = worker
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.enabled)
+        .ok_or_else(|| "The remote worker has no enabled project workspace.".to_owned())?;
+    persist_remote_worker_record(state, worker, workspace, handshake)
+}
+
+fn refresh_remote_handshake(
+    state: &AppState,
+    worker: &RemoteWorker,
+) -> Result<orchestr_worker::RemoteWorkerHandshake, String> {
+    match remote_worker_handshake(&worker) {
+        Ok(handshake) => {
+            validate_remote_protocol(handshake.protocol_version)?;
+            Ok(handshake)
+        }
+        Err(error) => {
+            let _ = state
+                .database
+                .lock()
+                .ok()
+                .and_then(|mut database| database.mark_remote_worker_offline(&worker.id).ok());
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn delete_remote_worker(worker_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?;
+    ensure_remote_worker_removable(&database, &worker_id)?;
+    remove_remote_worker_record(&mut database, &worker_id)
+}
+
+fn ensure_remote_worker_removable(database: &Database, worker_id: &str) -> Result<(), String> {
+    if database
+        .worker_has_active_runs(worker_id)
+        .map_err(|error| format!("Unable to inspect remote jobs: {error}"))?
+    {
+        return Err(
+            "Cancel or finish the worker's queued and active tasks before removing it.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn remove_remote_worker_record(database: &mut Database, worker_id: &str) -> Result<(), String> {
+    if database
+        .delete_remote_worker(worker_id)
+        .map_err(|error| format!("Unable to remove the remote worker: {error}"))?
+    {
+        Ok(())
+    } else {
+        Err("The remote worker no longer exists.".into())
+    }
+}
+
+fn persist_remote_worker(
+    state: &AppState,
+    input: RegisterRemoteWorkerInput,
+    ca_certificate_pem: Option<String>,
+    handshake: orchestr_worker::RemoteWorkerHandshake,
+) -> Result<RemoteWorkerResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?
+        .register_remote_worker(NewRemoteWorker {
+            id: handshake.profile.id,
+            name: handshake.profile.name,
+            endpoint: input.endpoint.trim_end_matches('/').to_owned(),
+            token_environment_variable: input.token_environment_variable,
+            ca_certificate_pem,
+            os: handshake.profile.os,
+            architecture: handshake.profile.architecture,
+            protocol_version: i64::from(handshake.protocol_version),
+            tools: stored_worker_tools(handshake.profile.tools),
+            project_id: input.project_id,
+            workspace_path: input.workspace_path,
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to persist the remote worker registration: {error}"))
+}
+
+fn persist_remote_worker_record(
+    state: &AppState,
+    worker: &RemoteWorker,
+    workspace: &orchestr_db::RemoteWorkerWorkspace,
+    handshake: orchestr_worker::RemoteWorkerHandshake,
+) -> Result<RemoteWorkerResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?
+        .register_remote_worker(NewRemoteWorker {
+            id: handshake.profile.id,
+            name: handshake.profile.name,
+            endpoint: worker.endpoint.clone(),
+            token_environment_variable: worker.token_environment_variable.clone(),
+            ca_certificate_pem: worker.ca_certificate_pem.clone(),
+            os: handshake.profile.os,
+            architecture: handshake.profile.architecture,
+            protocol_version: i64::from(handshake.protocol_version),
+            tools: stored_worker_tools(handshake.profile.tools),
+            project_id: workspace.project_id.clone(),
+            workspace_path: workspace.workspace_path.clone(),
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to refresh the remote worker: {error}"))
+}
+
+fn stored_worker_tools(tools: Vec<orchestr_worker::ToolCapability>) -> Vec<WorkerToolCapability> {
+    tools
+        .into_iter()
+        .map(|tool| WorkerToolCapability {
+            name: tool.name,
+            installed: tool.installed,
+            version: tool.version,
+        })
+        .collect()
+}
+
+fn required_remote_worker(state: &AppState, worker_id: &str) -> Result<RemoteWorker, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local worker registry is unavailable.".to_owned())?
+        .get_remote_worker(worker_id)
+        .map_err(|error| format!("Unable to load the remote worker: {error}"))?
+        .ok_or_else(|| "The remote worker no longer exists.".into())
+}
+
+fn remote_worker_handshake(
+    worker: &RemoteWorker,
+) -> Result<orchestr_worker::RemoteWorkerHandshake, String> {
+    remote_worker_client(worker)?
+        .handshake()
+        .map_err(|error| format!("Unable to reach the remote worker: {error}"))
+}
+
+fn remote_worker_client(worker: &RemoteWorker) -> Result<RemoteWorkerClient, String> {
+    RemoteWorkerClient::connect(RemoteWorkerConfig {
+        endpoint: worker.endpoint.clone(),
+        token: remote_worker_token(&worker.token_environment_variable)?,
+        ca_certificate_pem: worker.ca_certificate_pem.clone(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn remote_worker_token(environment_variable: &str) -> Result<String, String> {
+    std::env::var(environment_variable)
+        .ok()
+        .filter(|value| value.trim().len() >= 32)
+        .ok_or_else(|| {
+            format!(
+                "Set {environment_variable} to the worker's bearer token (at least 32 characters) before connecting."
+            )
+        })
+}
+
+fn read_ca_certificate(path: Option<&str>) -> Result<Option<String>, String> {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Unable to inspect the worker CA certificate: {error}"))?;
+    if metadata.len() > 1_000_000 {
+        return Err("The worker CA certificate is unexpectedly large.".into());
+    }
+    fs::read_to_string(path)
+        .map(Some)
+        .map_err(|error| format!("Unable to read the worker CA certificate: {error}"))
+}
+
+fn validate_remote_protocol(protocol_version: u32) -> Result<(), String> {
+    if protocol_version == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Remote worker protocol {protocol_version} is not supported by this desktop."
+        ))
+    }
+}
+
+#[tauri::command]
 fn run_local_diagnostic(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1254,16 +1565,14 @@ fn start_local_worker_run(
             .and_then(|mut runs| runs.remove(&event_run_id))
             .is_some_and(|run| run.cancel_requested);
         let (kind, text, exit_code) = match result {
-            Ok(status) if cancelled => (
-                "cancelled",
-                Some("Command cancelled.".into()),
-                status.code(),
-            ),
-            Ok(status) if status.success() => ("completed", None, status.code()),
+            Ok(status) if cancelled => {
+                ("cancelled", Some("Command cancelled.".into()), status.code)
+            }
+            Ok(status) if status.success => ("completed", None, status.code),
             Ok(status) => (
                 "failed",
                 Some("Command exited with an error.".into()),
-                status.code(),
+                status.code,
             ),
             Err(error) => ("failed", Some(error.to_string()), None),
         };
@@ -1969,7 +2278,7 @@ fn start_agent_review(
                 None,
                 Some("Architect review cancelled.".into()),
             ),
-            Ok(exit_status) if exit_status.success() => {
+            Ok(exit_status) if exit_status.success => {
                 let output = database
                     .lock()
                     .ok()
@@ -2795,7 +3104,7 @@ fn run_validation(
             )?;
         }
         match handle.wait() {
-            Ok(exit) if exit.success() => append_validation_event(
+            Ok(exit) if exit.success => append_validation_event(
                 database,
                 app,
                 &attempt_id,
@@ -2804,7 +3113,7 @@ fn run_validation(
                     kind: "command.completed".into(),
                     message: format!("{} passed.", command.name),
                     stream: None,
-                    exit_code: exit.code(),
+                    exit_code: exit.code,
                 },
             )?,
             Ok(exit) => {
@@ -2812,8 +3121,7 @@ fn run_validation(
                 failure = Some(format!(
                     "{} failed with exit code {}.",
                     command.name,
-                    exit.code()
-                        .map_or("unknown".into(), |code| code.to_string())
+                    exit.code.map_or("unknown".into(), |code| code.to_string())
                 ));
                 append_validation_event(
                     database,
@@ -2824,7 +3132,7 @@ fn run_validation(
                         kind: "command.failed".into(),
                         message: failure.clone().unwrap_or_default(),
                         stream: None,
-                        exit_code: exit.code(),
+                        exit_code: exit.code,
                     },
                 )?;
                 break;
@@ -3303,7 +3611,7 @@ fn start_task_run(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartedTaskRunResponse, String> {
-    let (task, agent) = {
+    let (task, agent, remote_worker) = {
         let database = state
             .database
             .lock()
@@ -3327,20 +3635,15 @@ fn start_task_run(
             .map_err(|error| format!("Unable to load the assigned agent: {error}"))?
             .ok_or_else(|| "The assigned agent no longer exists.".to_owned())?;
         if agent.provider != "codex" {
-            return Err("Only Codex agents can run locally at this stage.".into());
+            return Err("Only Codex agents can execute tasks at this stage.".into());
         }
-        (task, agent)
+        let remote_worker = database
+            .remote_worker_for_project(&task.project_id)
+            .map_err(|error| format!("Unable to resolve the task worker: {error}"))?;
+        (task, agent, remote_worker)
     };
 
-    let provider_status = CodexProvider
-        .inspect()
-        .map_err(|error| format!("Unable to inspect Codex before starting the task: {error}"))?;
-    if !matches!(provider_status.readiness, ProviderReadiness::Ready) {
-        return Err(format!(
-            "Codex is not ready to run this task. {}",
-            provider_status.detail
-        ));
-    }
+    verify_task_worker_readiness(remote_worker.as_ref())?;
 
     if task.worktree_path.is_some() {
         return Err(
@@ -3348,6 +3651,9 @@ fn start_task_run(
                 .into(),
         );
     }
+    let worker_id = remote_worker
+        .as_ref()
+        .map_or_else(|| LOCAL_WORKER_ID.to_owned(), |worker| worker.id.clone());
     let run_id = Uuid::new_v4().to_string();
     let (queued_run, queued_task) = state
         .database
@@ -3357,7 +3663,7 @@ fn start_task_run(
             id: run_id.clone(),
             task_id: task.id,
             agent_id: agent.id,
-            worker_id: LOCAL_WORKER_ID.to_owned(),
+            worker_id,
         })
         .map_err(|error| format!("Unable to queue the task run: {error}"))?;
     dispatch_queued_task_runs(
@@ -3383,6 +3689,57 @@ fn start_task_run(
     })
 }
 
+fn verify_task_worker_readiness(remote_worker: Option<&RemoteWorker>) -> Result<(), String> {
+    match remote_worker {
+        Some(worker) => verify_remote_task_worker(worker),
+        None => verify_local_task_worker(),
+    }
+}
+
+fn verify_local_task_worker() -> Result<(), String> {
+    let provider_status = CodexProvider
+        .inspect()
+        .map_err(|error| format!("Unable to inspect Codex before starting the task: {error}"))?;
+    if matches!(provider_status.readiness, ProviderReadiness::Ready) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Codex is not ready to run this task. {}",
+            provider_status.detail
+        ))
+    }
+}
+
+fn verify_remote_task_worker(worker: &RemoteWorker) -> Result<(), String> {
+    if worker.status != "online" {
+        return Err(
+            "The project's remote worker is offline. Refresh it from Workers first.".into(),
+        );
+    }
+    remote_worker_handshake(worker)
+        .and_then(verified_remote_profile)
+        .and_then(verify_remote_codex)
+}
+
+fn verified_remote_profile(
+    handshake: orchestr_worker::RemoteWorkerHandshake,
+) -> Result<WorkerProfile, String> {
+    validate_remote_protocol(handshake.protocol_version)?;
+    Ok(handshake.profile)
+}
+
+fn verify_remote_codex(profile: WorkerProfile) -> Result<(), String> {
+    if profile
+        .tools
+        .iter()
+        .any(|tool| tool.name == "codex" && tool.installed)
+    {
+        Ok(())
+    } else {
+        Err("Codex is not installed on the project's remote worker.".into())
+    }
+}
+
 fn dispatch_queued_task_runs(
     app: AppHandle,
     database: Arc<Mutex<Database>>,
@@ -3403,11 +3760,39 @@ fn dispatch_queued_task_runs(
 }
 
 fn claim_queued_task_run(database: &Arc<Mutex<Database>>) -> Result<Option<(Run, Task)>, String> {
-    database
+    let mut store = database
         .lock()
-        .map_err(|_| "The local run store is unavailable.".to_owned())?
-        .claim_next_run(LOCAL_WORKER_ID)
-        .map_err(|error| format!("Unable to claim queued work: {error}"))
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let worker_ids = dispatch_worker_ids(&store)?;
+    claim_first_worker_run(&mut store, worker_ids)
+}
+
+fn dispatch_worker_ids(database: &Database) -> Result<Vec<String>, String> {
+    let mut worker_ids = vec![LOCAL_WORKER_ID.to_owned()];
+    worker_ids.extend(
+        database
+            .list_remote_workers()
+            .map_err(|error| format!("Unable to load dispatch workers: {error}"))?
+            .into_iter()
+            .filter(|worker| worker.status == "online")
+            .map(|worker| worker.id),
+    );
+    Ok(worker_ids)
+}
+
+fn claim_first_worker_run(
+    database: &mut Database,
+    worker_ids: Vec<String>,
+) -> Result<Option<(Run, Task)>, String> {
+    for worker_id in worker_ids {
+        if let Some(claimed) = database
+            .claim_next_run(&worker_id)
+            .map_err(|error| format!("Unable to claim queued work: {error}"))?
+        {
+            return Ok(Some(claimed));
+        }
+    }
+    Ok(None)
 }
 
 fn dispatch_claimed_task_run(
@@ -3417,36 +3802,48 @@ fn dispatch_claimed_task_run(
     database: Arc<Mutex<Database>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
 ) {
-    let result = load_queued_run_context(&database, &run, &task).and_then(
-        |(agent, workspace_path, default_branch)| {
-            launch_claimed_task_run(
-                run.clone(),
-                task,
-                agent,
-                workspace_path,
-                default_branch,
-                app.clone(),
-                Arc::clone(&database),
-                Arc::clone(&active_runs),
-            )
-        },
-    );
+    let result = load_queued_run_context(&database, &run, &task).and_then(|context| {
+        launch_claimed_task_run(
+            run.clone(),
+            task,
+            context.agent,
+            context.workspace_path,
+            context.default_branch,
+            context.remote_worker,
+            app.clone(),
+            Arc::clone(&database),
+            Arc::clone(&active_runs),
+        )
+    });
     if let Err(error) = result {
         record_task_launch_failure(&database, &app, run.id, error);
     }
+}
+
+struct QueuedRunContext {
+    agent: Agent,
+    workspace_path: String,
+    default_branch: String,
+    remote_worker: Option<RemoteWorker>,
 }
 
 fn load_queued_run_context(
     database: &Arc<Mutex<Database>>,
     run: &Run,
     task: &Task,
-) -> Result<(Agent, String, String), String> {
+) -> Result<QueuedRunContext, String> {
     let store = database
         .lock()
         .map_err(|_| "The local run store is unavailable.".to_owned())?;
     let agent = queued_run_agent(&store, &run.agent_id)?;
-    let (workspace_path, default_branch) = queued_run_workspace(&store, &task.project_id)?;
-    Ok((agent, workspace_path, default_branch))
+    let (workspace_path, default_branch, remote_worker) =
+        queued_run_workspace(&store, &task.project_id, &run.worker_id)?;
+    Ok(QueuedRunContext {
+        agent,
+        workspace_path,
+        default_branch,
+        remote_worker,
+    })
 }
 
 fn queued_run_agent(database: &Database, agent_id: &str) -> Result<Agent, String> {
@@ -3456,17 +3853,49 @@ fn queued_run_agent(database: &Database, agent_id: &str) -> Result<Agent, String
         .ok_or_else(|| "The queued run's agent no longer exists.".to_owned())
 }
 
-fn queued_run_workspace(database: &Database, project_id: &str) -> Result<(String, String), String> {
+fn queued_run_workspace(
+    database: &Database,
+    project_id: &str,
+    worker_id: &str,
+) -> Result<(String, String, Option<RemoteWorker>), String> {
     let project = database
         .get_project(project_id)
         .map_err(|error| format!("Unable to load the queued run's project: {error}"))?
         .ok_or_else(|| "The queued run's project no longer exists.".to_owned())?;
+    if worker_id == LOCAL_WORKER_ID {
+        return local_queued_run_workspace(project);
+    }
+    remote_queued_run_workspace(database, project, worker_id)
+}
+
+fn local_queued_run_workspace(
+    project: Project,
+) -> Result<(String, String, Option<RemoteWorker>), String> {
     project
         .workspaces
         .into_iter()
         .find(|workspace| workspace.worker_id == LOCAL_WORKER_ID)
-        .map(|workspace| (workspace.path, project.default_branch))
+        .map(|workspace| (workspace.path, project.default_branch, None))
         .ok_or_else(|| "This project has no local workspace.".to_owned())
+}
+
+fn remote_queued_run_workspace(
+    database: &Database,
+    project: Project,
+    worker_id: &str,
+) -> Result<(String, String, Option<RemoteWorker>), String> {
+    let worker = database
+        .get_remote_worker(worker_id)
+        .map_err(|error| format!("Unable to load the remote execution worker: {error}"))?
+        .filter(|worker| worker.status == "online")
+        .ok_or_else(|| "The remote execution worker is offline or unavailable.".to_owned())?;
+    let workspace_path = worker
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.project_id == project.id && workspace.enabled)
+        .map(|workspace| workspace.workspace_path.clone())
+        .ok_or_else(|| "The remote worker has no enabled workspace for this project.".to_owned())?;
+    Ok((workspace_path, project.default_branch, Some(worker)))
 }
 
 fn record_task_launch_failure(
@@ -3499,6 +3928,7 @@ fn launch_claimed_task_run(
     agent: Agent,
     workspace_path: String,
     default_branch: String,
+    remote_worker: Option<RemoteWorker>,
     app: AppHandle,
     database: Arc<Mutex<Database>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
@@ -3506,12 +3936,15 @@ fn launch_claimed_task_run(
     let architecture_decisions = load_task_architecture_context(&database, &task.id)?;
     let prepared = prepare_task_run_worktree(&task, &workspace_path, &default_branch, &database)?;
     let run = start_task_worker(
+        &persisted_run.id,
         &task,
         &agent,
         &architecture_decisions,
         &prepared.worktree_path,
+        remote_worker.as_ref(),
     )?;
     record_task_worktree_events(&database, &persisted_run.id, &prepared);
+    record_execution_worker_event(&database, &persisted_run.id, remote_worker.as_ref());
     register_task_worker(
         run,
         persisted_run.id,
@@ -3525,14 +3958,185 @@ fn launch_claimed_task_run(
 }
 
 fn start_task_worker(
+    run_id: &str,
     task: &Task,
     agent: &Agent,
     architecture_decisions: &[ArchitectureDecision],
     worktree_path: &str,
+    remote_worker: Option<&RemoteWorker>,
 ) -> Result<WorkerRun, String> {
     let request = prepare_task_process_request(task, agent, architecture_decisions, worktree_path)?;
-    LocalWorker::start(request)
-        .map_err(|error| format!("Unable to start Codex for this task: {error}"))
+    dispatch_task_process(run_id, request, remote_worker)
+}
+
+fn dispatch_task_process(
+    run_id: &str,
+    request: ProcessRequest,
+    remote_worker: Option<&RemoteWorker>,
+) -> Result<WorkerRun, String> {
+    match remote_worker {
+        Some(worker) => start_remote_task_process(run_id, request, worker),
+        None => LocalWorker::start(request)
+            .map_err(|error| format!("Unable to start Codex for this task: {error}")),
+    }
+}
+
+fn start_remote_task_process(
+    run_id: &str,
+    request: ProcessRequest,
+    worker: &RemoteWorker,
+) -> Result<WorkerRun, String> {
+    remote_worker_client(worker)?
+        .start(RemoteJobRequest {
+            id: run_id.to_owned(),
+            process: request,
+        })
+        .map_err(|error| format!("Unable to start the remote Codex task: {error}"))
+}
+
+fn record_execution_worker_event(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    remote_worker: Option<&RemoteWorker>,
+) {
+    let Some(worker) = remote_worker else {
+        return;
+    };
+    if let Ok(mut database) = database.lock() {
+        let _ = database.append_run_event(
+            run_id,
+            NewRunEvent {
+                kind: "worker.remote.connected".into(),
+                message: format!("Task dispatched to {} at {}.", worker.name, worker.endpoint),
+                command: None,
+                file_path: None,
+                exit_code: None,
+            },
+        );
+    }
+}
+
+fn reconnect_remote_task_runs(
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) -> Result<(), String> {
+    let runs = running_remote_runs(&database)?;
+    for run in runs {
+        if let Err(error) = reconnect_remote_task_run(
+            &run,
+            app.clone(),
+            Arc::clone(&database),
+            Arc::clone(&active_runs),
+        ) {
+            record_task_launch_failure(&database, &app, run.id, error);
+        }
+    }
+    Ok(())
+}
+
+fn running_remote_runs(database: &Arc<Mutex<Database>>) -> Result<Vec<Run>, String> {
+    database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .list_running_remote_runs(LOCAL_WORKER_ID)
+        .map_err(|error| format!("Unable to load interrupted remote runs: {error}"))
+}
+
+fn reconnect_remote_task_run(
+    persisted_run: &Run,
+    app: AppHandle,
+    database: Arc<Mutex<Database>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
+) -> Result<(), String> {
+    let (task, worker) = load_remote_reconnect_context(&database, persisted_run)?;
+    let prepared = interrupted_run_preparation(&task)?;
+    let remote_run = reconnect_worker_job(
+        &worker,
+        &persisted_run.id,
+        persisted_run.output.len() as u64,
+    )?;
+    record_remote_reconnect_event(&database, &persisted_run.id, &worker);
+    register_task_worker(
+        remote_run,
+        persisted_run.id.clone(),
+        task.project_id.clone(),
+        task.id,
+        prepared,
+        app,
+        database,
+        active_runs,
+    )
+}
+
+fn interrupted_run_preparation(task: &Task) -> Result<PreparedTaskRun, String> {
+    let worktree_path = task
+        .worktree_path
+        .clone()
+        .ok_or_else(|| "The interrupted remote run has no recorded worktree.".to_owned())?;
+    let branch = task
+        .branch
+        .clone()
+        .ok_or_else(|| "The interrupted remote run has no recorded task branch.".to_owned())?;
+    Ok(PreparedTaskRun {
+        branch,
+        repository_before: repository_observation(Path::new(&worktree_path)),
+        worktree_path,
+        created_branch: false,
+    })
+}
+
+fn reconnect_worker_job(
+    worker: &RemoteWorker,
+    run_id: &str,
+    after: u64,
+) -> Result<WorkerRun, String> {
+    remote_worker_client(worker).map(|client| client.reconnect(run_id, after))
+}
+
+fn load_remote_reconnect_context(
+    database: &Arc<Mutex<Database>>,
+    run: &Run,
+) -> Result<(Task, RemoteWorker), String> {
+    let store = database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?;
+    let task = interrupted_remote_task(&store, &run.task_id)?;
+    let worker = interrupted_remote_worker(&store, &run.worker_id)?;
+    Ok((task, worker))
+}
+
+fn interrupted_remote_task(database: &Database, task_id: &str) -> Result<Task, String> {
+    database
+        .get_task(task_id)
+        .map_err(|error| format!("Unable to load the interrupted remote task: {error}"))?
+        .ok_or_else(|| "The interrupted remote task no longer exists.".to_owned())
+}
+
+fn interrupted_remote_worker(database: &Database, worker_id: &str) -> Result<RemoteWorker, String> {
+    database
+        .get_remote_worker(worker_id)
+        .map_err(|error| format!("Unable to load the interrupted remote worker: {error}"))?
+        .ok_or_else(|| "The interrupted remote worker is no longer registered.".to_owned())
+}
+
+fn record_remote_reconnect_event(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    worker: &RemoteWorker,
+) {
+    if let Ok(mut database) = database.lock() {
+        let _ = database.append_run_event(
+            run_id,
+            NewRunEvent {
+                kind: "worker.remote.reconnected".into(),
+                message: format!("Reconnected to {} after Orchestr restarted.", worker.name),
+                command: None,
+                file_path: None,
+                exit_code: None,
+            },
+        );
+    }
 }
 
 fn load_task_architecture_context(
@@ -3857,7 +4461,7 @@ struct TaskRunOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn classify_task_process_result(
-    result: orchestr_worker::Result<std::process::ExitStatus>,
+    result: orchestr_worker::Result<orchestr_worker::ProcessExit>,
     cancelled: bool,
     database: &Arc<Mutex<Database>>,
     app: &AppHandle,
@@ -3883,7 +4487,7 @@ fn classify_task_process_result(
 
 #[allow(clippy::too_many_arguments)]
 fn classify_task_exit_status(
-    exit_status: std::process::ExitStatus,
+    exit_status: orchestr_worker::ProcessExit,
     cancelled: bool,
     database: &Arc<Mutex<Database>>,
     app: &AppHandle,
@@ -3897,11 +4501,11 @@ fn classify_task_exit_status(
             status: RunStatus::Cancelled,
             kind: "cancelled",
             text: Some("Codex task cancelled.".into()),
-            exit_code: exit_status.code(),
+            exit_code: exit_status.code,
         };
     }
-    if !exit_status.success() {
-        return failed_task_outcome("Codex exited with an error.".into(), exit_status.code());
+    if !exit_status.success {
+        return failed_task_outcome("Codex exited with an error.".into(), exit_status.code);
     }
     classify_successful_task_exit(
         database,
@@ -3910,7 +4514,7 @@ fn classify_task_exit_status(
         project_id,
         task_id,
         worktree_path,
-        exit_status.code(),
+        exit_status.code,
     )
 }
 
@@ -5247,6 +5851,11 @@ fn main() {
                 database: Arc::clone(&database),
                 local_worker_runs: Arc::clone(&local_worker_runs),
             });
+            reconnect_remote_task_runs(
+                app.handle().clone(),
+                Arc::clone(&database),
+                Arc::clone(&local_worker_runs),
+            )?;
             dispatch_queued_task_runs(app.handle().clone(), database, local_worker_runs)
                 .map_err(std::io::Error::other)?;
             Ok(())
@@ -5264,6 +5873,10 @@ fn main() {
             get_repository_diff,
             get_repository_file_preview,
             get_local_worker_profile,
+            list_remote_workers,
+            register_remote_worker,
+            refresh_remote_worker,
+            delete_remote_worker,
             run_local_diagnostic,
             get_codex_provider_status,
             start_codex_login,

@@ -35,10 +35,11 @@ Completed milestones:
 - M18 — Failure Recovery + Revert
 - M19 — Project Blockers + Needs Input
 - M20 — Architecture Decisions / Project Knowledge
+- M21 — Remote Worker Protocol
 
 Immediate next milestone:
 
-**M21 — Remote Worker Protocol**
+**M22 — Worker Management**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1278,21 +1279,21 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M21 — Remote Worker Protocol**
+**M22 — Worker Management**
 
 Do not prioritize:
 
 - architect agent
 - autonomous planning
-- remote workers
+- capability-aware scheduling
 - cloud sync
 - GitHub integration
 
 before accepted work can reliably land on a healthy integration branch.
 
-Immediately after integration correctness, bounded parallel scheduling,
-failure recovery, and explicit blockers, prioritize durable architecture
-decisions and project knowledge.
+After the authenticated remote-worker protocol, prioritize clear worker
+inventory, status, capability, and maintenance controls before automatic
+capability-based worker selection.
 
 ---
 

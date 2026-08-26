@@ -16,6 +16,27 @@ export type WorkerProfile = {
   tools: ToolCapability[];
 };
 
+export type RemoteWorkerWorkspace = {
+  projectId: string;
+  workspacePath: string;
+  enabled: boolean;
+};
+
+export type RemoteWorker = {
+  id: string;
+  name: string;
+  endpoint: string;
+  tokenEnvironmentVariable: string;
+  hasCustomCa: boolean;
+  os: string;
+  architecture: string;
+  status: "online" | "offline";
+  protocolVersion: number;
+  tools: ToolCapability[];
+  workspaces: RemoteWorkerWorkspace[];
+  lastSeenAt: string;
+};
+
 export type WorkerRunEvent = {
   runId: string;
   kind: "output" | "completed" | "failed" | "cancelled";
@@ -32,6 +53,28 @@ export type LocalWorkerRun = {
 
 export function getLocalWorkerProfile(): Promise<WorkerProfile> {
   return invoke<WorkerProfile>("get_local_worker_profile");
+}
+
+export function listRemoteWorkers(): Promise<RemoteWorker[]> {
+  return invoke<RemoteWorker[]>("list_remote_workers");
+}
+
+export function registerRemoteWorker(input: {
+  endpoint: string;
+  tokenEnvironmentVariable: string;
+  caCertificatePath?: string;
+  projectId: string;
+  workspacePath: string;
+}): Promise<RemoteWorker> {
+  return invoke<RemoteWorker>("register_remote_worker", { input });
+}
+
+export function refreshRemoteWorker(workerId: string): Promise<RemoteWorker> {
+  return invoke<RemoteWorker>("refresh_remote_worker", { workerId });
+}
+
+export function deleteRemoteWorker(workerId: string): Promise<void> {
+  return invoke<void>("delete_remote_worker", { workerId });
 }
 
 export function runLocalDiagnostic(): Promise<LocalWorkerRun> {

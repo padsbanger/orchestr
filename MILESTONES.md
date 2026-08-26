@@ -915,7 +915,9 @@ Agents receive consistent, inspectable project knowledge and do not casually con
 
 ---
 
-# M21 — Remote Worker Protocol
+# M21 — Remote Worker Protocol — Complete
+
+**Completed:** 2026-08-26
 
 ### Goal
 
@@ -1314,10 +1316,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M20 state:
+Continue from the completed M21 state:
 
 ```text
-1. Implement the authenticated remote worker protocol
+1. Implement heterogeneous worker management
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

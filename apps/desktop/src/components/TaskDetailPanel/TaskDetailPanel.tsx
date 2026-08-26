@@ -222,7 +222,7 @@ function RunSummary({ run, now }: { run: TaskRun; now: number }) {
   };
 
   return <div className="task-run-summary">
-    <div className="task-run-meta"><span className={`run-status ${run.status}`}>{run.status}</span><span>{formatDuration(runtime)}</span>{run.exitCode !== null && <span>exit {run.exitCode}</span>}<button className="task-run-log-link" type="button" disabled={isExporting} onClick={() => void exportRawLog()}><Download size={13} /> {isExporting ? "Saving..." : "Log.txt"}</button></div>
+    <div className="task-run-meta"><span className={`run-status ${run.status}`}>{run.status}</span><span>{run.workerId === "local" ? "local worker" : run.workerId}</span><span>{formatDuration(runtime)}</span>{run.exitCode !== null && <span>exit {run.exitCode}</span>}<button className="task-run-log-link" type="button" disabled={isExporting} onClick={() => void exportRawLog()}><Download size={13} /> {isExporting ? "Saving..." : "Log.txt"}</button></div>
     {run.error && <p className="task-run-error">{run.error}</p>}
     {exportError && <p className="task-run-error">{exportError}</p>}
     <div ref={timelineRef} className="task-run-timeline" aria-live="polite">{run.events.length === 0 ? <p>Waiting for Codex events...</p> : run.events.map((event) => <TimelineEvent event={event} key={event.id} />)}</div>

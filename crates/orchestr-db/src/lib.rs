@@ -41,6 +41,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         18,
         include_str!("../migrations/0018_architecture_decisions.sql"),
     ),
+    (19, include_str!("../migrations/0019_remote_workers.sql")),
 ];
 
 pub struct Database {
@@ -550,6 +551,52 @@ pub struct NewArchitectureDecision {
     pub supersedes_decision_id: Option<String>,
     pub relevant_paths: Vec<String>,
     pub relevant_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WorkerToolCapability {
+    pub name: String,
+    pub installed: bool,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorkerWorkspace {
+    pub project_id: String,
+    pub workspace_path: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorker {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub token_environment_variable: String,
+    pub ca_certificate_pem: Option<String>,
+    pub os: String,
+    pub architecture: String,
+    pub status: String,
+    pub protocol_version: i64,
+    pub tools: Vec<WorkerToolCapability>,
+    pub workspaces: Vec<RemoteWorkerWorkspace>,
+    pub last_seen_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub struct NewRemoteWorker {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub token_environment_variable: String,
+    pub ca_certificate_pem: Option<String>,
+    pub os: String,
+    pub architecture: String,
+    pub protocol_version: i64,
+    pub tools: Vec<WorkerToolCapability>,
+    pub project_id: String,
+    pub workspace_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1469,6 +1516,118 @@ impl Database {
         self.architecture_decision_by_id(decision_id)
     }
 
+    pub fn list_remote_workers(&self) -> Result<Vec<RemoteWorker>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, endpoint, token_environment_variable, ca_certificate_pem,
+                    os, architecture, status, protocol_version, tools, last_seen_at,
+                    created_at, updated_at
+             FROM remote_workers ORDER BY name ASC, id ASC",
+        )?;
+        let workers = statement
+            .query_map([], remote_worker_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        workers
+            .into_iter()
+            .map(|worker| self.with_remote_worker_workspaces(worker))
+            .collect()
+    }
+
+    pub fn get_remote_worker(&self, worker_id: &str) -> Result<Option<RemoteWorker>> {
+        let worker = self
+            .connection
+            .query_row(
+                "SELECT id, name, endpoint, token_environment_variable, ca_certificate_pem,
+                        os, architecture, status, protocol_version, tools, last_seen_at,
+                        created_at, updated_at
+                 FROM remote_workers WHERE id = ?1",
+                [worker_id],
+                remote_worker_from_row,
+            )
+            .optional()?;
+        worker
+            .map(|record| self.with_remote_worker_workspaces(record))
+            .transpose()
+    }
+
+    pub fn remote_worker_for_project(&self, project_id: &str) -> Result<Option<RemoteWorker>> {
+        let worker_id = self
+            .connection
+            .query_row(
+                "SELECT worker_id FROM remote_worker_projects
+                 WHERE project_id = ?1 AND enabled = 1",
+                [project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        worker_id
+            .map(|worker_id| self.get_remote_worker(&worker_id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn register_remote_worker(&mut self, worker: NewRemoteWorker) -> Result<RemoteWorker> {
+        validate_new_remote_worker(&self.connection, &worker)?;
+        let tools = serde_json::to_string(&worker.tools).map_err(json_conversion_error)?;
+        let worker_id = worker.id.clone();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO remote_workers
+                (id, name, endpoint, token_environment_variable, ca_certificate_pem,
+                 os, architecture, status, protocol_version, tools)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'online', ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name, endpoint = excluded.endpoint,
+                 token_environment_variable = excluded.token_environment_variable,
+                 ca_certificate_pem = excluded.ca_certificate_pem,
+                 os = excluded.os, architecture = excluded.architecture,
+                 status = 'online', protocol_version = excluded.protocol_version,
+                 tools = excluded.tools, last_seen_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![
+                worker.id,
+                worker.name,
+                worker.endpoint,
+                worker.token_environment_variable,
+                worker.ca_certificate_pem,
+                worker.os,
+                worker.architecture,
+                worker.protocol_version,
+                tools,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE remote_worker_projects SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ?1 AND worker_id <> ?2 AND enabled = 1",
+            params![worker.project_id, worker_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO remote_worker_projects (worker_id, project_id, workspace_path, enabled)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(worker_id, project_id) DO UPDATE SET
+                 workspace_path = excluded.workspace_path, enabled = 1,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![worker_id, worker.project_id, worker.workspace_path],
+        )?;
+        transaction.commit()?;
+        self.get_remote_worker(&worker_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn mark_remote_worker_offline(&mut self, worker_id: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE remote_workers SET status = 'offline', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            [worker_id],
+        )? > 0)
+    }
+
+    pub fn delete_remote_worker(&mut self, worker_id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM remote_workers WHERE id = ?1", [worker_id])?
+            > 0)
+    }
+
     pub fn list_tasks(&self, project_id: &str) -> Result<Vec<Task>> {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, title, description, acceptance_criteria, implementation_notes,
@@ -1870,6 +2029,34 @@ impl Database {
         runs
     }
 
+    pub fn list_running_remote_runs(&self, local_worker_id: &str) -> Result<Vec<Run>> {
+        let run_ids = {
+            let mut statement = self.connection.prepare(
+                "SELECT id FROM runs WHERE status = 'running' AND worker_id <> ?1
+                 ORDER BY started_at ASC, id ASC",
+            )?;
+            let run_ids = statement
+                .query_map([local_worker_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>>>()?;
+            run_ids
+        };
+        run_ids
+            .into_iter()
+            .map(|run_id| {
+                self.get_run(&run_id)?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)
+            })
+            .collect()
+    }
+
+    pub fn worker_has_active_runs(&self, worker_id: &str) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE worker_id = ?1 AND status IN ('queued', 'running'))",
+            [worker_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn enqueue_run(&mut self, new_run: NewRun) -> Result<(Run, Task)> {
         let transaction = self.connection.transaction()?;
         let (project_id, task_status, assigned_agent_id): (String, String, Option<String>) =
@@ -1892,7 +2079,7 @@ impl Database {
             params![new_run.id, new_run.task_id, new_run.agent_id, new_run.worker_id],
         )?;
         transaction.execute(
-            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.queued', 'Agent run queued for local execution.')",
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.queued', 'Agent run queued for worker execution.')",
             [&new_run.id],
         )?;
         transaction.commit()?;
@@ -1982,7 +2169,7 @@ impl Database {
             [&run_id],
         )?;
         transaction.execute(
-            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.started', 'Agent run claimed by the local worker.')",
+            "INSERT INTO run_events (run_id, kind, message) VALUES (?1, 'run.started', 'Agent run claimed by its execution worker.')",
             [&run_id],
         )?;
         move_task_in_transaction(
@@ -3171,6 +3358,23 @@ impl Database {
         Ok(decision)
     }
 
+    fn with_remote_worker_workspaces(&self, mut worker: RemoteWorker) -> Result<RemoteWorker> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, workspace_path, enabled FROM remote_worker_projects
+             WHERE worker_id = ?1 ORDER BY created_at ASC",
+        )?;
+        worker.workspaces = statement
+            .query_map([&worker.id], |row| {
+                Ok(RemoteWorkerWorkspace {
+                    project_id: row.get(0)?,
+                    workspace_path: row.get(1)?,
+                    enabled: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(worker)
+    }
+
     fn blocker_task_ids(&self, blocker_id: &str) -> Result<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT task_id FROM project_blocker_tasks WHERE blocker_id = ?1 ORDER BY task_id",
@@ -3462,6 +3666,28 @@ fn architecture_decision_from_row(row: &rusqlite::Row<'_>) -> Result<Architectur
     })
 }
 
+fn remote_worker_from_row(row: &rusqlite::Row<'_>) -> Result<RemoteWorker> {
+    let tools = serde_json::from_str(&row.get::<_, String>(9)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, error.into())
+    })?;
+    Ok(RemoteWorker {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        endpoint: row.get(2)?,
+        token_environment_variable: row.get(3)?,
+        ca_certificate_pem: row.get(4)?,
+        os: row.get(5)?,
+        architecture: row.get(6)?,
+        status: row.get(7)?,
+        protocol_version: row.get(8)?,
+        tools,
+        workspaces: Vec::new(),
+        last_seen_at: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
 fn record_task_progress_count(counts: &mut TaskProgressCounts, status: &str, count: i64) {
     match status {
         "backlog" => counts.backlog = count,
@@ -3661,6 +3887,10 @@ fn revert_attempt_from_row(row: &rusqlite::Row<'_>) -> Result<RevertAttempt> {
     })
 }
 
+fn json_conversion_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(error.into())
+}
+
 fn encode_string_list(values: &[String]) -> Result<String> {
     serde_json::to_string(values)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
@@ -3843,6 +4073,28 @@ fn validate_new_architecture_decision(
     validate_architecture_decision_tasks(connection, decision)?;
     validate_superseded_architecture_decision(connection, decision)?;
     Ok(())
+}
+
+fn validate_new_remote_worker(connection: &Connection, worker: &NewRemoteWorker) -> Result<()> {
+    if worker.id.trim().is_empty()
+        || worker.name.trim().is_empty()
+        || !worker.endpoint.starts_with("https://")
+        || worker.token_environment_variable.trim().is_empty()
+        || worker.workspace_path.trim().is_empty()
+        || worker.protocol_version <= 0
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let project_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [&worker.project_id],
+        |row| row.get(0),
+    )?;
+    if project_exists {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
+    }
 }
 
 fn validate_architecture_decision_tasks(
@@ -4237,21 +4489,29 @@ mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus, Database,
         FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview, NewArchitectureDecision,
-        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRun, NewTask, NewTaskInputRequest,
-        NewValidationCommand, ProjectDeletion, ProjectHealthStatus, RevertStatus, RunStatus,
-        TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
+        NewEpic, NewMilestone, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewTask,
+        NewTaskInputRequest, NewValidationCommand, ProjectDeletion, ProjectHealthStatus,
+        RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage,
+        ValidationStatus, WorkerToolCapability,
     };
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEMP_DATABASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_database_path() -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("orchestr-db-{nonce}.sqlite"))
+        let sequence = TEMP_DATABASE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "orchestr-db-{}-{nonce}-{sequence}.sqlite",
+            std::process::id(),
+        ))
     }
 
     #[test]
@@ -5867,6 +6127,92 @@ mod tests {
                 .expect("project with ADR history deletes"),
             ProjectDeletion::Deleted
         );
+        drop(reopened);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn remote_worker_registration_persists_capabilities_and_project_workspace() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-1".into(),
+                name: "Distributed project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-local".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/distributed-project".into(),
+            })
+            .expect("project saves");
+        let worker = database
+            .register_remote_worker(NewRemoteWorker {
+                id: "worker-linux".into(),
+                name: "Linux Builder".into(),
+                endpoint: "https://worker.example:9443".into(),
+                token_environment_variable: "ORCHESTR_LINUX_WORKER_TOKEN".into(),
+                ca_certificate_pem: Some("test-ca".into()),
+                os: "linux".into(),
+                architecture: "x64".into(),
+                protocol_version: 1,
+                tools: vec![WorkerToolCapability {
+                    name: "git".into(),
+                    installed: true,
+                    version: Some("git version 2.50".into()),
+                }],
+                project_id: "project-1".into(),
+                workspace_path: "/srv/orchestr/project".into(),
+            })
+            .expect("worker registers");
+        assert_eq!(worker.status, "online");
+        assert_eq!(worker.tools[0].name, "git");
+        assert_eq!(worker.workspaces[0].project_id, "project-1");
+        assert_eq!(
+            database
+                .remote_worker_for_project("project-1")
+                .expect("routing loads")
+                .expect("worker is assigned")
+                .id,
+            "worker-linux"
+        );
+        database
+            .mark_remote_worker_offline("worker-linux")
+            .expect("worker goes offline");
+        assert_eq!(
+            database
+                .get_remote_worker("worker-linux")
+                .expect("worker loads")
+                .unwrap()
+                .status,
+            "offline"
+        );
+        drop(database);
+
+        let mut reopened = Database::open(&database_path).expect("database reopens");
+        assert_eq!(
+            reopened.list_remote_workers().expect("workers load").len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .delete_project("project-1")
+                .expect("project with a remote mapping deletes"),
+            ProjectDeletion::Deleted
+        );
+        assert!(reopened
+            .get_remote_worker("worker-linux")
+            .expect("worker remains registered")
+            .expect("worker remains")
+            .workspaces
+            .is_empty());
+        assert!(reopened
+            .delete_remote_worker("worker-linux")
+            .expect("worker deletes"));
+        assert!(reopened
+            .remote_worker_for_project("project-1")
+            .expect("routing reloads")
+            .is_none());
         drop(reopened);
         fs::remove_file(database_path).expect("temporary database removes");
     }

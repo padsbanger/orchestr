@@ -8,7 +8,7 @@ use std::{
     fmt,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
@@ -16,7 +16,7 @@ use std::{
     thread,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const KNOWN_TOOLS: &[(&str, &[&str])] = &[
     ("git", &["--version"]),
@@ -32,7 +32,7 @@ const KNOWN_TOOLS: &[(&str, &[&str])] = &[
     ("codex", &["--version"]),
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerProfile {
     pub id: String,
@@ -43,7 +43,7 @@ pub struct WorkerProfile {
     pub tools: Vec<ToolCapability>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCapability {
     pub name: String,
@@ -51,7 +51,8 @@ pub struct ToolCapability {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessRequest {
     pub program: String,
     pub arguments: Vec<String>,
@@ -59,7 +60,7 @@ pub struct ProcessRequest {
     pub standard_input: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OutputStream {
     Stdout,
@@ -71,6 +72,52 @@ pub enum OutputStream {
 pub struct ProcessOutput {
     pub stream: OutputStream,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessExit {
+    pub success: bool,
+    pub code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteJobRequest {
+    pub id: String,
+    pub process: ProcessRequest,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteJobEvent {
+    pub sequence: u64,
+    pub stream: OutputStream,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteJobSnapshot {
+    pub id: String,
+    pub status: String,
+    pub events: Vec<RemoteJobEvent>,
+    pub next_cursor: u64,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkerHandshake {
+    pub protocol_version: u32,
+    pub profile: WorkerProfile,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteWorkerConfig {
+    pub endpoint: String,
+    pub token: String,
+    pub ca_certificate_pem: Option<String>,
 }
 
 #[derive(Debug)]
@@ -146,7 +193,7 @@ impl LocalWorker {
 
         Ok(WorkerRun {
             handle: WorkerHandle {
-                child: Arc::new(Mutex::new(child)),
+                inner: WorkerHandleKind::Local(Arc::new(Mutex::new(child))),
             },
             output: receiver,
         })
@@ -164,49 +211,313 @@ pub struct WorkerRun {
 
 #[derive(Clone)]
 pub struct WorkerHandle {
-    child: Arc<Mutex<Child>>,
+    inner: WorkerHandleKind,
+}
+
+#[derive(Clone)]
+enum WorkerHandleKind {
+    Local(Arc<Mutex<Child>>),
+    Remote(RemoteWorkerHandle),
+}
+
+#[derive(Clone)]
+struct RemoteWorkerHandle {
+    client: reqwest::blocking::Client,
+    endpoint: String,
+    token: String,
+    job_id: String,
+    completion: Arc<Mutex<Receiver<Result<ProcessExit>>>>,
 }
 
 impl WorkerHandle {
-    pub fn wait(&self) -> Result<ExitStatus> {
-        self.child
-            .lock()
-            .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?
-            .wait()
-            .map_err(|error| WorkerError(format!("Unable to wait for worker process: {error}")))
+    pub fn wait(&self) -> Result<ProcessExit> {
+        self.inner.wait()
     }
 
     pub fn cancel(&self) -> Result<()> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?;
-        match child.try_wait() {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => {
-                #[cfg(windows)]
-                {
-                    // npm-installed CLIs such as Codex are launched through a .cmd wrapper.
-                    // Killing only that wrapper leaves its Node child alive (and its output pipes
-                    // open), so the run never reaches its terminal state. `taskkill /T` stops the
-                    // complete process tree rooted at the worker process.
-                    let process_id = child.id();
-                    drop(child);
-                    terminate_process_tree(process_id, &self.child)
-                }
+        self.inner.cancel()
+    }
+}
 
-                #[cfg(not(windows))]
-                {
-                    child.kill().map_err(|error| {
-                        WorkerError(format!("Unable to cancel worker process: {error}"))
-                    })
-                }
-            }
-            Err(error) => Err(WorkerError(format!(
-                "Unable to inspect worker process status: {error}"
-            ))),
+impl WorkerHandleKind {
+    fn wait(&self) -> Result<ProcessExit> {
+        match self {
+            Self::Local(child) => wait_for_local_process(child),
+            Self::Remote(remote) => remote
+                .completion
+                .lock()
+                .map_err(|_| WorkerError("The remote job state is unavailable.".into()))?
+                .recv()
+                .map_err(|_| WorkerError("The remote job monitor stopped unexpectedly.".into()))?,
         }
     }
+
+    fn cancel(&self) -> Result<()> {
+        match self {
+            Self::Local(child) => cancel_local_process(child),
+            Self::Remote(remote) => cancel_remote_job(remote),
+        }
+    }
+}
+
+fn wait_for_local_process(child: &Arc<Mutex<Child>>) -> Result<ProcessExit> {
+    child
+        .lock()
+        .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?
+        .wait()
+        .map(|status| ProcessExit {
+            success: status.success(),
+            code: status.code(),
+        })
+        .map_err(|error| WorkerError(format!("Unable to wait for worker process: {error}")))
+}
+
+fn cancel_local_process(child: &Arc<Mutex<Child>>) -> Result<()> {
+    let mut child_guard = child
+        .lock()
+        .map_err(|_| WorkerError("The worker process lock is unavailable.".into()))?;
+    match child_guard.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            #[cfg(windows)]
+            {
+                // npm-installed CLIs such as Codex are launched through a .cmd wrapper.
+                // Killing only that wrapper leaves its Node child alive (and its output pipes
+                // open), so the run never reaches its terminal state. `taskkill /T` stops the
+                // complete process tree rooted at the worker process.
+                let process_id = child_guard.id();
+                drop(child_guard);
+                terminate_process_tree(process_id, child)
+            }
+
+            #[cfg(not(windows))]
+            {
+                child_guard.kill().map_err(|error| {
+                    WorkerError(format!("Unable to cancel worker process: {error}"))
+                })
+            }
+        }
+        Err(error) => Err(WorkerError(format!(
+            "Unable to inspect worker process status: {error}"
+        ))),
+    }
+}
+
+pub struct RemoteWorkerClient {
+    client: reqwest::blocking::Client,
+    endpoint: String,
+    token: String,
+}
+
+impl RemoteWorkerClient {
+    pub fn connect(config: RemoteWorkerConfig) -> Result<Self> {
+        let endpoint = validate_remote_endpoint(&config.endpoint)?;
+        let mut builder = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(35));
+        if let Some(pem) = config.ca_certificate_pem {
+            let certificate = reqwest::Certificate::from_pem(pem.as_bytes())
+                .map_err(|error| WorkerError(format!("Invalid worker CA certificate: {error}")))?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let client = builder.build().map_err(|error| {
+            WorkerError(format!("Unable to configure remote worker TLS: {error}"))
+        })?;
+        Ok(Self {
+            client,
+            endpoint,
+            token: config.token,
+        })
+    }
+
+    pub fn handshake(&self) -> Result<RemoteWorkerHandshake> {
+        self.client
+            .get(format!("{}/v1/worker", self.endpoint))
+            .bearer_auth(&self.token)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(remote_request_error)?
+            .json()
+            .map_err(|error| WorkerError(format!("Invalid worker handshake: {error}")))
+    }
+
+    pub fn start(&self, request: RemoteJobRequest) -> Result<WorkerRun> {
+        let job_id = request.id.clone();
+        self.client
+            .post(format!("{}/v1/jobs", self.endpoint))
+            .bearer_auth(&self.token)
+            .json(&request)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(remote_request_error)?;
+        Ok(self.monitor_job(job_id, 0))
+    }
+
+    pub fn reconnect(&self, job_id: &str, after: u64) -> WorkerRun {
+        self.monitor_job(job_id.to_owned(), after)
+    }
+
+    fn monitor_job(&self, job_id: String, after: u64) -> WorkerRun {
+        let (output_sender, output) = mpsc::channel();
+        let (completion_sender, completion) = mpsc::channel();
+        let client = self.client.clone();
+        let endpoint = self.endpoint.clone();
+        let token = self.token.clone();
+        let monitored_job_id = job_id.clone();
+        thread::spawn(move || {
+            let result = poll_remote_job(
+                &client,
+                &endpoint,
+                &token,
+                &monitored_job_id,
+                after,
+                output_sender,
+            );
+            let _ = completion_sender.send(result);
+        });
+        WorkerRun {
+            handle: WorkerHandle {
+                inner: WorkerHandleKind::Remote(RemoteWorkerHandle {
+                    client: self.client.clone(),
+                    endpoint: self.endpoint.clone(),
+                    token: self.token.clone(),
+                    job_id,
+                    completion: Arc::new(Mutex::new(completion)),
+                }),
+            },
+            output,
+        }
+    }
+}
+
+fn validate_remote_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if endpoint.starts_with("https://") && endpoint.len() > "https://".len() {
+        Ok(endpoint.to_owned())
+    } else {
+        Err(WorkerError(
+            "Remote worker endpoints must use HTTPS.".into(),
+        ))
+    }
+}
+
+fn poll_remote_job(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    token: &str,
+    job_id: &str,
+    after: u64,
+    output: Sender<ProcessOutput>,
+) -> Result<ProcessExit> {
+    let mut cursor = after;
+    loop {
+        let snapshot = fetch_remote_job_with_retry(client, endpoint, token, job_id, cursor)?;
+        cursor = snapshot.next_cursor;
+        forward_remote_events(&output, &snapshot.events);
+        if snapshot.status != "running" {
+            return remote_job_exit(snapshot);
+        }
+        thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+fn fetch_remote_job_with_retry(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    token: &str,
+    job_id: &str,
+    cursor: u64,
+) -> Result<RemoteJobSnapshot> {
+    retry_remote_job(
+        client,
+        endpoint,
+        token,
+        job_id,
+        cursor,
+        std::time::Instant::now(),
+    )
+}
+
+fn retry_remote_job(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    token: &str,
+    job_id: &str,
+    cursor: u64,
+    disconnected_at: std::time::Instant,
+) -> Result<RemoteJobSnapshot> {
+    fetch_remote_job(client, endpoint, token, job_id, cursor).or_else(|error| {
+        ensure_remote_retry_window(disconnected_at, error)?;
+        thread::sleep(std::time::Duration::from_millis(500));
+        retry_remote_job(client, endpoint, token, job_id, cursor, disconnected_at)
+    })
+}
+
+fn ensure_remote_retry_window(
+    disconnected_at: std::time::Instant,
+    error: WorkerError,
+) -> Result<()> {
+    if disconnected_at.elapsed() >= std::time::Duration::from_secs(60) {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+fn forward_remote_events(output: &Sender<ProcessOutput>, events: &[RemoteJobEvent]) {
+    for event in events {
+        let _ = output.send(ProcessOutput {
+            stream: event.stream.clone(),
+            text: event.text.clone(),
+        });
+    }
+}
+
+fn fetch_remote_job(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    token: &str,
+    job_id: &str,
+    cursor: u64,
+) -> Result<RemoteJobSnapshot> {
+    client
+        .get(format!("{endpoint}/v1/jobs/{job_id}"))
+        .bearer_auth(token)
+        .query(&[("after", cursor)])
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(remote_request_error)?
+        .json()
+        .map_err(|error| WorkerError(format!("Invalid remote worker event response: {error}")))
+}
+
+fn remote_job_exit(snapshot: RemoteJobSnapshot) -> Result<ProcessExit> {
+    match snapshot.status.as_str() {
+        "completed" | "cancelled" => Ok(ProcessExit {
+            success: snapshot.status == "completed" && snapshot.exit_code == Some(0),
+            code: snapshot.exit_code,
+        }),
+        _ => Err(WorkerError(
+            snapshot
+                .error
+                .unwrap_or_else(|| "The remote worker job failed.".into()),
+        )),
+    }
+}
+
+fn cancel_remote_job(remote: &RemoteWorkerHandle) -> Result<()> {
+    remote
+        .client
+        .delete(format!("{}/v1/jobs/{}", remote.endpoint, remote.job_id))
+        .bearer_auth(&remote.token)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map(|_| ())
+        .map_err(remote_request_error)
+}
+
+fn remote_request_error(error: reqwest::Error) -> WorkerError {
+    WorkerError(format!("Remote worker request failed: {error}"))
 }
 
 #[cfg(windows)]
@@ -423,7 +734,10 @@ fn platform_architecture() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalWorker, ProcessRequest};
+    use super::{
+        remote_job_exit, validate_remote_endpoint, LocalWorker, ProcessRequest, RemoteJobSnapshot,
+        RemoteWorkerClient, RemoteWorkerConfig,
+    };
 
     #[test]
     fn streams_output_from_a_structured_git_command() {
@@ -441,7 +755,7 @@ mod tests {
             .collect::<Vec<_>>();
         let exit_status = run.handle.wait().expect("git completes");
 
-        assert!(exit_status.success());
+        assert!(exit_status.success);
         assert!(output.iter().any(|line| line.contains("git version")));
     }
 
@@ -461,7 +775,7 @@ mod tests {
             .collect::<Vec<_>>();
         let exit_status = run.handle.wait().expect("git completes");
 
-        assert!(exit_status.success());
+        assert!(exit_status.success);
         assert!(output.iter().any(|line| !line.is_empty()));
     }
 
@@ -478,6 +792,47 @@ mod tests {
     }
 
     #[test]
+    fn remote_endpoints_require_https_and_are_normalized() {
+        assert!(validate_remote_endpoint("http://worker.example").is_err());
+        assert_eq!(
+            validate_remote_endpoint(" https://worker.example:9443/ ").expect("HTTPS is valid"),
+            "https://worker.example:9443"
+        );
+    }
+
+    #[test]
+    fn remote_client_accepts_system_or_custom_tls_roots() {
+        RemoteWorkerClient::connect(RemoteWorkerConfig {
+            endpoint: "https://worker.example:9443".into(),
+            token: "test-token".into(),
+            ca_certificate_pem: None,
+        })
+        .expect("system TLS roots configure");
+        assert!(RemoteWorkerClient::connect(RemoteWorkerConfig {
+            endpoint: "https://worker.example:9443".into(),
+            token: "test-token".into(),
+            ca_certificate_pem: Some(
+                "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----".into(),
+            ),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn remote_terminal_snapshots_preserve_exit_results() {
+        let success = remote_job_exit(snapshot("completed", Some(0), None))
+            .expect("completed job returns an exit result");
+        assert!(success.success);
+        assert_eq!(success.code, Some(0));
+        let cancelled = remote_job_exit(snapshot("cancelled", None, None))
+            .expect("cancelled job returns an exit result");
+        assert!(!cancelled.success);
+        let failed = remote_job_exit(snapshot("failed", Some(2), Some("build failed".into())))
+            .expect_err("failed job returns its error");
+        assert_eq!(failed.to_string(), "build failed");
+    }
+
+    #[test]
     fn strips_terminal_color_and_hyperlink_control_sequences() {
         assert_eq!(
             super::strip_terminal_control_sequences("\u{1b}[94mDevice code\u{1b}[0m"),
@@ -489,6 +844,17 @@ mod tests {
             ),
             "Open link"
         );
+    }
+
+    fn snapshot(status: &str, exit_code: Option<i32>, error: Option<String>) -> RemoteJobSnapshot {
+        RemoteJobSnapshot {
+            id: "job-1".into(),
+            status: status.into(),
+            events: Vec::new(),
+            next_cursor: 0,
+            exit_code,
+            error,
+        }
     }
 
     #[cfg(windows)]
@@ -527,6 +893,6 @@ mod tests {
         let status = run.handle.wait().expect("process exits after cancellation");
         drop(run.output);
 
-        assert!(!status.success());
+        assert!(!status.success);
     }
 }

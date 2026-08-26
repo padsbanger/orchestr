@@ -343,7 +343,7 @@ fn run_codex_status() -> Result<(bool, String)> {
         .handle
         .wait()
         .map_err(|error| ProviderError(format!("Unable to inspect Codex: {error}")))?;
-    Ok((status.success(), output))
+    Ok((status.success, output))
 }
 
 fn classify_authentication(succeeded: bool, output: &str) -> AuthenticationStatus {

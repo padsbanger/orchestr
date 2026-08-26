@@ -398,6 +398,36 @@ request human input when completing a task would require contradicting an
 accepted decision so that the change can be captured as an explicit
 superseding ADR.
 
+## M21 remote worker protocol
+
+`orchestr-remote-worker` exposes protocol version 1 over TLS. Every handshake,
+job read, job create, and cancellation request requires an exact bearer token.
+The daemon accepts only structured program/argument requests, canonicalizes
+their working directories, and rejects paths outside administrator-configured
+workspace roots. It reports its stable identity, platform, and detected tools
+without exposing provider credentials.
+
+The desktop stores worker identity, endpoint, public CA material, capabilities,
+heartbeat time, and project workspace mappings in SQLite. It stores only the
+name of the environment variable containing the bearer token. A project with
+an enabled remote mapping persists that worker ID on each queued Run, so the
+existing WIP and agent-concurrency scheduler can claim it without conflating
+task state and transport state.
+
+Remote jobs retain ordered stdout/stderr events under the Run ID. Desktop
+clients poll with a monotonically increasing cursor, tolerate a bounded network
+interruption, and route output through the same persisted timeline used by
+local execution. Cancellation uses the same `WorkerHandle` boundary. On
+desktop restart, running remote Runs reconnect by ID and resume after the last
+worker-side cursor; the remote daemon must remain alive for this in-memory M21
+recovery path.
+
+Git branch/worktree creation, review, validation, and integration remain owned
+by the desktop application layer. For M21, the registered remote workspace is
+a shared or mounted path reachable by both machines. Independent workspace
+replication is deliberately deferred rather than hiding file transfer inside
+the process protocol.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their
