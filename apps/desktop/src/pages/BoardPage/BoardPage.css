@@ -8,7 +8,23 @@
 .back-link:hover { color: #dce3e6; }
 .board-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .board-title-row h1 { margin-bottom: 6px; }
-.board-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.board-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.project-status-cluster { display: flex; align-items: center; min-width: 0; gap: 7px; }
+.project-status-button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid #354047; background: #151a1d; color: #9ca9af; cursor: pointer; font: 10px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
+.project-status-button:hover { position: relative; z-index: 1; border-color: #4c5b64; background: #1c2327; color: #d9e1e4; }
+.project-status-button strong { color: #c9d4d8; font: inherit; font-weight: 600; white-space: nowrap; }
+.project-status-button > span { overflow: hidden; max-width: 108px; text-overflow: ellipsis; white-space: nowrap; }
+.project-status-button.repository-status { gap: 6px; height: 30px; padding: 0 8px; }
+.project-status-button.repository-status > span { max-width: 92px; }
+.project-status-button.repository-status strong { padding-left: 6px; }
+.project-alert-button { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 9px; border: 1px solid #734e31; background: #2b2119; color: #e1a06f; cursor: pointer; font: 11px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
+.project-alert-button:hover { border-color: #a06a40; background: #35271d; }
+.project-alert-button span, .integration-action span { color: inherit; font-weight: 700; }
+.project-tools { position: relative; }
+.project-tools-menu { position: absolute; z-index: 5; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; padding: 5px; border: 1px solid #3a4349; background: #181c1f; box-shadow: 0 14px 32px rgb(0 0 0 / 38%); }
+.project-tools-menu a, .project-tools-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 31px; padding: 0 8px; border: 0; background: transparent; color: #b8c4c9; cursor: pointer; font: 11px "SFMono-Regular", Consolas, monospace; text-align: left; text-decoration: none; }
+.project-tools-menu a:hover, .project-tools-menu button:hover { background: #252c30; color: #edf2f4; }
+.project-tools-menu span { margin-left: auto; color: #83b9d2; }
 .project-health-button { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; text-transform: uppercase; }
 .project-health-button.healthy { color: #81c998; border-color: #3b6348; }
 .project-health-button.broken { color: #ef9a92; border-color: #74453d; }
@@ -54,6 +70,9 @@
 .task-card h3 { margin: 2px 0 0; overflow-wrap: anywhere; color: #e1e5e7; font-size: 13px; font-weight: 570; line-height: 1.35; }
 .task-card-title { display: flex; align-items: start; justify-content: space-between; gap: 7px; }.task-card-title h3 { min-width: 0; }.task-card-priority { flex: 0 0 auto; margin-top: 2px; color: #89969d; font: 8px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }.task-card-priority.critical { color: #ef918a; }.task-card-priority.high { color: #e4b970; }.task-card-priority.low { color: #86bbd7; }.task-card-blocked { margin-top: 7px !important; padding: 5px 6px; border-left: 2px solid #aa7145; background: #2a211b; color: #d8ad80 !important; -webkit-line-clamp: 4 !important; }
 .task-card p { display: -webkit-box; overflow: hidden; margin: 6px 0 0; color: #8d989e; font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.task-assignment { display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 8px; color: #758188; font: 9px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
+.task-assignment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-assignment.assigned { color: #8cbfd8; }
 .task-card-actions { display: flex; align-items: flex-start; gap: 1px; opacity: 0; transition: opacity 120ms ease; }
 .task-card:hover .task-card-actions { opacity: 1; }
 .task-card-actions button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: #8c989f; cursor: pointer; }

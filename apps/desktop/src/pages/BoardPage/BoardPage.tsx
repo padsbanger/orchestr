@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, BookOpenCheck, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, BookOpenCheck, Bot, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, MoreHorizontal, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -111,6 +111,8 @@ export function BoardPage() {
   const [repositoryError, setRepositoryError] = useState<string>();
   const [isRepositoryLoading, setIsRepositoryLoading] = useState(false);
   const [activeSidePanel, setActiveSidePanel] = useState<BoardSidePanel>();
+  const [isProjectToolsOpen, setIsProjectToolsOpen] = useState(false);
+  const projectToolsRef = useRef<HTMLDivElement>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -135,9 +137,30 @@ export function BoardPage() {
     setRecentlyTransitionedTaskIds([]);
   }, [projectId]);
 
+  useEffect(() => {
+    if (!isProjectToolsOpen) return;
+    const closeWhenOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !projectToolsRef.current?.contains(event.target)) setIsProjectToolsOpen(false);
+    };
+    const closeWhenEscaped = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsProjectToolsOpen(false);
+    };
+    document.addEventListener("pointerdown", closeWhenOutside);
+    document.addEventListener("keydown", closeWhenEscaped);
+    return () => {
+      document.removeEventListener("pointerdown", closeWhenOutside);
+      document.removeEventListener("keydown", closeWhenEscaped);
+    };
+  }, [isProjectToolsOpen]);
+
   const openSidePanel = (panel: Exclude<BoardSidePanel, "task">) => {
     setInspectedTask(null);
     setActiveSidePanel(panel);
+  };
+
+  const openProjectToolPanel = (panel: Exclude<BoardSidePanel, "task">) => {
+    setIsProjectToolsOpen(false);
+    openSidePanel(panel);
   };
 
   const inspectTask = (task: Task) => {
@@ -442,6 +465,7 @@ export function BoardPage() {
   const tasksByStatus = useMemo(() => Object.fromEntries(
     TASK_STATUSES.map((status) => [status, tasks.filter((task) => task.status === status).sort((a, b) => a.position - b.position)]),
   ) as Record<TaskStatus, Task[]>, [tasks]);
+  const agentNamesById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
 
   useEffect(() => {
     const previousStatuses = previousTaskStatuses.current;
@@ -874,6 +898,11 @@ export function BoardPage() {
   if (isLoading) return <section className="page"><div className="empty-state"><span className="empty-index">SYNC</span><h2>Loading board</h2></div></section>;
   if (!project) return <section className="page"><div className="empty-state"><h2>Project not found</h2><Link className="secondary-button" to="/projects">Return to projects</Link></div></section>;
 
+  const activeBlockerCount = projectBlockers.filter((blocker) => blocker.status === "active").length;
+  const queuedIntegrationCount = integrationAttempts.filter((attempt) => attempt.status === "queued").length;
+  const proposedPlanCount = planningProposals.filter((proposal) => proposal.status === "proposed").length;
+  const acceptedDecisionCount = architectureDecisions.filter((decision) => decision.status === "accepted").length;
+
   return (
     <section className={`board-page ${activeSidePanel ? "has-side-panel" : ""}`}>
       <header className="board-header">
@@ -881,18 +910,27 @@ export function BoardPage() {
         <div className="board-title-row">
           <div><p className="eyebrow">{project.defaultBranch} / local workspace</p><h1>{project.name}</h1><p className="muted">{project.description || "Project task board"}</p></div>
           <div className="board-header-actions">
-            <Link className="secondary-button" to={`/projects/${project.id}/progress`}><ChartNoAxesCombined size={15} /> Progress</Link>
-            <button className="secondary-button" type="button" onClick={() => openSidePanel("planning")}><Sparkles size={15} /> Plan <span>{planningProposals.filter((proposal) => proposal.status === "proposed").length}</span></button>
-            <button className="secondary-button" type="button" onClick={() => openSidePanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{architectureDecisions.filter((decision) => decision.status === "accepted").length}</span></button>
-            <button className="secondary-button" type="button" onClick={() => openSidePanel("blockers")}><ShieldAlert size={15} /> Blockers <span>{projectBlockers.filter((blocker) => blocker.status === "active").length}</span></button>
-            <button className="secondary-button" type="button" onClick={() => openSidePanel("flow")}><Gauge size={15} /> Flow <span>{flow?.activeWorkerRuns ?? 0}/{flow?.limits.workerMaxConcurrentRuns ?? 4}</span>{Boolean(flow?.queued) && <span>+{flow?.queued}</span>}</button>
-            <button className={`secondary-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => openSidePanel("quality")}><Activity size={15} /> {health?.status ?? "unknown"}</button>
-            <button className="secondary-button" type="button" onClick={() => openSidePanel("integration")}><GitMerge size={16} />Integrate <span>{integrationAttempts.filter((attempt) => attempt.status === "queued").length}</span></button>
-            <button className="repository-status" type="button" onClick={() => openSidePanel("repository")} title="Inspect repository activity">
-              <GitBranch size={15} />
-              <span>{repository?.summary.currentBranch ?? project.defaultBranch}</span>
-              <strong className={repository?.summary.isClean === false ? "repository-dirty" : repository ? "repository-clean" : "repository-pending"}>{repository?.summary.isClean === false ? `${repository.summary.changedFileCount} changed` : repository ? "Clean" : isRepositoryLoading ? "Checking" : "Unavailable"}</strong>
-            </button>
+            <div className="project-status-cluster" aria-label="Project status">
+              <button className="project-status-button" type="button" onClick={() => openSidePanel("flow")}><Gauge size={14} /> Flow <strong>{flow?.activeWorkerRuns ?? 0}/{flow?.limits.workerMaxConcurrentRuns ?? 4}</strong>{Boolean(flow?.queued) && <span>+{flow?.queued}</span>}</button>
+              <button className={`project-status-button project-health-button ${health?.status ?? "unknown"}`} type="button" onClick={() => openSidePanel("quality")}><Activity size={14} /> {health?.status ?? "unknown"}</button>
+              <button className="project-status-button repository-status" type="button" onClick={() => openSidePanel("repository")} title="Inspect repository activity">
+                <GitBranch size={14} />
+                <span>{repository?.summary.currentBranch ?? project.defaultBranch}</span>
+                <strong className={repository?.summary.isClean === false ? "repository-dirty" : repository ? "repository-clean" : "repository-pending"}>{repository?.summary.isClean === false ? `${repository.summary.changedFileCount} changed` : repository ? "Clean" : isRepositoryLoading ? "Checking" : "Unavailable"}</strong>
+              </button>
+            </div>
+            {activeBlockerCount > 0 && <button className="project-alert-button" type="button" onClick={() => openSidePanel("blockers")}><ShieldAlert size={15} /> Blockers <span>{activeBlockerCount}</span></button>}
+            {queuedIntegrationCount > 0 && <button className="secondary-button integration-action" type="button" onClick={() => openSidePanel("integration")}><GitMerge size={16} /> Integrate <span>{queuedIntegrationCount}</span></button>}
+            <div className="project-tools" ref={projectToolsRef}>
+              <button className="secondary-button" type="button" aria-haspopup="menu" aria-expanded={isProjectToolsOpen} aria-controls="project-tools-menu" onClick={() => setIsProjectToolsOpen((open) => !open)}><MoreHorizontal size={16} /> More</button>
+              {isProjectToolsOpen && <div className="project-tools-menu" id="project-tools-menu" role="menu">
+                <Link role="menuitem" to={`/projects/${project.id}/progress`} onClick={() => setIsProjectToolsOpen(false)}><ChartNoAxesCombined size={15} /> Progress</Link>
+                <button type="button" role="menuitem" onClick={() => openProjectToolPanel("planning")}><Sparkles size={15} /> Plan <span>{proposedPlanCount}</span></button>
+                <button type="button" role="menuitem" onClick={() => openProjectToolPanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{acceptedDecisionCount}</span></button>
+                {activeBlockerCount === 0 && <button type="button" role="menuitem" onClick={() => openProjectToolPanel("blockers")}><ShieldAlert size={15} /> Blockers</button>}
+                {queuedIntegrationCount === 0 && <button type="button" role="menuitem" onClick={() => openProjectToolPanel("integration")}><GitMerge size={15} /> Integration queue</button>}
+              </div>}
+            </div>
             <button className="primary-button" type="button" onClick={() => { setEditingTask(null); setIsCreating(true); }}><Plus size={16} /> New task</button>
           </div>
         </div>
@@ -909,7 +947,7 @@ export function BoardPage() {
           onDragEnd={(event) => { setActiveTaskId(undefined); void handleDragEnd(event); }}
         >
           <div className="kanban-board">
-            {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} recentlyTransitionedTaskIds={recentlyTransitionedTaskIds} onInspect={inspectTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
+            {TASK_STATUSES.map((status) => <TaskColumn key={status} status={status} tasks={tasksByStatus[status]} agentNamesById={agentNamesById} recentlyTransitionedTaskIds={recentlyTransitionedTaskIds} onInspect={inspectTask} onEdit={setEditingTask} onDelete={(task) => void removeTask(task)} />)}
           </div>
           <DragOverlay dropAnimation={null}>
             {activeTaskId && <TaskDragPreview task={tasks.find((task) => task.id === activeTaskId)} />}
@@ -929,14 +967,14 @@ export function BoardPage() {
   );
 }
 
-function TaskColumn({ status, tasks, recentlyTransitionedTaskIds, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; recentlyTransitionedTaskIds: string[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskColumn({ status, tasks, agentNamesById, recentlyTransitionedTaskIds, onInspect, onEdit, onDelete }: { status: TaskStatus; tasks: Task[]; agentNamesById: ReadonlyMap<string, string>; recentlyTransitionedTaskIds: string[]; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: columnDropId(status), disabled: isSystemManagedStatus(status) });
   return (
     <section ref={setNodeRef} className={`kanban-column ${isOver ? "is-over" : ""}`}>
       <header className="column-header"><div><span className={`status-dot ${columns[status].tone}`} /><h2>{columns[status].label}</h2></div><span>{tasks.length}</span></header>
       <div className="task-list">
         <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
-          {tasks.map((task) => <TaskCard key={task.id} task={task} isRecentlyTransitioned={recentlyTransitionedTaskIds.includes(task.id)} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
+          {tasks.map((task) => <TaskCard key={task.id} task={task} assignedAgentName={task.assignedAgentId ? agentNamesById.get(task.assignedAgentId) : undefined} isRecentlyTransitioned={recentlyTransitionedTaskIds.includes(task.id)} onInspect={onInspect} onEdit={onEdit} onDelete={onDelete} />)}
         </SortableContext>
         {tasks.length === 0 && <p className="empty-column">{isSystemManagedStatus(status) ? "Workflow managed" : "Drop task here"}</p>}
       </div>
@@ -944,7 +982,7 @@ function TaskColumn({ status, tasks, recentlyTransitionedTaskIds, onInspect, onE
   );
 }
 
-function TaskCard({ task, isRecentlyTransitioned, onInspect, onEdit, onDelete }: { task: Task; isRecentlyTransitioned: boolean; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
+function TaskCard({ task, assignedAgentName, isRecentlyTransitioned, onInspect, onEdit, onDelete }: { task: Task; assignedAgentName?: string; isRecentlyTransitioned: boolean; onInspect: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   return (
     <article ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`task-card ${task.status === "in_progress" ? "is-running" : ""} ${isRecentlyTransitioned ? "just-transitioned" : ""} ${isDragging ? "is-dragging" : ""}`} {...attributes} {...listeners}>
@@ -953,6 +991,7 @@ function TaskCard({ task, isRecentlyTransitioned, onInspect, onEdit, onDelete }:
         <div className="task-card-title"><h3>{task.title}</h3><span className={`task-card-priority ${task.priority}`}>{task.priority}</span></div>
         {task.description && <p>{task.description}</p>}
         {task.status === "blocked" && task.blockedReason && <p className="task-card-blocked">{task.blockedReason}</p>}
+        <div className={`task-assignment ${assignedAgentName ? "assigned" : "unassigned"}`}><Bot size={12} aria-hidden="true" /><span>{assignedAgentName ?? "Unassigned"}</span></div>
       </div>
       <div className="task-card-actions">
         <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onEdit(task); }} aria-label={`Edit ${task.title}`}><Pencil size={13} /></button>
