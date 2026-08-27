@@ -48,6 +48,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0021_capability_scheduler.sql"),
     ),
     (22, include_str!("../migrations/0022_planning_agent.sql")),
+    (
+        23,
+        include_str!("../migrations/0023_agent_collaboration.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -466,6 +470,81 @@ pub struct NewTaskInputRequest {
     pub task_id: String,
     pub requesting_run_id: Option<String>,
     pub question: String,
+}
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollaborationKind {
+    Comment,
+    Request,
+    Blocker,
+    InterfaceChange,
+    Escalation,
+}
+
+impl CollaborationKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+
+    const ALL: [Self; 5] = [
+        Self::Comment,
+        Self::Request,
+        Self::Blocker,
+        Self::InterfaceChange,
+        Self::Escalation,
+    ];
+    const NAMES: [&'static str; 5] = [
+        "comment",
+        "request",
+        "blocker",
+        "interface_change",
+        "escalation",
+    ];
+
+    fn from_database(value: String) -> Result<Self> {
+        Self::parse(&value).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                format!("Unknown collaboration kind: {value}").into(),
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollaborationEntry {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub author_type: String,
+    pub author_agent_id: Option<String>,
+    pub author_run_id: Option<String>,
+    pub kind: CollaborationKind,
+    pub message: String,
+    pub status: String,
+    pub referenced_task_ids: Vec<String>,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+pub struct NewCollaborationEntry {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub author_type: String,
+    pub author_agent_id: Option<String>,
+    pub author_run_id: Option<String>,
+    pub kind: CollaborationKind,
+    pub message: String,
+    pub referenced_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1413,6 +1492,103 @@ impl Database {
             .query_map([task_id], task_input_request_from_row)?
             .collect();
         requests
+    }
+
+    pub fn list_collaboration_entries(&self, project_id: &str) -> Result<Vec<CollaborationEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, task_id, parent_id, author_type, author_agent_id,
+                    author_run_id, kind, message, status, created_at, resolved_at
+             FROM collaboration_entries WHERE project_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let entries = statement
+            .query_map([project_id], collaboration_entry_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        entries
+            .into_iter()
+            .map(|entry| self.with_collaboration_references(entry))
+            .collect()
+    }
+
+    pub fn list_relevant_collaboration_entries(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<CollaborationEntry>> {
+        let project_id: String = self.connection.query_row(
+            "SELECT project_id FROM tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        self.list_collaboration_entries(&project_id).map(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.status == "open"
+                        && (entry.task_id.as_deref() == Some(task_id)
+                            || entry.referenced_task_ids.iter().any(|id| id == task_id)
+                            || (entry.task_id.is_none() && entry.referenced_task_ids.is_empty()))
+                })
+                .collect()
+        })
+    }
+
+    pub fn create_collaboration_entry(
+        &mut self,
+        entry: NewCollaborationEntry,
+    ) -> Result<CollaborationEntry> {
+        validate_collaboration_entry(&self.connection, &entry)?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO collaboration_entries
+                (id, project_id, task_id, parent_id, author_type, author_agent_id,
+                 author_run_id, kind, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                entry.id,
+                entry.project_id,
+                entry.task_id,
+                entry.parent_id,
+                entry.author_type,
+                entry.author_agent_id,
+                entry.author_run_id,
+                entry.kind.as_str(),
+                entry.message.trim()
+            ],
+        )?;
+        for task_id in &entry.referenced_task_ids {
+            transaction.execute(
+                "INSERT INTO collaboration_entry_references (entry_id, task_id) VALUES (?1, ?2)",
+                params![entry.id, task_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.collaboration_entry_by_id(&entry.id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    pub fn resolve_collaboration_entry(&mut self, id: &str) -> Result<Option<CollaborationEntry>> {
+        let transaction = self.connection.transaction()?;
+        if transaction.execute(
+            "UPDATE collaboration_entries SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'open'",
+            [id],
+        )? == 0
+        {
+            return Ok(None);
+        }
+        transaction.execute(
+            "WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM collaboration_entries WHERE parent_id = ?1
+                UNION ALL
+                SELECT entries.id FROM collaboration_entries AS entries
+                JOIN descendants ON entries.parent_id = descendants.id
+             )
+             UPDATE collaboration_entries SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+             WHERE id IN (SELECT id FROM descendants) AND status = 'open'",
+            [id],
+        )?;
+        transaction.commit()?;
+        self.collaboration_entry_by_id(id)
     }
 
     pub fn request_task_input(&mut self, request: NewTaskInputRequest) -> Result<TaskInputRequest> {
@@ -3790,6 +3966,33 @@ impl Database {
             .optional()
     }
 
+    fn collaboration_entry_by_id(&self, id: &str) -> Result<Option<CollaborationEntry>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, task_id, parent_id, author_type, author_agent_id,
+                    author_run_id, kind, message, status, created_at, resolved_at
+             FROM collaboration_entries WHERE id = ?1",
+                [id],
+                collaboration_entry_from_row,
+            )
+            .optional()?
+            .map(|entry| self.with_collaboration_references(entry))
+            .transpose()
+    }
+
+    fn with_collaboration_references(
+        &self,
+        mut entry: CollaborationEntry,
+    ) -> Result<CollaborationEntry> {
+        let mut statement = self.connection.prepare(
+            "SELECT task_id FROM collaboration_entry_references WHERE entry_id = ?1 ORDER BY task_id",
+        )?;
+        entry.referenced_task_ids = statement
+            .query_map([&entry.id], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(entry)
+    }
+
     fn project_blocker_by_id(&self, id: &str) -> Result<Option<ProjectBlocker>> {
         let mut blocker = self
             .connection
@@ -4110,6 +4313,24 @@ fn task_input_request_from_row(row: &rusqlite::Row<'_>) -> Result<TaskInputReque
         answer: row.get(6)?,
         requested_at: row.get(7)?,
         answered_at: row.get(8)?,
+    })
+}
+
+fn collaboration_entry_from_row(row: &rusqlite::Row<'_>) -> Result<CollaborationEntry> {
+    Ok(CollaborationEntry {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        task_id: row.get(2)?,
+        parent_id: row.get(3)?,
+        author_type: row.get(4)?,
+        author_agent_id: row.get(5)?,
+        author_run_id: row.get(6)?,
+        kind: CollaborationKind::from_database(row.get(7)?)?,
+        message: row.get(8)?,
+        status: row.get(9)?,
+        referenced_task_ids: Vec::new(),
+        created_at: row.get(10)?,
+        resolved_at: row.get(11)?,
     })
 }
 
@@ -4464,6 +4685,73 @@ fn validate_outcome_status(status: &str) -> Result<()> {
             "Unknown milestone or epic status.".into(),
         ))
     }
+}
+
+fn validate_collaboration_entry(
+    connection: &Connection,
+    entry: &NewCollaborationEntry,
+) -> Result<()> {
+    let message_length = entry.message.trim().chars().count();
+    if message_length == 0 || message_length > 4000 {
+        return Err(invalid_collaboration(
+            "Collaboration messages must contain between 1 and 4000 characters.",
+        ));
+    }
+    if !matches!(entry.author_type.as_str(), "human" | "agent" | "system") {
+        return Err(invalid_collaboration("Unknown collaboration author type."));
+    }
+    validate_collaboration_task(connection, &entry.project_id, entry.task_id.as_deref())?;
+    for task_id in &entry.referenced_task_ids {
+        validate_collaboration_task(connection, &entry.project_id, Some(task_id))?;
+    }
+    validate_collaboration_parent(connection, entry)
+}
+
+fn validate_collaboration_task(
+    connection: &Connection,
+    project_id: &str,
+    task_id: Option<&str>,
+) -> Result<()> {
+    let Some(task_id) = task_id else {
+        return Ok(());
+    };
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND project_id = ?2)",
+        params![task_id, project_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(invalid_collaboration(
+            "Referenced tasks must belong to the collaboration project.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_collaboration_parent(
+    connection: &Connection,
+    entry: &NewCollaborationEntry,
+) -> Result<()> {
+    let Some(parent_id) = entry.parent_id.as_deref() else {
+        return Ok(());
+    };
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM collaboration_entries WHERE id = ?1 AND project_id = ?2)",
+        params![parent_id, entry.project_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(invalid_collaboration(
+            "The collaboration parent must belong to the same project.",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_collaboration(message: &str) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into(),
+    )
 }
 
 pub fn validate_planning_plan(plan: &PlanningPlan) -> Result<()> {
@@ -5313,14 +5601,15 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus, Database,
-        FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview, NewArchitectureDecision,
-        NewEpic, NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker,
-        NewRun, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
-        PlanningEpic, PlanningMaterializationIds, PlanningMilestone, PlanningPlan,
-        PlanningProposalStatus, PlanningTask, ProjectDeletion, ProjectHealthStatus, RevertStatus,
-        RunStatus, TaskPriority, TaskStatus, TaskUpdate, ValidationStage, ValidationStatus,
-        WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
+        AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus,
+        CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview,
+        NewArchitectureDecision, NewCollaborationEntry, NewEpic, NewMilestone, NewPlanningProposal,
+        NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewSchedulerDecision, NewTask,
+        NewTaskInputRequest, NewValidationCommand, PlanningEpic, PlanningMaterializationIds,
+        PlanningMilestone, PlanningPlan, PlanningProposalStatus, PlanningTask, ProjectDeletion,
+        ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
+        ValidationStage, ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus,
+        WorkerToolCapability,
     };
     use std::{
         fs,
@@ -7414,5 +7703,98 @@ mod tests {
             base_task("two", vec!["one".into()]),
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn collaboration_entries_persist_references_replies_and_resolution() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-collab".into(),
+                name: "Collaboration".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-collab".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/collab".into(),
+            })
+            .expect("project saves");
+        for id in ["api", "ui"] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-collab".into(),
+                    title: id.into(),
+                    description: None,
+                    acceptance_criteria: vec!["Done".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    required_capabilities: Vec::new(),
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: None,
+                    priority: TaskPriority::Normal,
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+        }
+        let request = database
+            .create_collaboration_entry(NewCollaborationEntry {
+                id: "request-1".into(),
+                project_id: "project-collab".into(),
+                task_id: Some("api".into()),
+                parent_id: None,
+                author_type: "agent".into(),
+                author_agent_id: None,
+                author_run_id: None,
+                kind: CollaborationKind::InterfaceChange,
+                message: "Expose the session endpoint.".into(),
+                referenced_task_ids: vec!["ui".into()],
+            })
+            .expect("request saves");
+        assert_eq!(request.referenced_task_ids, ["ui"]);
+        database
+            .create_collaboration_entry(NewCollaborationEntry {
+                id: "reply-1".into(),
+                project_id: "project-collab".into(),
+                task_id: Some("api".into()),
+                parent_id: Some("request-1".into()),
+                author_type: "human".into(),
+                author_agent_id: None,
+                author_run_id: None,
+                kind: CollaborationKind::Comment,
+                message: "Use GET /session.".into(),
+                referenced_task_ids: Vec::new(),
+            })
+            .expect("reply saves");
+        assert_eq!(
+            database
+                .list_relevant_collaboration_entries("ui")
+                .expect("context loads")
+                .len(),
+            1
+        );
+        database
+            .resolve_collaboration_entry("request-1")
+            .expect("request resolves");
+        assert!(database
+            .list_relevant_collaboration_entries("api")
+            .expect("context reloads")
+            .is_empty());
+        let history = database
+            .list_collaboration_entries("project-collab")
+            .expect("history loads");
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history
+                .iter()
+                .find(|entry| entry.id == "request-1")
+                .unwrap()
+                .status,
+            "resolved"
+        );
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
     }
 }

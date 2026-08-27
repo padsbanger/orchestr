@@ -2,7 +2,7 @@
 .board-page > .board-header { animation: board-header-enter 180ms ease-out both; }
 .board-page > .board-body .kanban-board { animation: board-body-enter 220ms 45ms ease-out both; }
 .board-page.has-side-panel { grid-template-columns: minmax(0, 1fr) clamp(340px, 36vw, 500px); }
-.board-header { grid-column: 1 / -1; grid-row: 1; padding: 26px 32px 20px; border-bottom: 1px solid #292d31; background: #131618; }
+.board-header { position: relative; z-index: 2; grid-column: 1 / -1; grid-row: 1; padding: 26px 32px 20px; border-bottom: 1px solid #292d31; background: #131618; }
 .board-inspector-panel { position: relative; z-index: 1; display: grid; min-width: 0; min-height: 0; grid-column: 2; grid-row: 2; grid-template-rows: auto minmax(0, 1fr); width: 100%; overflow: hidden; border-left: 1px solid #3a4349; background: #15181a; box-shadow: -10px 0 26px rgb(0 0 0 / 18%); }
 .back-link { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 19px; color: #98a4aa; font-size: 12px; text-decoration: none; }
 .back-link:hover { color: #dce3e6; }
@@ -21,7 +21,7 @@
 .project-alert-button:hover { border-color: #a06a40; background: #35271d; }
 .project-alert-button span, .integration-action span { color: inherit; font-weight: 700; }
 .project-tools { position: relative; }
-.project-tools-menu { position: absolute; z-index: 5; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; padding: 5px; border: 1px solid #3a4349; background: #181c1f; box-shadow: 0 14px 32px rgb(0 0 0 / 38%); }
+.project-tools-menu { position: absolute; z-index: 3; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; padding: 5px; border: 1px solid #3a4349; background: #181c1f; box-shadow: 0 14px 32px rgb(0 0 0 / 38%); }
 .project-tools-menu a, .project-tools-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 31px; padding: 0 8px; border: 0; background: transparent; color: #b8c4c9; cursor: pointer; font: 11px "SFMono-Regular", Consolas, monospace; text-align: left; text-decoration: none; }
 .project-tools-menu a:hover, .project-tools-menu button:hover { background: #252c30; color: #edf2f4; }
 .project-tools-menu span { margin-left: auto; color: #83b9d2; }

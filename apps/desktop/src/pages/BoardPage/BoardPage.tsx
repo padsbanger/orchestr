@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, BookOpenCheck, Bot, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, MoreHorizontal, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, BookOpenCheck, Bot, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, MessagesSquare, MoreHorizontal, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -11,6 +11,7 @@ import { FlowControlPanel } from "../../components/FlowControlPanel/FlowControlP
 import { ProjectBlockersPanel } from "../../components/ProjectBlockersPanel/ProjectBlockersPanel";
 import { ProjectKnowledgePanel } from "../../components/ProjectKnowledgePanel/ProjectKnowledgePanel";
 import { PlanningPanel } from "../../components/PlanningPanel/PlanningPanel";
+import { CollaborationPanel } from "../../components/CollaborationPanel/CollaborationPanel";
 import { TaskDetailPanel } from "../../components/TaskDetailPanel/TaskDetailPanel";
 import { TaskDialog } from "../../components/TaskDialog/TaskDialog";
 import { listAgents, type Agent } from "../../services/agents";
@@ -26,6 +27,7 @@ import { getFlowState, listenToFlowChanges, scheduleReadyTasks, updateFlowLimits
 import { answerTaskInput, createProjectBlocker, listProjectBlockers, listTaskInputRequests, requestTaskInput, resolveProjectBlocker, type ProjectBlocker, type TaskInputRequest } from "../../services/interruptions";
 import { createArchitectureDecision, decideArchitectureDecision, listArchitectureDecisions, listRelevantArchitectureDecisions, type ArchitectureDecision, type ArchitectureDecisionInput } from "../../services/knowledge";
 import { approvePlanningProposal, cancelPlanningProposal, listPlanningProposals, listenToPlanningEvents, rejectPlanningProposal, startPlanningProposal, type PlanningProposal } from "../../services/planning";
+import { createCollaborationEntry, listCollaborationEntries, resolveCollaborationEntry, type CollaborationEntry, type CollaborationKind } from "../../services/collaboration";
 import { cleanupTaskWorktree, createTask, deleteTask, listTasks, moveTask, openTaskWorktree, TASK_STATUSES, type Task, type TaskInput, type TaskStatus, updateTask } from "../../services/tasks";
 import { listenToWorkerRunEvents } from "../../services/workers";
 import "./BoardPage.css";
@@ -42,7 +44,7 @@ const columns: Record<TaskStatus, { label: string; tone: string }> = {
   done: { label: "Done", tone: "green" },
 };
 
-type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers" | "knowledge" | "planning";
+type BoardSidePanel = "task" | "repository" | "integration" | "quality" | "flow" | "blockers" | "knowledge" | "planning" | "collaboration";
 
 export function BoardPage() {
   const { projectId } = useParams();
@@ -92,6 +94,10 @@ export function BoardPage() {
   const [isPlanningLoading, setIsPlanningLoading] = useState(false);
   const [isPlanningStarting, setIsPlanningStarting] = useState(false);
   const [planningActionId, setPlanningActionId] = useState<string>();
+  const [collaborationEntries, setCollaborationEntries] = useState<CollaborationEntry[]>([]);
+  const [isCollaborationLoading, setIsCollaborationLoading] = useState(false);
+  const [isCollaborationSaving, setIsCollaborationSaving] = useState(false);
+  const [collaborationActionId, setCollaborationActionId] = useState<string>();
   const [health, setHealth] = useState<ProjectHealth>();
   const [implementationCommands, setImplementationCommands] = useState<ValidationCommand[]>([]);
   const [integrationCommands, setIntegrationCommands] = useState<ValidationCommand[]>([]);
@@ -279,6 +285,14 @@ export function BoardPage() {
     }
   }, [projectId]);
 
+  const loadCollaboration = useCallback(async () => {
+    if (!projectId) return;
+    setIsCollaborationLoading(true);
+    try { setCollaborationEntries(await listCollaborationEntries(projectId)); }
+    catch (loadError) { setError(errorMessage(loadError, "Unable to load collaboration activity.")); }
+    finally { setIsCollaborationLoading(false); }
+  }, [projectId]);
+
   const loadBoard = useCallback(async (showLoading = false) => {
     if (!projectId) return;
     if (showLoading) setIsLoading(true);
@@ -296,12 +310,13 @@ export function BoardPage() {
       void loadProjectBlockers();
       void loadArchitectureDecisions();
       void loadPlanningProposals();
+      void loadCollaboration();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load the project board.");
     } finally {
       if (showLoading) setIsLoading(false);
     }
-  }, [loadArchitectureDecisions, loadFlowControl, loadIntegrationQueue, loadOutcomes, loadPlanningProposals, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
+  }, [loadArchitectureDecisions, loadCollaboration, loadFlowControl, loadIntegrationQueue, loadOutcomes, loadPlanningProposals, loadProjectBlockers, loadQualityGates, loadRepository, projectId]);
 
   useEffect(() => {
     void loadBoard(true);
@@ -734,6 +749,21 @@ export function BoardPage() {
     }
   };
 
+  const addCollaboration = async (input: { taskId?: string; parentId?: string; kind: CollaborationKind; message: string; referencedTaskIds: string[] }) => {
+    if (!projectId) return;
+    setIsCollaborationSaving(true); setCollaborationActionId(input.parentId); setError(undefined);
+    try { await createCollaborationEntry({ projectId, ...input }); await loadCollaboration(); }
+    catch (collaborationError) { setError(errorMessage(collaborationError, "Unable to record collaboration activity.")); }
+    finally { setIsCollaborationSaving(false); setCollaborationActionId(undefined); }
+  };
+
+  const resolveCollaboration = async (entryId: string) => {
+    setCollaborationActionId(entryId); setError(undefined);
+    try { await resolveCollaborationEntry(entryId); await loadCollaboration(); }
+    catch (collaborationError) { setError(errorMessage(collaborationError, "Unable to resolve collaboration activity.")); }
+    finally { setCollaborationActionId(undefined); }
+  };
+
   const saveFlowLimits = async (limits: FlowLimitInput) => {
     if (!projectId) return;
     setIsFlowSaving(true);
@@ -901,6 +931,7 @@ export function BoardPage() {
   const activeBlockerCount = projectBlockers.filter((blocker) => blocker.status === "active").length;
   const queuedIntegrationCount = integrationAttempts.filter((attempt) => attempt.status === "queued").length;
   const proposedPlanCount = planningProposals.filter((proposal) => proposal.status === "proposed").length;
+  const openCollaborationCount = collaborationEntries.filter((entry) => !entry.parentId && entry.status === "open").length;
   const acceptedDecisionCount = architectureDecisions.filter((decision) => decision.status === "accepted").length;
 
   return (
@@ -926,6 +957,7 @@ export function BoardPage() {
               {isProjectToolsOpen && <div className="project-tools-menu" id="project-tools-menu" role="menu">
                 <Link role="menuitem" to={`/projects/${project.id}/progress`} onClick={() => setIsProjectToolsOpen(false)}><ChartNoAxesCombined size={15} /> Progress</Link>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("planning")}><Sparkles size={15} /> Plan <span>{proposedPlanCount}</span></button>
+                <button type="button" role="menuitem" onClick={() => openProjectToolPanel("collaboration")}><MessagesSquare size={15} /> Collaborate <span>{openCollaborationCount}</span></button>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{acceptedDecisionCount}</span></button>
                 {activeBlockerCount === 0 && <button type="button" role="menuitem" onClick={() => openProjectToolPanel("blockers")}><ShieldAlert size={15} /> Blockers</button>}
                 {queuedIntegrationCount === 0 && <button type="button" role="menuitem" onClick={() => openProjectToolPanel("integration")}><GitMerge size={15} /> Integration queue</button>}
@@ -963,6 +995,7 @@ export function BoardPage() {
       {activeSidePanel === "blockers" && <ProjectBlockersPanel blockers={projectBlockers} tasks={tasks} isLoading={isBlockersLoading} isSaving={isBlockerSaving} resolvingId={resolvingBlockerId} onClose={closeSidePanel} onRefresh={() => void loadProjectBlockers()} onCreate={(input) => void addProjectBlocker(input)} onResolve={(blockerId) => void clearProjectBlocker(blockerId)} />}
       {activeSidePanel === "knowledge" && <ProjectKnowledgePanel decisions={architectureDecisions} tasks={tasks} previewTaskId={knowledgePreviewTaskId} previewDecisions={knowledgePreviewDecisions} isLoading={isKnowledgeLoading} isPreviewLoading={isKnowledgePreviewLoading} isSaving={isKnowledgeSaving} decidingId={decidingArchitectureId} onClose={closeSidePanel} onRefresh={() => void loadArchitectureDecisions()} onPreviewTask={setKnowledgePreviewTaskId} onCreate={(input) => void addArchitectureDecision(input)} onDecide={(decisionId, status) => void decideArchitecture(decisionId, status)} />}
       {activeSidePanel === "planning" && <PlanningPanel proposals={planningProposals} agents={agents.filter((agent) => agent.provider === "codex")} isLoading={isPlanningLoading} isStarting={isPlanningStarting} actionId={planningActionId} onClose={closeSidePanel} onRefresh={() => void loadPlanningProposals()} onStart={(agentId, goal) => void generatePlanningProposal(agentId, goal)} onApprove={(proposalId) => void approvePlan(proposalId)} onReject={(proposalId) => void rejectPlan(proposalId)} onCancel={(proposalId) => void cancelPlan(proposalId)} />}
+      {activeSidePanel === "collaboration" && <CollaborationPanel entries={collaborationEntries} tasks={tasks} agents={agents} isLoading={isCollaborationLoading} isSaving={isCollaborationSaving} actionId={collaborationActionId} onClose={closeSidePanel} onRefresh={() => void loadCollaboration()} onCreate={(input) => void addCollaboration(input)} onResolve={(entryId) => void resolveCollaboration(entryId)} />}
     </section>
   );
 }

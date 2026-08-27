@@ -9,16 +9,17 @@ use std::{
 
 use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
-    ArchitectureDecisionStatus, Database, Epic, FlowLimitUpdate, FlowLimits, FlowState,
-    IntegrationAttempt, Milestone, NewAgent, NewAgentReview, NewArchitectureDecision, NewEpic,
-    NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
-    NewRunEvent, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
-    NewValidationEvent, PlanningMaterializationIds, PlanningPlan, PlanningProposal,
-    PlanningProposalStatus, Project, ProjectBlocker, ProjectDeletion, ProjectHealth,
-    ProjectProgress, RemoteWorker, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput,
-    RunStatus, SchedulerDecision, Task, TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate,
-    ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, WorkerManagement,
-    WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability, Workspace,
+    ArchitectureDecisionStatus, CollaborationEntry, CollaborationKind, Database, Epic,
+    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
+    NewAgentReview, NewArchitectureDecision, NewCollaborationEntry, NewEpic, NewMilestone,
+    NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent,
+    NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent,
+    PlanningMaterializationIds, PlanningPlan, PlanningProposal, PlanningProposalStatus, Project,
+    ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker, RevertAttempt,
+    RevertStatus, Run, RunEvent, RunOutput, RunStatus, SchedulerDecision, Task, TaskInputRequest,
+    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
+    ValidationStatus, WorkerManagement, WorkerManagementUpdate, WorkerProviderStatus,
+    WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -283,6 +284,29 @@ struct CreateArchitectureDecisionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CreateCollaborationEntryInput {
+    project_id: String,
+    task_id: Option<String>,
+    parent_id: Option<String>,
+    kind: String,
+    message: String,
+    #[serde(default)]
+    referenced_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentCollaborationMarker {
+    kind: String,
+    message: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    referenced_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RegisterRemoteWorkerInput {
     endpoint: String,
     token_environment_variable: String,
@@ -354,6 +378,24 @@ struct ArchitectureDecisionResponse {
     created_at: String,
     updated_at: String,
     decided_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CollaborationEntryResponse {
+    id: String,
+    project_id: String,
+    task_id: Option<String>,
+    parent_id: Option<String>,
+    author_type: String,
+    author_agent_id: Option<String>,
+    author_run_id: Option<String>,
+    kind: String,
+    message: String,
+    status: String,
+    referenced_task_ids: Vec<String>,
+    created_at: String,
+    resolved_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -883,6 +925,26 @@ impl From<ArchitectureDecision> for ArchitectureDecisionResponse {
             created_at: decision.created_at,
             updated_at: decision.updated_at,
             decided_at: decision.decided_at,
+        }
+    }
+}
+
+impl From<CollaborationEntry> for CollaborationEntryResponse {
+    fn from(entry: CollaborationEntry) -> Self {
+        Self {
+            id: entry.id,
+            project_id: entry.project_id,
+            task_id: entry.task_id,
+            parent_id: entry.parent_id,
+            author_type: entry.author_type,
+            author_agent_id: entry.author_agent_id,
+            author_run_id: entry.author_run_id,
+            kind: entry.kind.as_str().into(),
+            message: entry.message,
+            status: entry.status,
+            referenced_task_ids: entry.referenced_task_ids,
+            created_at: entry.created_at,
+            resolved_at: entry.resolved_at,
         }
     }
 }
@@ -2868,7 +2930,15 @@ fn start_agent_review(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentReviewResponse, String> {
-    let (task, reviewer, default_branch, recent_runs, validation_attempts, architecture_decisions) = {
+    let (
+        task,
+        reviewer,
+        default_branch,
+        recent_runs,
+        validation_attempts,
+        architecture_decisions,
+        collaboration_entries,
+    ) = {
         let database = state
             .database
             .lock()
@@ -2899,7 +2969,7 @@ fn start_agent_review(
         let recent_runs = database
             .list_runs_for_task(&task.id)
             .map_err(|error| format!("Unable to load the implementation run summary: {error}"))?;
-        let (validation_attempts, architecture_decisions) =
+        let (validation_attempts, architecture_decisions, collaboration_entries) =
             load_agent_review_project_context(&database, &task)?;
         (
             task,
@@ -2908,6 +2978,7 @@ fn start_agent_review(
             recent_runs,
             validation_attempts,
             architecture_decisions,
+            collaboration_entries,
         )
     };
     let worktree_path = task
@@ -2945,6 +3016,7 @@ fn start_agent_review(
             &recent_runs,
             &validation_attempts,
             &architecture_decisions,
+            &collaboration_entries,
         ),
         working_directory: PathBuf::from(&worktree_path),
         additional_writable_directories: Vec::new(),
@@ -3093,7 +3165,14 @@ fn start_agent_review(
 fn load_agent_review_project_context(
     database: &Database,
     task: &Task,
-) -> Result<(Vec<ValidationAttempt>, Vec<ArchitectureDecision>), String> {
+) -> Result<
+    (
+        Vec<ValidationAttempt>,
+        Vec<ArchitectureDecision>,
+        Vec<CollaborationEntry>,
+    ),
+    String,
+> {
     let validation_attempts = database
         .list_validation_attempts(&task.project_id, 20)
         .map_err(|error| format!("Unable to load implementation validation: {error}"))?
@@ -3103,7 +3182,10 @@ fn load_agent_review_project_context(
     let decisions = database
         .list_relevant_architecture_decisions(&task.id)
         .map_err(|error| format!("Unable to load project knowledge for review: {error}"))?;
-    Ok((validation_attempts, decisions))
+    let collaboration = database
+        .list_relevant_collaboration_entries(&task.id)
+        .map_err(|error| format!("Unable to load collaboration context for review: {error}"))?;
+    Ok((validation_attempts, decisions, collaboration))
 }
 
 #[tauri::command]
@@ -5087,13 +5169,15 @@ fn launch_claimed_task_run(
     database: Arc<Mutex<Database>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
 ) -> Result<(), String> {
-    let architecture_decisions = load_task_architecture_context(&database, &task.id)?;
+    let (architecture_decisions, collaboration_entries) =
+        load_task_agent_context(&database, &task.id)?;
     let prepared = prepare_task_run_worktree(&task, &workspace_path, &default_branch, &database)?;
     let run = start_task_worker(
         &persisted_run.id,
         &task,
         &agent,
         &architecture_decisions,
+        &collaboration_entries,
         &prepared.worktree_path,
         remote_worker.as_ref(),
     )?;
@@ -5111,15 +5195,31 @@ fn launch_claimed_task_run(
     )
 }
 
+fn load_task_agent_context(
+    database: &Arc<Mutex<Database>>,
+    task_id: &str,
+) -> Result<(Vec<ArchitectureDecision>, Vec<CollaborationEntry>), String> {
+    let decisions = load_task_architecture_context(database, task_id)?;
+    let collaboration = load_task_collaboration_context(database, task_id)?;
+    Ok((decisions, collaboration))
+}
+
 fn start_task_worker(
     run_id: &str,
     task: &Task,
     agent: &Agent,
     architecture_decisions: &[ArchitectureDecision],
+    collaboration_entries: &[CollaborationEntry],
     worktree_path: &str,
     remote_worker: Option<&RemoteWorker>,
 ) -> Result<WorkerRun, String> {
-    let request = prepare_task_process_request(task, agent, architecture_decisions, worktree_path)?;
+    let request = prepare_task_process_request(
+        task,
+        agent,
+        architecture_decisions,
+        collaboration_entries,
+        worktree_path,
+    )?;
     dispatch_task_process(run_id, request, remote_worker)
 }
 
@@ -5304,6 +5404,17 @@ fn load_task_architecture_context(
         .map_err(|error| format!("Unable to prepare project knowledge: {error}"))
 }
 
+fn load_task_collaboration_context(
+    database: &Arc<Mutex<Database>>,
+    task_id: &str,
+) -> Result<Vec<CollaborationEntry>, String> {
+    database
+        .lock()
+        .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
+        .list_relevant_collaboration_entries(task_id)
+        .map_err(|error| format!("Unable to prepare agent collaboration context: {error}"))
+}
+
 struct PreparedTaskRun {
     branch: String,
     worktree_path: String,
@@ -5433,6 +5544,7 @@ fn prepare_task_process_request(
     task: &Task,
     agent: &Agent,
     architecture_decisions: &[ArchitectureDecision],
+    collaboration_entries: &[CollaborationEntry],
     worktree_path: &str,
 ) -> Result<ProcessRequest, String> {
     let additional_writable_directories =
@@ -5442,7 +5554,7 @@ fn prepare_task_process_request(
     CodexProvider
         .execution_request(AgentRunInput {
             model: agent.model.clone(),
-            prompt: build_task_prompt(task, agent, architecture_decisions),
+            prompt: build_task_prompt(task, agent, architecture_decisions, collaboration_entries),
             working_directory: PathBuf::from(worktree_path),
             additional_writable_directories,
             read_only: false,
@@ -5682,7 +5794,9 @@ fn classify_successful_task_exit(
     worktree_path: &str,
     exit_code: Option<i32>,
 ) -> TaskRunOutcome {
-    match capture_agent_input_request(database, run_id, task_id) {
+    let interruption = capture_agent_collaboration(database, run_id, project_id, task_id)
+        .and_then(|_| capture_agent_input_request(database, run_id, task_id));
+    match interruption {
         Ok(Some(question)) => TaskRunOutcome {
             status: RunStatus::Cancelled,
             kind: "needs_input",
@@ -5694,6 +5808,78 @@ fn classify_successful_task_exit(
         }
         Err(error) => failed_task_outcome(error, exit_code),
     }
+}
+
+fn capture_agent_collaboration(
+    database: &Arc<Mutex<Database>>,
+    run_id: &str,
+    project_id: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    let run = load_completed_run(database, run_id)?;
+    let markers = task_collaboration_markers(&run);
+    persist_agent_collaboration(database, &run, project_id, task_id, markers)
+}
+
+fn persist_agent_collaboration(
+    database: &Arc<Mutex<Database>>,
+    run: &Run,
+    project_id: &str,
+    task_id: &str,
+    markers: Vec<AgentCollaborationMarker>,
+) -> Result<(), String> {
+    let mut database = database
+        .lock()
+        .map_err(|_| "The local collaboration store is unavailable.".to_owned())?;
+    for marker in markers {
+        persist_agent_collaboration_marker(&mut database, run, project_id, task_id, marker)?;
+    }
+    Ok(())
+}
+
+fn persist_agent_collaboration_marker(
+    database: &mut Database,
+    run: &Run,
+    project_id: &str,
+    task_id: &str,
+    marker: AgentCollaborationMarker,
+) -> Result<(), String> {
+    let kind = parse_collaboration_kind(&marker.kind)?;
+    database
+        .create_collaboration_entry(NewCollaborationEntry {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.to_owned(),
+            task_id: Some(task_id.to_owned()),
+            parent_id: marker.parent_id,
+            author_type: "agent".into(),
+            author_agent_id: Some(run.agent_id.clone()),
+            author_run_id: Some(run.id.clone()),
+            kind,
+            message: marker.message,
+            referenced_task_ids: marker.referenced_task_ids,
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Unable to persist agent collaboration: {error}"))
+}
+
+fn load_completed_run(database: &Arc<Mutex<Database>>, run_id: &str) -> Result<Run, String> {
+    database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .get_run(run_id)
+        .map_err(|error| format!("Unable to inspect agent collaboration output: {error}"))?
+        .ok_or_else(|| "The completed run no longer exists.".to_owned())
+}
+
+fn task_collaboration_markers(run: &Run) -> Vec<AgentCollaborationMarker> {
+    run.events
+        .iter()
+        .filter(|event| event.kind == "agent.message")
+        .flat_map(|event| event.message.lines())
+        .filter_map(|line| review_protocol_field(line, "ORCHESTR_COLLABORATION"))
+        .filter_map(|json| serde_json::from_str(&json).ok())
+        .take(10)
+        .collect()
 }
 
 fn capture_agent_input_request(
@@ -6187,6 +6373,65 @@ fn decide_architecture_decision(
     state: State<'_, AppState>,
 ) -> Result<ArchitectureDecisionResponse, String> {
     persist_architecture_decision_status(&state.database, &decision_id, &status).map(Into::into)
+}
+
+#[tauri::command]
+fn list_collaboration_entries(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<CollaborationEntryResponse>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
+        .list_collaboration_entries(&project_id)
+        .map(|entries| entries.into_iter().map(Into::into).collect())
+        .map_err(|error| format!("Unable to load collaboration activity: {error}"))
+}
+
+#[tauri::command]
+fn create_collaboration_entry(
+    input: CreateCollaborationEntryInput,
+    state: State<'_, AppState>,
+) -> Result<CollaborationEntryResponse, String> {
+    let kind = parse_collaboration_kind(&input.kind)?;
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
+        .create_collaboration_entry(NewCollaborationEntry {
+            id: Uuid::new_v4().to_string(),
+            project_id: input.project_id,
+            task_id: input.task_id,
+            parent_id: input.parent_id,
+            author_type: "human".into(),
+            author_agent_id: None,
+            author_run_id: None,
+            kind,
+            message: input.message,
+            referenced_task_ids: input.referenced_task_ids,
+        })
+        .map(Into::into)
+        .map_err(|error| format!("Unable to record collaboration activity: {error}"))
+}
+
+#[tauri::command]
+fn resolve_collaboration_entry(
+    entry_id: String,
+    state: State<'_, AppState>,
+) -> Result<CollaborationEntryResponse, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
+        .resolve_collaboration_entry(&entry_id)
+        .map_err(|error| format!("Unable to resolve collaboration activity: {error}"))?
+        .map(Into::into)
+        .ok_or_else(|| "The collaboration entry is already resolved or no longer exists.".into())
+}
+
+fn parse_collaboration_kind(value: &str) -> Result<CollaborationKind, String> {
+    CollaborationKind::parse(value).ok_or_else(|| "Unknown collaboration activity type.".into())
 }
 
 fn persist_architecture_decision_status(
@@ -6773,6 +7018,7 @@ fn build_task_prompt(
     task: &Task,
     agent: &Agent,
     architecture_decisions: &[ArchitectureDecision],
+    collaboration_entries: &[CollaborationEntry],
 ) -> String {
     let mut prompt = format!(
         "You are {name}, acting as {role} in this repository. Implement the task below. \
@@ -6811,6 +7057,8 @@ fn build_task_prompt(
     prompt.push_str(
         "\nTreat accepted decisions as authoritative project constraints. Do not contradict them casually. If this task requires changing one, stop and request a human decision so a superseding ADR can be recorded.",
     );
+    prompt.push_str("\n\n## Open collaboration context\n");
+    prompt.push_str(&format_collaboration_context(collaboration_entries));
     if let Some(system_prompt) = &agent.system_prompt {
         prompt.push_str(&format!("\n\n## Agent instructions\n{system_prompt}"));
     }
@@ -6822,12 +7070,37 @@ fn build_task_prompt(
     }
     prompt.push_str(
         "\n\n## Completion contract\n\
+         Coordinate through Orchestr rather than assuming another agent will discover your notes. To publish an auditable comment, request, blocker, interface change, escalation, or reply, add a final agent-message line with compact JSON in this form: `ORCHESTR_COLLABORATION: {\"kind\":\"comment|request|blocker|interface_change|escalation\",\"message\":\"specific coordination message\",\"parentId\":null,\"referencedTaskIds\":[\"task-id\"]}`. Set `parentId` to an open entry ID from the collaboration context when replying. Use real task and entry IDs from the supplied context, and emit at most 10 collaboration lines. These records do not replace the human-input marker when execution must pause.\n\
          If progress requires a human decision, unavailable credential, external service, or missing project context, do not guess. Stop and return a final agent message containing exactly one line in this form: `ORCHESTR_NEEDS_INPUT: <specific question>`. Orchestr will preserve the worktree and move the task to Needs Input. Do not use this marker when you can safely continue.\n\
          Before finishing, inspect `git status`. After validating your work, commit every task-related change on this task branch with a clear commit message. Do not leave staged or unstaged task changes behind. Do not commit unrelated pre-existing changes.\n\
          If a normal `git add` or `git commit` fails because repository metadata is not writable, stop and report the exact error. Do not modify filesystem permissions, use an alternate Git index, or invoke low-level Git plumbing as a workaround.\n\
          When finished, summarize the changes, validation performed, and the commit hash.",
     );
     prompt
+}
+
+fn format_collaboration_context(entries: &[CollaborationEntry]) -> String {
+    if entries.is_empty() {
+        return "No open collaboration records apply to this task.".into();
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "- [{}] {} (entry {}, task {}, references: {})",
+                entry.kind.as_str(),
+                entry.message,
+                entry.id,
+                entry.task_id.as_deref().unwrap_or("project-wide"),
+                if entry.referenced_task_ids.is_empty() {
+                    "none".into()
+                } else {
+                    entry.referenced_task_ids.join(", ")
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_agent_review_prompt(
@@ -6837,6 +7110,7 @@ fn build_agent_review_prompt(
     runs: &[Run],
     validations: &[ValidationAttempt],
     architecture_decisions: &[ArchitectureDecision],
+    collaboration_entries: &[CollaborationEntry],
 ) -> String {
     let acceptance_criteria = if task.acceptance_criteria.is_empty() {
         "- No acceptance criteria recorded.".to_owned()
@@ -6888,7 +7162,7 @@ fn build_agent_review_prompt(
             .join("\n")
     };
     format!(
-        "You are {name}, a logically separate technical reviewer. You must not change files, run destructive commands, or approve your own implementation. Review this task only from the supplied evidence.\n\n# Task\n{title}\n{description}\n\n# Acceptance criteria\n{acceptance_criteria}\n\n# Relevant paths\n{paths}\n\n# Accepted project decisions\n{project_decisions}\n\nTreat accepted decisions as authoritative constraints. Request changes if the implementation contradicts one without an explicit superseding decision.\n\n# Implementation run\n{run_summary}\n\n# Implementation validation\n{validation_summary}\n\n# Branch evidence\nBranch: {branch}\nBase: {base}\nCommits:\n{commits}\n\n# Diff\n{diff}\n\nDecide whether the implementation satisfies the acceptance criteria and is safe to send to normal integration. Return exactly these two single-line fields, with no alternative decision wording:\nORCHESTR_REVIEW_DECISION: approve | request_changes\nORCHESTR_REVIEW_NOTES: concise evidence-based review notes",
+        "You are {name}, a logically separate technical reviewer. You must not change files, run destructive commands, or approve your own implementation. Review this task only from the supplied evidence.\n\n# Task\n{title}\n{description}\n\n# Acceptance criteria\n{acceptance_criteria}\n\n# Relevant paths\n{paths}\n\n# Accepted project decisions\n{project_decisions}\n\nTreat accepted decisions as authoritative constraints. Request changes if the implementation contradicts one without an explicit superseding decision.\n\n# Open collaboration context\n{collaboration}\n\nTreat unresolved blockers, interface changes, and escalations as review evidence.\n\n# Implementation run\n{run_summary}\n\n# Implementation validation\n{validation_summary}\n\n# Branch evidence\nBranch: {branch}\nBase: {base}\nCommits:\n{commits}\n\n# Diff\n{diff}\n\nDecide whether the implementation satisfies the acceptance criteria and is safe to send to normal integration. Return exactly these two single-line fields, with no alternative decision wording:\nORCHESTR_REVIEW_DECISION: approve | request_changes\nORCHESTR_REVIEW_NOTES: concise evidence-based review notes",
         name = reviewer.name,
         title = task.title,
         description = task.description.as_deref().unwrap_or("No description provided."),
@@ -6898,6 +7172,7 @@ fn build_agent_review_prompt(
             task.relevant_paths.join("\n")
         },
         project_decisions = format_architecture_decisions(architecture_decisions),
+        collaboration = format_collaboration_context(collaboration_entries),
         branch = review.branch,
         base = review.base_branch,
         diff = if review.diff.is_empty() { "No diff available." } else { &review.diff },
@@ -7183,6 +7458,9 @@ fn main() {
             list_relevant_architecture_decisions,
             create_architecture_decision,
             decide_architecture_decision,
+            list_collaboration_entries,
+            create_collaboration_entry,
+            resolve_collaboration_entry,
             list_milestones,
             create_milestone,
             update_milestone_status,
@@ -7204,9 +7482,9 @@ mod tests {
     use super::{
         build_task_prompt, choose_compatible_worker, create_task_record, format_run_log,
         load_flow_state, normalize_workspace_path, parse_agent_review_decision,
-        parse_planning_plan, schedule_ready_tasks_in_database, task_input_question,
-        update_task_record, worker_can_execute, worker_capabilities, worker_mismatch_reason,
-        CreateTaskInput, SchedulerWorker, UpdateTaskInput,
+        parse_planning_plan, schedule_ready_tasks_in_database, task_collaboration_markers,
+        task_input_question, update_task_record, worker_can_execute, worker_capabilities,
+        worker_mismatch_reason, CreateTaskInput, SchedulerWorker, UpdateTaskInput,
     };
     use orchestr_db::{
         Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Database,
@@ -7287,6 +7565,7 @@ mod tests {
                 updated_at: String::new(),
                 decided_at: Some(String::new()),
             }],
+            &[],
         );
         assert!(prompt.contains("commit every task-related change"));
         assert!(prompt.contains("Do not leave staged or unstaged task changes behind"));
@@ -7295,6 +7574,7 @@ mod tests {
         assert!(prompt.contains("ORCHESTR_NEEDS_INPUT"));
         assert!(prompt.contains("ADR-001 Use worktrees"));
         assert!(prompt.contains("Do not contradict them casually"));
+        assert!(prompt.contains("ORCHESTR_COLLABORATION"));
     }
 
     #[test]
@@ -7569,6 +7849,16 @@ mod tests {
             task_input_question(&run).as_deref(),
             Some("Which OAuth tenant should be used?")
         );
+        run.events.push(RunEvent {
+            id: 3,
+            kind: "agent.message".into(),
+            message: r#"ORCHESTR_COLLABORATION: {"kind":"interface_change","message":"Expose GET /session.","referencedTaskIds":["task-ui"]}"#.into(),
+            command: None, file_path: None, exit_code: None, created_at: String::new(),
+        });
+        let markers = task_collaboration_markers(&run);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].kind, "interface_change");
+        assert_eq!(markers[0].referenced_task_ids, ["task-ui"]);
     }
 
     #[test]

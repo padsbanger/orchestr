@@ -19,6 +19,10 @@ available. Persisted decisions explain why each task was scheduled or held.
 The board now includes a read-only planning agent workspace: Codex can turn a
 project goal into a persisted milestone, epic, and dependency-aware task draft,
 while explicit human approval atomically creates the proposed project work.
+Agents now coordinate through a persisted project ledger rather than hidden
+peer-to-peer messages. Typed requests, blockers, interface changes, comments,
+escalations, replies, and task references remain visible to humans and are
+injected into relevant later task runs.
 
 ## M0 development
 
@@ -58,8 +62,8 @@ npm run crap:rust
 npm run crap
 ```
 
-`crap4ts` currently covers the agent-review, flow-control, recovery, knowledge,
-planning, and worker service boundaries. The Rust gate compares against
+`crap4ts` currently covers the agent-review, collaboration, flow-control,
+recovery, knowledge, planning, and worker service boundaries. The Rust gate compares against
 the checked-in baseline, failing for a regression or for a new function whose
 score reaches 30.
 Refresh that baseline only after reviewing and intentionally accepting a report

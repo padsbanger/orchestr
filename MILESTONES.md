@@ -1086,7 +1086,9 @@ A user can approve an AI-generated implementation plan that becomes structured, 
 
 ---
 
-# M25 — Agent Collaboration
+# M25 — Agent Collaboration — Complete
+
+**Completed:** 2026-08-27
 
 ### Goal
 
@@ -1108,6 +1110,16 @@ All communication is persisted.
 ### Definition of done
 
 Agents can coordinate without hidden peer-to-peer conversation.
+
+### Delivered
+
+- durable project collaboration ledger with human, agent, and run provenance
+- typed comments, requests, blockers, interface changes, and escalations
+- project-wide and task-scoped threads with cross-task references
+- persisted replies, open/resolved state, and recursive thread resolution
+- structured agent output protocol captured only from agent messages
+- relevant open collaboration automatically injected into later task runs
+- right-hand collaboration workspace for creating, replying, filtering, and resolving activity
 
 ---
 
@@ -1144,27 +1156,7 @@ An Orchestr task can participate in a normal hosted Git workflow without abandon
 
 ---
 
-# M27 — CI/CD Integration
-
-### Goal
-
-Combine local validation with external CI/deployment state.
-
-### Scope
-
-- read CI status
-- associate CI with task/PR
-- required checks
-- deployment state
-- deployment task types
-
-### Definition of done
-
-Project progress can include both local validation and remote CI outcomes.
-
----
-
-# M28 — Metrics + Cost Control
+# M27 — Metrics + Cost Control
 
 ### Goal
 
@@ -1202,7 +1194,7 @@ Users can identify bottlenecks, unreliable agents, excessive cost, or slow proje
 
 ---
 
-# M29 — Autonomous Project Mode
+# M28 — Autonomous Project Mode
 
 ### Goal
 
@@ -1326,23 +1318,22 @@ This release turns Orchestr from an agent runner into a system that manages proj
 ## v0.7 — Hosted Development Workflow
 
 - M26 Remote Git Hosting
-- M27 CI/CD Integration
-- M28 Metrics + Cost Control
+- M27 Metrics + Cost Control
 
 ---
 
 ## v1.0 — Autonomous Orchestration
 
-- M29 Autonomous Project Mode
+- M28 Autonomous Project Mode
 
 ---
 
 # Immediate Implementation Sequence
 
-Continue from the completed M24 state:
+Continue from the completed M25 state:
 
 ```text
-1. Implement persisted, auditable agent comments, requests, blockers, references, and escalations
+1. Implement local-first hosted Git clone, remote, push, issue, and pull-request workflows
 ```
 
 Do not let later agents casually contradict accepted technical decisions.
