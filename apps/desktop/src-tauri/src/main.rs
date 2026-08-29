@@ -5,17 +5,19 @@ use std::{
     process::Command,
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
-    ArchitectureDecisionStatus, CollaborationEntry, CollaborationKind, Database, Epic,
-    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, ModelPricing,
-    ModelPricingUpdate, NewAgent, NewAgentReview, NewArchitectureDecision, NewCollaborationEntry,
-    NewEpic, NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker,
-    NewRun, NewRunEvent, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
-    NewValidationEvent, PlanningMaterializationIds, PlanningPlan, PlanningProposal,
-    PlanningProposalStatus, Project, ProjectBlocker, ProjectCostControl, ProjectCostControlUpdate,
+    ArchitectureDecisionStatus, AutonomyCycleCompletion, CollaborationEntry, CollaborationKind,
+    Database, Epic, FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone,
+    ModelPricing, ModelPricingUpdate, NewAgent, NewAgentReview, NewArchitectureDecision,
+    NewCollaborationEntry, NewEpic, NewMilestone, NewPlanningProposal, NewProject,
+    NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent, NewSchedulerDecision, NewTask,
+    NewTaskInputRequest, NewValidationCommand, NewValidationEvent, PlanningMaterializationIds,
+    PlanningPlan, PlanningProposal, PlanningProposalStatus, Project, ProjectAutonomySnapshot,
+    ProjectAutonomyUpdate, ProjectBlocker, ProjectCostControl, ProjectCostControlUpdate,
     ProjectDeletion, ProjectHealth, ProjectMetrics, ProjectProgress, RemoteWorker, RevertAttempt,
     RevertStatus, Run, RunEvent, RunOutput, RunStatus, RunUsageUpdate, SchedulerDecision, Task,
     TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand,
@@ -36,6 +38,7 @@ use uuid::Uuid;
 
 const LOCAL_WORKER_ID: &str = "local";
 
+#[derive(Clone)]
 struct AppState {
     database: Arc<Mutex<Database>>,
     local_worker_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
@@ -158,6 +161,21 @@ struct UpsertModelPricingInput {
     input_micros_per_million: i64,
     cached_input_micros_per_million: i64,
     output_micros_per_million: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProjectAutonomyInput {
+    project_id: String,
+    planning_proposal_id: Option<String>,
+    reviewer_agent_id: Option<String>,
+    auto_schedule: bool,
+    auto_review: bool,
+    auto_integrate: bool,
+    max_tasks_per_cycle: i64,
+    max_auto_retries: i64,
+    pause_on_failure: bool,
+    pause_on_needs_input: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4097,9 +4115,11 @@ fn display_validation_command(command: &ValidationCommand) -> String {
 #[tauri::command]
 fn integrate_next_task(
     project_id: String,
+    allowed_task_ids: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<IntegrationExecutionResponse, String> {
+    let allowed_task_ids = allowed_task_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let health = state
         .database
         .lock()
@@ -4112,13 +4132,7 @@ fn integrate_next_task(
             .unwrap_or_else(|| "a required integration validation command".into());
         return Err(format!("Integration is paused because {} is broken. Re-run the integration validation after fixing {gate}.", project_id));
     }
-    let attempt = state
-        .database
-        .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?
-        .claim_next_integration(&project_id)
-        .map_err(|_| "Another task is already integrating for this project.".to_owned())?
-        .ok_or_else(|| "No approved task is waiting for integration.".to_owned())?;
+    let attempt = claim_integration_in_scope(&state, &project_id, allowed_task_ids.as_ref())?;
 
     let (task, workspace_path) = match integration_context(&state, &attempt) {
         Ok(context) => context,
@@ -4273,6 +4287,31 @@ fn integrate_next_task(
         }
         Err(error) => finish_failed_integration(&state, &attempt.id, error.to_string()),
     }
+}
+
+fn claim_integration_in_scope(
+    state: &AppState,
+    project_id: &str,
+    allowed_task_ids: Option<&HashSet<String>>,
+) -> Result<IntegrationAttempt, String> {
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?;
+    let attempt = claim_next_integration_for_scope(&mut database, project_id, allowed_task_ids)?;
+    attempt.ok_or_else(|| "No approved task is waiting for integration.".to_owned())
+}
+
+fn claim_next_integration_for_scope(
+    database: &mut Database,
+    project_id: &str,
+    allowed_task_ids: Option<&HashSet<String>>,
+) -> Result<Option<IntegrationAttempt>, String> {
+    let attempt = match allowed_task_ids {
+        Some(task_ids) => database.claim_next_integration_for_tasks(project_id, task_ids),
+        None => database.claim_next_integration(project_id),
+    };
+    attempt.map_err(|_| "Another task is already integrating for this project.".to_owned())
 }
 
 fn integration_context(
@@ -4777,6 +4816,8 @@ fn schedule_ready_tasks(
             &project_id,
             local_profile,
             local_providers,
+            None,
+            None,
         )?
     };
     dispatch_queued_task_runs(
@@ -4793,15 +4834,21 @@ fn schedule_ready_tasks_in_database(
     project_id: &str,
     local_profile: orchestr_worker::WorkerProfile,
     local_providers: Vec<WorkerProviderStatus>,
+    allowed_task_ids: Option<&HashSet<String>>,
+    task_limit: Option<usize>,
 ) -> Result<(Vec<SchedulerDecision>, Vec<SchedulerDecision>), String> {
-    let tasks = database
+    let mut tasks = database
         .list_ready_tasks_for_scheduling(project_id)
         .map_err(|error| format!("Unable to load Ready work: {error}"))?;
+    if let Some(allowed_task_ids) = allowed_task_ids {
+        tasks.retain(|task| allowed_task_ids.contains(&task.id));
+    }
     let mut workers = scheduler_workers(database, project_id, local_profile, local_providers)?;
     let flow = database
         .flow_state(project_id, LOCAL_WORKER_ID)
         .map_err(|error| format!("Unable to load project scheduling capacity: {error}"))?;
     let project_slots = (flow.limits.in_progress_limit - flow.in_progress - flow.queued).max(0);
+    let project_slots = task_limit.map_or(project_slots, |limit| project_slots.min(limit as i64));
     schedule_task_candidates(database, project_id, tasks, &mut workers, project_slots)
 }
 
@@ -6678,6 +6725,845 @@ fn delete_model_pricing(
 }
 
 #[tauri::command]
+fn get_project_autonomy(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    load_project_autonomy(&state, &project_id)
+}
+
+#[tauri::command]
+fn update_project_autonomy(
+    input: UpdateProjectAutonomyInput,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .update_project_autonomy(
+            &input.project_id,
+            ProjectAutonomyUpdate {
+                planning_proposal_id: normalize_optional_text(input.planning_proposal_id),
+                reviewer_agent_id: normalize_optional_text(input.reviewer_agent_id),
+                auto_schedule: input.auto_schedule,
+                auto_review: input.auto_review,
+                auto_integrate: input.auto_integrate,
+                max_tasks_per_cycle: input.max_tasks_per_cycle,
+                max_auto_retries: input.max_auto_retries,
+                pause_on_failure: input.pause_on_failure,
+                pause_on_needs_input: input.pause_on_needs_input,
+            },
+        )
+        .map_err(|_| {
+            "Save an approved plan, a Codex reviewer when auto-review is enabled, and valid cycle limits before enabling autonomy.".to_owned()
+        })?;
+    load_project_autonomy(&state, &input.project_id)
+}
+
+#[tauri::command]
+fn start_project_autonomy(
+    project_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .start_project_autonomy(&project_id)
+        .map_err(|_| {
+            "Autonomy requires a saved, approved plan and valid safety configuration.".to_owned()
+        })?;
+    run_project_autonomy_cycle_internal(&project_id, "user", app, &state)
+}
+
+#[tauri::command]
+fn pause_project_autonomy(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .pause_project_autonomy(
+            &project_id,
+            "Paused by the user. No new autonomous actions will start.",
+        )
+        .map_err(|error| format!("Unable to pause project autonomy: {error}"))?;
+    load_project_autonomy(&state, &project_id)
+}
+
+#[tauri::command]
+fn stop_project_autonomy(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .stop_project_autonomy(&project_id)
+        .map_err(|error| format!("Unable to stop project autonomy: {error}"))?;
+    load_project_autonomy(&state, &project_id)
+}
+
+#[tauri::command]
+fn advance_project_autonomy(
+    project_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProjectAutonomySnapshot, String> {
+    run_project_autonomy_cycle_internal(&project_id, "user", app, &state)
+}
+
+fn load_project_autonomy(
+    state: &AppState,
+    project_id: &str,
+) -> Result<ProjectAutonomySnapshot, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .project_autonomy_snapshot(project_id)
+        .map_err(|error| format!("Unable to load project autonomy: {error}"))
+}
+
+#[derive(Default)]
+struct AutonomyCycleStats {
+    scheduled: i64,
+    reviews: i64,
+    retries: i64,
+    integrations: i64,
+}
+
+enum AutonomyDisposition {
+    Continue(String),
+    Pause(String),
+    Complete(String),
+}
+
+fn run_project_autonomy_cycle_internal(
+    project_id: &str,
+    trigger_kind: &str,
+    app: AppHandle,
+    state: &AppState,
+) -> Result<ProjectAutonomySnapshot, String> {
+    let cycle_id = Uuid::new_v4().to_string();
+    let cycle = begin_project_autonomy_cycle(state, &cycle_id, project_id, trigger_kind)?;
+    if cycle.is_none() {
+        return load_project_autonomy(state, project_id);
+    }
+    let result = execute_project_autonomy_cycle(project_id, &cycle_id, app.clone(), state);
+    complete_autonomy_cycle_and_load(project_id, &cycle_id, result, app, state)
+}
+
+fn begin_project_autonomy_cycle(
+    state: &AppState,
+    cycle_id: &str,
+    project_id: &str,
+    trigger_kind: &str,
+) -> Result<Option<orchestr_db::AutonomyCycle>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .begin_autonomy_cycle(cycle_id, project_id, trigger_kind)
+        .map_err(|error| format!("Unable to begin autonomy cycle: {error}"))
+}
+
+fn complete_autonomy_cycle_and_load(
+    project_id: &str,
+    cycle_id: &str,
+    result: Result<(AutonomyCycleStats, AutonomyDisposition), String>,
+    app: AppHandle,
+    state: &AppState,
+) -> Result<ProjectAutonomySnapshot, String> {
+    finish_project_autonomy_cycle(project_id, cycle_id, result, state)?;
+    let _ = app.emit("autonomy://changed", project_id.to_owned());
+    load_project_autonomy(state, project_id)
+}
+
+fn execute_project_autonomy_cycle(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    let (autonomy, task_ids) = load_autonomy_execution_context(state, project_id)?;
+    if task_ids.is_empty() {
+        return Ok((
+            AutonomyCycleStats::default(),
+            AutonomyDisposition::Pause("The approved plan has no materialized tasks.".into()),
+        ));
+    }
+    continue_autonomy_after_scope_check(project_id, cycle_id, app, state, autonomy, task_ids)
+}
+
+fn load_autonomy_execution_context(
+    state: &AppState,
+    project_id: &str,
+) -> Result<(orchestr_db::ProjectAutonomy, Vec<String>), String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?;
+    let autonomy = database
+        .project_autonomy(project_id)
+        .map_err(|error| format!("Unable to load autonomy configuration: {error}"))?;
+    let (_, task_ids) = database
+        .autonomy_scope(project_id)
+        .map_err(|error| format!("Unable to load approved plan scope: {error}"))?;
+    Ok((autonomy, task_ids))
+}
+
+fn continue_autonomy_after_scope_check(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    if autonomy_scope_complete(state, &task_ids)? {
+        return Ok((
+            AutonomyCycleStats::default(),
+            AutonomyDisposition::Complete("Every approved-plan task is Done.".into()),
+        ));
+    }
+    continue_autonomy_after_completion_check(project_id, cycle_id, app, state, autonomy, task_ids)
+}
+
+fn continue_autonomy_after_completion_check(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    if let Some(reason) = autonomy_pause_reason(state, &autonomy, &task_ids)? {
+        return Ok((
+            AutonomyCycleStats::default(),
+            AutonomyDisposition::Pause(reason),
+        ));
+    }
+    execute_safe_autonomy_actions(project_id, cycle_id, app, state, autonomy, task_ids)
+}
+
+fn execute_safe_autonomy_actions(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    let mut stats = AutonomyCycleStats::default();
+    recover_autonomy_failure(
+        state, &app, project_id, cycle_id, &autonomy, &task_ids, &mut stats,
+    )?;
+    continue_autonomy_after_recovery(project_id, cycle_id, app, state, autonomy, task_ids, stats)
+}
+
+fn continue_autonomy_after_recovery(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+    mut stats: AutonomyCycleStats,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    if let Some(reason) = guarded_autonomy_failure_reason(state, &autonomy, &task_ids)? {
+        return Ok((stats, AutonomyDisposition::Pause(reason)));
+    }
+    schedule_autonomy_tasks(
+        state, &app, project_id, cycle_id, &autonomy, &task_ids, &mut stats,
+    )?;
+    continue_autonomy_after_scheduling(project_id, cycle_id, app, state, autonomy, task_ids, stats)
+}
+
+fn guarded_autonomy_failure_reason(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Option<String>, String> {
+    if !autonomy.pause_on_failure {
+        return Ok(None);
+    }
+    autonomy_failure_reason(state, autonomy, task_ids)
+}
+
+fn continue_autonomy_after_scheduling(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+    mut stats: AutonomyCycleStats,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    start_autonomy_reviews(
+        state, &app, project_id, cycle_id, &autonomy, &task_ids, &mut stats,
+    )?;
+    continue_autonomy_after_review_start(
+        project_id, cycle_id, app, state, autonomy, task_ids, stats,
+    )
+}
+
+fn continue_autonomy_after_review_start(
+    project_id: &str,
+    cycle_id: &str,
+    app: AppHandle,
+    state: &AppState,
+    autonomy: orchestr_db::ProjectAutonomy,
+    task_ids: Vec<String>,
+    mut stats: AutonomyCycleStats,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    if let Some(reason) = guarded_autonomy_review_failure_reason(state, &autonomy, &task_ids)? {
+        return Ok((stats, AutonomyDisposition::Pause(reason)));
+    }
+    integrate_autonomy_task(
+        state, &app, project_id, cycle_id, &autonomy, &task_ids, &mut stats,
+    )?;
+    summarize_autonomy_cycle(state, &task_ids, stats)
+}
+
+fn guarded_autonomy_review_failure_reason(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Option<String>, String> {
+    if !autonomy.pause_on_failure {
+        return Ok(None);
+    }
+    autonomy_review_failure_reason(state, autonomy, task_ids)
+}
+
+fn summarize_autonomy_cycle(
+    state: &AppState,
+    task_ids: &[String],
+    stats: AutonomyCycleStats,
+) -> Result<(AutonomyCycleStats, AutonomyDisposition), String> {
+    if autonomy_scope_complete(state, &task_ids)? {
+        return Ok((
+            stats,
+            AutonomyDisposition::Complete("Every approved-plan task is Done.".into()),
+        ));
+    }
+    let outcome = autonomy_cycle_outcome(&stats);
+    Ok((stats, AutonomyDisposition::Continue(outcome)))
+}
+
+fn autonomy_cycle_outcome(stats: &AutonomyCycleStats) -> String {
+    let actions = stats.scheduled + stats.reviews + stats.retries + stats.integrations;
+    if actions == 0 {
+        "No safe action was eligible; autonomy is waiting for active work or supervised gates."
+            .into()
+    } else {
+        format!(
+            "Started {} implementation, {} review, {} retry, and {} integration action(s).",
+            stats.scheduled, stats.reviews, stats.retries, stats.integrations
+        )
+    }
+}
+
+fn autonomy_scope_complete(state: &AppState, task_ids: &[String]) -> Result<bool, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_scope_complete(task_ids)
+        .map_err(|error| format!("Unable to evaluate plan completion: {error}"))
+}
+
+fn autonomy_pause_reason(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Option<String>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_pause_reason(autonomy, task_ids)
+        .map_err(|error| format!("Unable to evaluate autonomy safety gates: {error}"))
+}
+
+fn recover_autonomy_failure(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    let candidate = load_autonomy_retry_candidate(state, task_ids, autonomy.max_auto_retries)?;
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
+    let replacement_run_id = queue_autonomy_retry(state, app, &candidate.run_id)?;
+    record_autonomy_action(
+        state,
+        project_id,
+        cycle_id,
+        "retry.queued",
+        &format!(
+            "Queued bounded retry {} of {}.",
+            candidate.retries + 1,
+            autonomy.max_auto_retries
+        ),
+        Some(&candidate.task_id),
+        Some(&replacement_run_id),
+    )?;
+    stats.retries += 1;
+    Ok(())
+}
+
+fn load_autonomy_retry_candidate(
+    state: &AppState,
+    task_ids: &[String],
+    max_auto_retries: i64,
+) -> Result<Option<orchestr_db::AutonomyRetryCandidate>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_retry_candidate(task_ids, max_auto_retries)
+        .map_err(|error| format!("Unable to evaluate failed runs: {error}"))
+}
+
+fn queue_autonomy_retry(state: &AppState, app: &AppHandle, run_id: &str) -> Result<String, String> {
+    let input = RecoverTaskRunInput {
+        run_id: run_id.to_owned(),
+        mode: "resume".into(),
+        agent_id: None,
+    };
+    let prepared = prepare_run_recovery(&input, state)?;
+    let queued = queue_prepared_run_recovery(&input, state, prepared)?;
+    let replacement_run_id = queued.0.clone();
+    dispatch_and_reload_recovery(app.clone(), state, queued)?;
+    Ok(replacement_run_id)
+}
+
+fn autonomy_failure_reason(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Option<String>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_failure_reason(task_ids, autonomy.max_auto_retries)
+        .map_err(|error| format!("Unable to evaluate retry limits: {error}"))
+}
+
+fn schedule_autonomy_tasks(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    if !autonomy.auto_schedule {
+        return Ok(());
+    }
+    let allowed = task_ids.iter().cloned().collect::<HashSet<_>>();
+    if !autonomy_has_ready_task(state, project_id, &allowed)? {
+        return Ok(());
+    }
+    execute_autonomy_scheduling(state, app, project_id, cycle_id, autonomy, &allowed, stats)
+}
+
+fn execute_autonomy_scheduling(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    allowed: &HashSet<String>,
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    let scheduled = schedule_autonomy_ready_tasks(
+        state,
+        project_id,
+        &allowed,
+        autonomy.max_tasks_per_cycle as usize,
+    )?;
+    dispatch_queued_task_runs(
+        app.clone(),
+        Arc::clone(&state.database),
+        Arc::clone(&state.local_worker_runs),
+    )?;
+    audit_scheduled_autonomy_tasks(state, project_id, cycle_id, &scheduled)?;
+    stats.scheduled += scheduled.len() as i64;
+    Ok(())
+}
+
+fn autonomy_has_ready_task(
+    state: &AppState,
+    project_id: &str,
+    allowed: &HashSet<String>,
+) -> Result<bool, String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The scheduler store is unavailable.".to_owned())?;
+    let tasks = database
+        .list_ready_tasks_for_scheduling(project_id)
+        .map_err(|error| format!("Unable to inspect Ready work: {error}"))?;
+    Ok(tasks.iter().any(|task| allowed.contains(&task.id)))
+}
+
+fn schedule_autonomy_ready_tasks(
+    state: &AppState,
+    project_id: &str,
+    allowed: &HashSet<String>,
+    limit: usize,
+) -> Result<Vec<SchedulerDecision>, String> {
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| "The scheduler store is unavailable.".to_owned())?;
+    schedule_ready_tasks_in_database(
+        &mut database,
+        project_id,
+        LocalWorker::profile(),
+        local_provider_statuses(),
+        Some(allowed),
+        Some(limit),
+    )
+    .map(|(scheduled, _)| scheduled)
+}
+
+fn audit_scheduled_autonomy_tasks(
+    state: &AppState,
+    project_id: &str,
+    cycle_id: &str,
+    scheduled: &[SchedulerDecision],
+) -> Result<(), String> {
+    for decision in scheduled {
+        record_autonomy_action(
+            state,
+            project_id,
+            cycle_id,
+            "task.scheduled",
+            &decision.reason,
+            decision.task_id.as_deref(),
+            decision.run_id.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn start_autonomy_reviews(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    if !autonomy.auto_review {
+        return Ok(());
+    }
+    let reviewer_id = autonomy.reviewer_agent_id.clone().unwrap_or_default();
+    let candidates = load_autonomy_review_candidates(state, autonomy, task_ids)?;
+    start_eligible_autonomy_reviews(
+        state,
+        app,
+        project_id,
+        cycle_id,
+        &reviewer_id,
+        candidates,
+        stats,
+    )
+}
+
+fn load_autonomy_review_candidates(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Vec<String>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_review_candidates(
+            task_ids,
+            autonomy.max_auto_retries,
+            autonomy.max_tasks_per_cycle as usize,
+        )
+        .map_err(|error| format!("Unable to load review candidates: {error}"))
+}
+
+fn start_eligible_autonomy_reviews(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    reviewer_id: &str,
+    candidates: Vec<String>,
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    for task_id in candidates {
+        start_one_autonomy_review(state, app, project_id, cycle_id, reviewer_id, &task_id)?;
+        stats.reviews += 1;
+    }
+    Ok(())
+}
+
+fn start_one_autonomy_review(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    reviewer_id: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    let managed_state = app.state::<AppState>();
+    start_agent_review(
+        StartAgentReviewInput {
+            task_id: task_id.to_owned(),
+            agent_id: reviewer_id.to_owned(),
+        },
+        app.clone(),
+        managed_state,
+    )?;
+    record_autonomy_action(
+        state,
+        project_id,
+        cycle_id,
+        "review.started",
+        "Architect review started in read-only mode.",
+        Some(task_id),
+        None,
+    )
+}
+
+fn autonomy_review_failure_reason(
+    state: &AppState,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+) -> Result<Option<String>, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .autonomy_review_failure_reason(task_ids, autonomy.max_auto_retries)
+        .map_err(|error| format!("Unable to evaluate review retry limits: {error}"))
+}
+
+fn integrate_autonomy_task(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    autonomy: &orchestr_db::ProjectAutonomy,
+    task_ids: &[String],
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    if !autonomy.auto_integrate {
+        return Ok(());
+    }
+    let allowed = task_ids.iter().cloned().collect::<HashSet<_>>();
+    if !autonomy_has_queued_integration(state, project_id, &allowed)? {
+        return Ok(());
+    }
+    execute_autonomy_integration(state, app, project_id, cycle_id, allowed, stats)
+}
+
+fn autonomy_has_queued_integration(
+    state: &AppState,
+    project_id: &str,
+    allowed: &HashSet<String>,
+) -> Result<bool, String> {
+    let attempts = state
+        .database
+        .lock()
+        .map_err(|_| "The integration store is unavailable.".to_owned())?
+        .list_integration_attempts(project_id)
+        .map_err(|error| format!("Unable to inspect the integration queue: {error}"))?;
+    Ok(attempts.iter().any(|attempt| {
+        attempt.status == orchestr_db::IntegrationStatus::Queued
+            && allowed.contains(&attempt.task_id)
+    }))
+}
+
+fn execute_autonomy_integration(
+    state: &AppState,
+    app: &AppHandle,
+    project_id: &str,
+    cycle_id: &str,
+    allowed: HashSet<String>,
+    stats: &mut AutonomyCycleStats,
+) -> Result<(), String> {
+    let managed_state = app.state::<AppState>();
+    let execution = integrate_next_task(
+        project_id.to_owned(),
+        Some(allowed.into_iter().collect()),
+        app.clone(),
+        managed_state,
+    )?;
+    record_autonomy_action(
+        state,
+        project_id,
+        cycle_id,
+        "integration.completed",
+        &execution.message,
+        Some(&execution.task.id),
+        None,
+    )?;
+    stats.integrations += 1;
+    if execution.outcome != "merged" {
+        return Err(execution.message);
+    }
+    Ok(())
+}
+
+fn record_autonomy_action(
+    state: &AppState,
+    project_id: &str,
+    cycle_id: &str,
+    kind: &str,
+    message: &str,
+    task_id: Option<&str>,
+    run_id: Option<&str>,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .record_autonomy_event(project_id, Some(cycle_id), kind, message, task_id, run_id)
+        .map_err(|error| format!("Unable to record autonomy activity: {error}"))
+}
+
+fn finish_project_autonomy_cycle(
+    project_id: &str,
+    cycle_id: &str,
+    result: Result<(AutonomyCycleStats, AutonomyDisposition), String>,
+    state: &AppState,
+) -> Result<(), String> {
+    let success = match result {
+        Ok(success) => success,
+        Err(error) => return fail_and_persist_autonomy_cycle(state, project_id, cycle_id, &error),
+    };
+    finish_successful_autonomy_cycle(project_id, cycle_id, success, state)
+}
+
+fn finish_successful_autonomy_cycle(
+    project_id: &str,
+    cycle_id: &str,
+    result: (AutonomyCycleStats, AutonomyDisposition),
+    state: &AppState,
+) -> Result<(), String> {
+    match result {
+        (stats, AutonomyDisposition::Continue(outcome)) => {
+            persist_autonomy_cycle(state, cycle_id, stats, "completed", &outcome)
+        }
+        (stats, AutonomyDisposition::Pause(reason)) => {
+            pause_and_persist_autonomy_cycle(state, project_id, cycle_id, stats, &reason)
+        }
+        (stats, AutonomyDisposition::Complete(outcome)) => {
+            complete_and_persist_autonomy_cycle(state, project_id, cycle_id, stats, &outcome)
+        }
+    }
+}
+
+fn pause_and_persist_autonomy_cycle(
+    state: &AppState,
+    project_id: &str,
+    cycle_id: &str,
+    stats: AutonomyCycleStats,
+    reason: &str,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .pause_project_autonomy(project_id, reason)
+        .map_err(|error| format!("Unable to pause autonomy: {error}"))?;
+    persist_autonomy_cycle(state, cycle_id, stats, "paused", reason)
+}
+
+fn complete_and_persist_autonomy_cycle(
+    state: &AppState,
+    project_id: &str,
+    cycle_id: &str,
+    stats: AutonomyCycleStats,
+    outcome: &str,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .complete_project_autonomy(project_id)
+        .map_err(|error| format!("Unable to complete autonomy: {error}"))?;
+    persist_autonomy_cycle(state, cycle_id, stats, "completed", outcome)
+}
+
+fn fail_and_persist_autonomy_cycle(
+    state: &AppState,
+    project_id: &str,
+    cycle_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    let pause_on_failure = state
+        .database
+        .lock()
+        .ok()
+        .and_then(|database| database.project_autonomy(project_id).ok())
+        .is_none_or(|autonomy| autonomy.pause_on_failure);
+    if pause_on_failure {
+        let _ = state
+            .database
+            .lock()
+            .ok()
+            .and_then(|mut database| database.pause_project_autonomy(project_id, error).ok());
+    }
+    persist_autonomy_cycle(
+        state,
+        cycle_id,
+        AutonomyCycleStats::default(),
+        "failed",
+        error,
+    )
+}
+
+fn persist_autonomy_cycle(
+    state: &AppState,
+    cycle_id: &str,
+    stats: AutonomyCycleStats,
+    status: &str,
+    outcome: &str,
+) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The autonomy store is unavailable.".to_owned())?
+        .finish_autonomy_cycle(
+            cycle_id,
+            AutonomyCycleCompletion {
+                status,
+                scheduled_count: stats.scheduled,
+                review_count: stats.reviews,
+                retry_count: stats.retries,
+                integration_count: stats.integrations,
+                outcome,
+            },
+        )
+        .map_err(|error| format!("Unable to finish autonomy cycle: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
     let mut database = state
         .database
@@ -7466,6 +8352,21 @@ fn open_directory(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Unable to open the task worktree in the file manager: {error}"))
 }
 
+fn start_autonomy_monitor(app: AppHandle, state: AppState) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(15));
+        let project_ids = match state.database.lock() {
+            Ok(database) => database
+                .list_running_autonomy_projects()
+                .unwrap_or_default(),
+            Err(_) => continue,
+        };
+        for project_id in project_ids {
+            let _ = run_project_autonomy_cycle_internal(&project_id, "timer", app.clone(), &state);
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -7474,13 +8375,15 @@ fn main() {
             let database_path = app_data_dir.join("orchestr.db");
             let mut database = Database::open(&database_path)?;
             database.recover_interrupted_integrations()?;
+            database.recover_interrupted_autonomy()?;
             let database = Arc::new(Mutex::new(database));
             let local_worker_runs = Arc::new(Mutex::new(HashMap::new()));
 
-            app.manage(AppState {
+            let state = AppState {
                 database: Arc::clone(&database),
                 local_worker_runs: Arc::clone(&local_worker_runs),
-            });
+            };
+            app.manage(state.clone());
             reconnect_remote_task_runs(
                 app.handle().clone(),
                 Arc::clone(&database),
@@ -7488,6 +8391,7 @@ fn main() {
             )?;
             dispatch_queued_task_runs(app.handle().clone(), database, local_worker_runs)
                 .map_err(std::io::Error::other)?;
+            start_autonomy_monitor(app.handle().clone(), state);
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -7575,6 +8479,12 @@ fn main() {
             update_project_cost_control,
             upsert_model_pricing,
             delete_model_pricing,
+            get_project_autonomy,
+            update_project_autonomy,
+            start_project_autonomy,
+            pause_project_autonomy,
+            stop_project_autonomy,
+            advance_project_autonomy,
             create_task,
             update_task,
             delete_task,
@@ -7871,6 +8781,8 @@ mod tests {
                 readiness: "ready".into(),
                 detail: "Ready".into(),
             }],
+            None,
+            None,
         )
         .expect("scheduler completes");
 

@@ -41,10 +41,11 @@ Completed milestones:
 - M24 — Planning Agent
 - M25 — Agent Collaboration
 - M27 — Metrics + Cost Control
+- M28 — Autonomous Project Mode
 
-Immediate next milestone:
+Roadmap status:
 
-**M28 — Autonomous Project Mode**
+**All currently defined milestones are complete. Define and approve the next milestone before implementation.**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1282,9 +1283,9 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 # Scope discipline
 
-Current next milestone:
+Current roadmap status:
 
-**M28 — Autonomous Project Mode**
+**M28 is complete. The next milestone has not been defined.**
 
 Do not prioritize:
 

@@ -56,6 +56,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         24,
         include_str!("../migrations/0024_metrics_cost_control.sql"),
     ),
+    (
+        25,
+        include_str!("../migrations/0025_autonomous_project_mode.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -932,7 +936,8 @@ pub struct PlanningMaterializationIds {
     pub task_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskProgressCounts {
     pub total: i64,
     pub backlog: i64,
@@ -1079,6 +1084,95 @@ pub struct ProjectMetrics {
     pub current_month_cost_micros: i64,
     pub budget_utilization_percent: Option<f64>,
     pub budget_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAutonomy {
+    pub project_id: String,
+    pub status: String,
+    pub planning_proposal_id: Option<String>,
+    pub reviewer_agent_id: Option<String>,
+    pub auto_schedule: bool,
+    pub auto_review: bool,
+    pub auto_integrate: bool,
+    pub max_tasks_per_cycle: i64,
+    pub max_auto_retries: i64,
+    pub pause_on_failure: bool,
+    pub pause_on_needs_input: bool,
+    pub pause_reason: Option<String>,
+    pub started_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub last_cycle_at: Option<String>,
+    pub updated_at: String,
+}
+
+pub struct ProjectAutonomyUpdate {
+    pub planning_proposal_id: Option<String>,
+    pub reviewer_agent_id: Option<String>,
+    pub auto_schedule: bool,
+    pub auto_review: bool,
+    pub auto_integrate: bool,
+    pub max_tasks_per_cycle: i64,
+    pub max_auto_retries: i64,
+    pub pause_on_failure: bool,
+    pub pause_on_needs_input: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutonomyCycle {
+    pub id: String,
+    pub project_id: String,
+    pub trigger_kind: String,
+    pub status: String,
+    pub scheduled_count: i64,
+    pub review_count: i64,
+    pub retry_count: i64,
+    pub integration_count: i64,
+    pub outcome: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutonomyEvent {
+    pub id: i64,
+    pub project_id: String,
+    pub cycle_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub created_at: String,
+}
+
+pub struct AutonomyCycleCompletion<'a> {
+    pub status: &'a str,
+    pub scheduled_count: i64,
+    pub review_count: i64,
+    pub retry_count: i64,
+    pub integration_count: i64,
+    pub outcome: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomyRetryCandidate {
+    pub run_id: String,
+    pub task_id: String,
+    pub retries: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAutonomySnapshot {
+    pub autonomy: ProjectAutonomy,
+    pub goal: Option<String>,
+    pub task_ids: Vec<String>,
+    pub counts: TaskProgressCounts,
+    pub cycles: Vec<AutonomyCycle>,
+    pub events: Vec<AutonomyEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2707,6 +2801,595 @@ impl Database {
         })
     }
 
+    pub fn project_autonomy(&self, project_id: &str) -> Result<ProjectAutonomy> {
+        self.connection
+            .query_row(
+                "SELECT project_id, status, planning_proposal_id, reviewer_agent_id,
+                        auto_schedule, auto_review, auto_integrate, max_tasks_per_cycle,
+                        max_auto_retries, pause_on_failure, pause_on_needs_input, pause_reason,
+                        started_at, stopped_at, last_cycle_at, updated_at
+                 FROM project_autonomy WHERE project_id = ?1",
+                [project_id],
+                project_autonomy_from_row,
+            )
+            .optional()?
+            .map_or_else(
+                || default_project_autonomy(&self.connection, project_id),
+                Ok,
+            )
+    }
+
+    pub fn update_project_autonomy(
+        &mut self,
+        project_id: &str,
+        update: ProjectAutonomyUpdate,
+    ) -> Result<ProjectAutonomy> {
+        validate_autonomy_limits(&update)?;
+        let current = self.project_autonomy(project_id)?;
+        if current.status == "running" {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        validate_autonomy_plan_and_reviewer(&self.connection, project_id, &update)?;
+        self.connection.execute(
+            "INSERT INTO project_autonomy
+                (project_id, planning_proposal_id, reviewer_agent_id, auto_schedule,
+                 auto_review, auto_integrate, max_tasks_per_cycle, max_auto_retries,
+                 pause_on_failure, pause_on_needs_input)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(project_id) DO UPDATE SET
+                 planning_proposal_id = excluded.planning_proposal_id,
+                 reviewer_agent_id = excluded.reviewer_agent_id,
+                 auto_schedule = excluded.auto_schedule,
+                 auto_review = excluded.auto_review,
+                 auto_integrate = excluded.auto_integrate,
+                 max_tasks_per_cycle = excluded.max_tasks_per_cycle,
+                 max_auto_retries = excluded.max_auto_retries,
+                 pause_on_failure = excluded.pause_on_failure,
+                 pause_on_needs_input = excluded.pause_on_needs_input,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![
+                project_id,
+                update.planning_proposal_id,
+                update.reviewer_agent_id,
+                update.auto_schedule,
+                update.auto_review,
+                update.auto_integrate,
+                update.max_tasks_per_cycle,
+                update.max_auto_retries,
+                update.pause_on_failure,
+                update.pause_on_needs_input
+            ],
+        )?;
+        self.project_autonomy(project_id)
+    }
+
+    pub fn start_project_autonomy(&mut self, project_id: &str) -> Result<ProjectAutonomy> {
+        let autonomy = self.project_autonomy(project_id)?;
+        if autonomy.status == "running" {
+            return Ok(autonomy);
+        }
+        let update = autonomy_update_from_record(&autonomy);
+        validate_autonomy_limits(&update)?;
+        validate_autonomy_plan_and_reviewer(&self.connection, project_id, &update)?;
+        let changed = self.connection.execute(
+            "UPDATE project_autonomy SET status = 'running', pause_reason = NULL,
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP), stopped_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP WHERE project_id = ?1",
+            [project_id],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.record_autonomy_event(
+            project_id,
+            None,
+            "autonomy.started",
+            "Autonomous project execution started after plan approval.",
+            None,
+            None,
+        )?;
+        self.project_autonomy(project_id)
+    }
+
+    pub fn pause_project_autonomy(
+        &mut self,
+        project_id: &str,
+        reason: &str,
+    ) -> Result<ProjectAutonomy> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "UPDATE project_autonomy SET status = 'paused', pause_reason = ?1,
+                    updated_at = CURRENT_TIMESTAMP WHERE project_id = ?2 AND status = 'running'",
+            params![reason, project_id],
+        )?;
+        self.record_autonomy_event(project_id, None, "autonomy.paused", reason, None, None)?;
+        self.project_autonomy(project_id)
+    }
+
+    pub fn stop_project_autonomy(&mut self, project_id: &str) -> Result<ProjectAutonomy> {
+        self.connection.execute(
+            "UPDATE project_autonomy SET status = 'stopped', pause_reason = NULL,
+                    stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ?1",
+            [project_id],
+        )?;
+        self.record_autonomy_event(
+            project_id,
+            None,
+            "autonomy.stopped",
+            "Autonomous project execution stopped. Active worker processes were left recoverable.",
+            None,
+            None,
+        )?;
+        self.project_autonomy(project_id)
+    }
+
+    pub fn complete_project_autonomy(&mut self, project_id: &str) -> Result<ProjectAutonomy> {
+        self.connection.execute(
+            "UPDATE project_autonomy SET status = 'completed', pause_reason = NULL,
+                    stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ?1",
+            [project_id],
+        )?;
+        self.record_autonomy_event(
+            project_id,
+            None,
+            "autonomy.completed",
+            "Every task in the approved plan is integrated and Done.",
+            None,
+            None,
+        )?;
+        self.project_autonomy(project_id)
+    }
+
+    pub fn list_running_autonomy_projects(&self) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_id FROM project_autonomy WHERE status = 'running' ORDER BY project_id",
+        )?;
+        let records = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn recover_interrupted_autonomy(&mut self) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let interrupted_projects = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT project_id FROM autonomy_cycles WHERE status = 'running'",
+            )?;
+            let project_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>>>()?;
+            project_ids
+        };
+        transaction.execute(
+            "UPDATE autonomy_cycles SET status = 'failed',
+                    outcome = 'Orchestr stopped during this autonomy cycle; no hidden action was resumed.',
+                    completed_at = CURRENT_TIMESTAMP WHERE status = 'running'",
+            [],
+        )?;
+        for project_id in &interrupted_projects {
+            transaction.execute(
+                "UPDATE project_autonomy SET status = 'paused',
+                        pause_reason = 'Orchestr restarted during an autonomy cycle. Inspect project state before resuming.',
+                        updated_at = CURRENT_TIMESTAMP WHERE project_id = ?1 AND status = 'running'",
+                [project_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO autonomy_events (project_id, kind, message)
+                 VALUES (?1, 'autonomy.recovered',
+                    'Interrupted autonomy was paused on startup for explicit inspection.')",
+                [project_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(interrupted_projects.len())
+    }
+
+    pub fn autonomy_scope(&self, project_id: &str) -> Result<(Option<String>, Vec<String>)> {
+        let autonomy = self.project_autonomy(project_id)?;
+        let Some(proposal_id) = autonomy.planning_proposal_id else {
+            return Ok((None, Vec::new()));
+        };
+        let proposal = self.get_planning_proposal(&proposal_id)?;
+        Ok(proposal
+            .filter(|proposal| proposal.project_id == project_id)
+            .map(|proposal| (Some(proposal.goal), proposal.task_ids))
+            .unwrap_or((None, Vec::new())))
+    }
+
+    pub fn project_autonomy_snapshot(&self, project_id: &str) -> Result<ProjectAutonomySnapshot> {
+        let autonomy = self.project_autonomy(project_id)?;
+        let (goal, task_ids) = self.autonomy_scope(project_id)?;
+        let counts = autonomy_task_counts(self, &task_ids)?;
+        Ok(ProjectAutonomySnapshot {
+            autonomy,
+            goal,
+            task_ids,
+            counts,
+            cycles: self.list_autonomy_cycles(project_id, 30)?,
+            events: self.list_autonomy_events(project_id, 100)?,
+        })
+    }
+
+    pub fn begin_autonomy_cycle(
+        &mut self,
+        id: &str,
+        project_id: &str,
+        trigger_kind: &str,
+    ) -> Result<Option<AutonomyCycle>> {
+        if !matches!(trigger_kind, "user" | "timer" | "event") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let running: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_autonomy WHERE project_id = ?1 AND status = 'running')",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        let active: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM autonomy_cycles WHERE project_id = ?1 AND status = 'running')",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if !running || active {
+            return Ok(None);
+        }
+        self.connection.execute(
+            "INSERT INTO autonomy_cycles (id, project_id, trigger_kind) VALUES (?1, ?2, ?3)",
+            params![id, project_id, trigger_kind],
+        )?;
+        self.record_autonomy_event(
+            project_id,
+            Some(id),
+            "cycle.started",
+            "Autonomy safety evaluation and bounded progress cycle started.",
+            None,
+            None,
+        )?;
+        self.autonomy_cycle_by_id(id)
+    }
+
+    pub fn finish_autonomy_cycle(
+        &mut self,
+        id: &str,
+        completion: AutonomyCycleCompletion<'_>,
+    ) -> Result<Option<AutonomyCycle>> {
+        if !matches!(
+            completion.status,
+            "completed" | "paused" | "failed" | "skipped"
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let project_id = self.connection.query_row(
+            "SELECT project_id FROM autonomy_cycles WHERE id = ?1 AND status = 'running'",
+            [id],
+            |row| row.get::<_, String>(0),
+        )?;
+        self.connection.execute(
+            "UPDATE autonomy_cycles SET status = ?1, scheduled_count = ?2,
+                    review_count = ?3, retry_count = ?4, integration_count = ?5,
+                    outcome = ?6, completed_at = CURRENT_TIMESTAMP
+             WHERE id = ?7 AND status = 'running'",
+            params![
+                completion.status,
+                completion.scheduled_count,
+                completion.review_count,
+                completion.retry_count,
+                completion.integration_count,
+                completion.outcome,
+                id
+            ],
+        )?;
+        self.connection.execute(
+            "UPDATE project_autonomy SET last_cycle_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP WHERE project_id = ?1",
+            [&project_id],
+        )?;
+        self.record_autonomy_event(
+            &project_id,
+            Some(id),
+            "cycle.completed",
+            completion.outcome,
+            None,
+            None,
+        )?;
+        self.autonomy_cycle_by_id(id)
+    }
+
+    pub fn record_autonomy_event(
+        &mut self,
+        project_id: &str,
+        cycle_id: Option<&str>,
+        kind: &str,
+        message: &str,
+        task_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO autonomy_events
+                (project_id, cycle_id, kind, message, task_id, run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project_id, cycle_id, kind, message, task_id, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn autonomy_retry_candidate(
+        &self,
+        task_ids: &[String],
+        max_retries: i64,
+    ) -> Result<Option<AutonomyRetryCandidate>> {
+        if max_retries == 0 {
+            return Ok(None);
+        }
+        for task_id in task_ids {
+            let Some(task) = self.get_task(task_id)? else {
+                continue;
+            };
+            if task.status != TaskStatus::InProgress {
+                continue;
+            }
+            let Some(run) = self.list_runs_for_task(task_id)?.into_iter().next() else {
+                continue;
+            };
+            if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
+                continue;
+            }
+            let retries = self.connection.query_row(
+                "SELECT COUNT(*) FROM run_recoveries WHERE task_id = ?1
+                 AND action IN ('resume', 'restart_clean', 'reassign')",
+                [task_id],
+                |row| row.get(0),
+            )?;
+            if retries < max_retries {
+                return Ok(Some(AutonomyRetryCandidate {
+                    run_id: run.id,
+                    task_id: task_id.clone(),
+                    retries,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn autonomy_review_candidates(
+        &self,
+        task_ids: &[String],
+        max_retries: i64,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut candidates = Vec::new();
+        for task_id in task_ids {
+            let Some(task) = self.get_task(task_id)? else {
+                continue;
+            };
+            if task.status != TaskStatus::Review {
+                continue;
+            }
+            let reviews = self.list_agent_reviews(task_id)?;
+            if reviews
+                .iter()
+                .any(|review| review.status == AgentReviewStatus::Running)
+            {
+                continue;
+            }
+            let failures = reviews
+                .iter()
+                .filter(|review| review.status == AgentReviewStatus::Failed)
+                .count() as i64;
+            if failures <= max_retries {
+                candidates.push(task_id.clone());
+            }
+            if candidates.len() == limit {
+                break;
+            }
+        }
+        Ok(candidates)
+    }
+
+    pub fn autonomy_review_failure_reason(
+        &self,
+        task_ids: &[String],
+        max_retries: i64,
+    ) -> Result<Option<String>> {
+        for task_id in task_ids {
+            let Some(task) = self.get_task(task_id)? else {
+                continue;
+            };
+            if task.status != TaskStatus::Review {
+                continue;
+            }
+            let reviews = self.list_agent_reviews(task_id)?;
+            let failures = reviews
+                .iter()
+                .filter(|review| review.status == AgentReviewStatus::Failed)
+                .count() as i64;
+            if failures > max_retries {
+                return Ok(Some(format!(
+                    "Architect review for {} exhausted its retry limit ({max_retries}).",
+                    task.title
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn autonomy_pause_reason(
+        &self,
+        autonomy: &ProjectAutonomy,
+        task_ids: &[String],
+    ) -> Result<Option<String>> {
+        match self.autonomy_project_pause_reason(autonomy)? {
+            Some(reason) => Ok(Some(reason)),
+            None => self.autonomy_work_pause_reason(autonomy, task_ids),
+        }
+    }
+
+    fn autonomy_project_pause_reason(&self, autonomy: &ProjectAutonomy) -> Result<Option<String>> {
+        if let Some(reason) = active_global_blocker_reason(&self.connection, &autonomy.project_id)?
+        {
+            return Ok(Some(reason));
+        }
+        self.autonomy_health_or_cost_pause_reason(autonomy)
+    }
+
+    fn autonomy_health_or_cost_pause_reason(
+        &self,
+        autonomy: &ProjectAutonomy,
+    ) -> Result<Option<String>> {
+        let health = self.get_project_health(&autonomy.project_id)?;
+        if health.status == ProjectHealthStatus::Broken {
+            return Ok(Some(
+                "The integration branch is broken and requires repair.".into(),
+            ));
+        }
+        self.project_cost_guard(&autonomy.project_id)
+    }
+
+    fn autonomy_work_pause_reason(
+        &self,
+        autonomy: &ProjectAutonomy,
+        task_ids: &[String],
+    ) -> Result<Option<String>> {
+        for task_id in task_ids {
+            if let Some(reason) = self.autonomy_task_pause_reason(autonomy, task_id)? {
+                return Ok(Some(reason));
+            }
+        }
+        self.autonomy_integration_pause_reason(&autonomy.project_id, task_ids)
+    }
+
+    fn autonomy_task_pause_reason(
+        &self,
+        autonomy: &ProjectAutonomy,
+        task_id: &str,
+    ) -> Result<Option<String>> {
+        let Some(task) = self.get_task(task_id)? else {
+            return Ok(Some(format!(
+                "Approved-plan task {task_id} no longer exists."
+            )));
+        };
+        Ok(loaded_autonomy_task_pause_reason(autonomy, task))
+    }
+
+    fn autonomy_integration_pause_reason(
+        &self,
+        project_id: &str,
+        task_ids: &[String],
+    ) -> Result<Option<String>> {
+        let attempts = self.list_integration_attempts(project_id)?;
+        Ok(attempts
+            .iter()
+            .find(|attempt| {
+                task_ids.contains(&attempt.task_id)
+                    && matches!(
+                        attempt.status,
+                        IntegrationStatus::Conflict | IntegrationStatus::Failed
+                    )
+            })
+            .map(|attempt| {
+                attempt
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "An integration attempt requires human recovery.".into())
+            }))
+    }
+
+    pub fn autonomy_failure_reason(
+        &self,
+        task_ids: &[String],
+        max_retries: i64,
+    ) -> Result<Option<String>> {
+        for task_id in task_ids {
+            let Some(task) = self.get_task(task_id)? else {
+                continue;
+            };
+            if task.status != TaskStatus::InProgress {
+                continue;
+            }
+            let Some(run) = self.list_runs_for_task(task_id)?.into_iter().next() else {
+                continue;
+            };
+            if !matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) {
+                continue;
+            }
+            let retries: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM run_recoveries WHERE task_id = ?1
+                 AND action IN ('resume', 'restart_clean', 'reassign')",
+                [task_id],
+                |row| row.get(0),
+            )?;
+            if retries >= max_retries {
+                return Ok(Some(format!(
+                    "{} exhausted its automatic retry limit ({max_retries}).",
+                    task.title
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn autonomy_scope_complete(&self, task_ids: &[String]) -> Result<bool> {
+        if task_ids.is_empty() {
+            return Ok(false);
+        }
+        for task_id in task_ids {
+            if self
+                .get_task(task_id)?
+                .is_none_or(|task| task.status != TaskStatus::Done)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn list_autonomy_cycles(&self, project_id: &str, limit: i64) -> Result<Vec<AutonomyCycle>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, trigger_kind, status, scheduled_count, review_count,
+                    retry_count, integration_count, outcome, started_at, completed_at
+             FROM autonomy_cycles WHERE project_id = ?1
+             ORDER BY started_at DESC, id DESC LIMIT ?2",
+        )?;
+        let records = statement
+            .query_map(
+                params![project_id, limit.clamp(1, 100)],
+                autonomy_cycle_from_row,
+            )?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn list_autonomy_events(&self, project_id: &str, limit: i64) -> Result<Vec<AutonomyEvent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, cycle_id, kind, message, task_id, run_id, created_at
+             FROM autonomy_events WHERE project_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let records = statement
+            .query_map(
+                params![project_id, limit.clamp(1, 500)],
+                autonomy_event_from_row,
+            )?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    fn autonomy_cycle_by_id(&self, id: &str) -> Result<Option<AutonomyCycle>> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, trigger_kind, status, scheduled_count, review_count,
+                        retry_count, integration_count, outcome, started_at, completed_at
+                 FROM autonomy_cycles WHERE id = ?1",
+                [id],
+                autonomy_cycle_from_row,
+            )
+            .optional()
+    }
+
     pub fn create_task(&mut self, new_task: NewTask) -> Result<Task> {
         self.validate_task_dependencies(
             &new_task.id,
@@ -3746,6 +4429,22 @@ impl Database {
         &mut self,
         project_id: &str,
     ) -> Result<Option<IntegrationAttempt>> {
+        self.claim_next_integration_matching(project_id, None)
+    }
+
+    pub fn claim_next_integration_for_tasks(
+        &mut self,
+        project_id: &str,
+        task_ids: &HashSet<String>,
+    ) -> Result<Option<IntegrationAttempt>> {
+        self.claim_next_integration_matching(project_id, Some(task_ids))
+    }
+
+    fn claim_next_integration_matching(
+        &mut self,
+        project_id: &str,
+        allowed_task_ids: Option<&HashSet<String>>,
+    ) -> Result<Option<IntegrationAttempt>> {
         let transaction = self.connection.transaction()?;
         let locked: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM project_integration_locks WHERE project_id = ?1)",
@@ -3755,18 +4454,24 @@ impl Database {
         if locked {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let attempt = transaction
-            .query_row(
+        let attempts = {
+            let mut statement = transaction.prepare(
                 "SELECT attempts.id, attempts.task_id
                  FROM integration_attempts AS attempts
                  JOIN tasks ON tasks.id = attempts.task_id
                  WHERE tasks.project_id = ?1 AND attempts.status = 'queued' AND tasks.status = 'approved'
-                 ORDER BY attempts.queue_position ASC, attempts.created_at ASC
-                 LIMIT 1",
-                [project_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
+                 ORDER BY attempts.queue_position ASC, attempts.created_at ASC",
+            )?;
+            let queued_attempts = statement
+                .query_map([project_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            queued_attempts
+        };
+        let attempt = attempts
+            .into_iter()
+            .find(|(_, task_id)| allowed_task_ids.is_none_or(|allowed| allowed.contains(task_id)));
         let Some((attempt_id, task_id)) = attempt else {
             return Ok(None);
         };
@@ -5958,6 +6663,188 @@ fn set_positions(transaction: &rusqlite::Transaction<'_>, ids: &[String]) -> Res
     Ok(())
 }
 
+fn project_autonomy_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectAutonomy> {
+    Ok(ProjectAutonomy {
+        project_id: row.get(0)?,
+        status: row.get(1)?,
+        planning_proposal_id: row.get(2)?,
+        reviewer_agent_id: row.get(3)?,
+        auto_schedule: row.get(4)?,
+        auto_review: row.get(5)?,
+        auto_integrate: row.get(6)?,
+        max_tasks_per_cycle: row.get(7)?,
+        max_auto_retries: row.get(8)?,
+        pause_on_failure: row.get(9)?,
+        pause_on_needs_input: row.get(10)?,
+        pause_reason: row.get(11)?,
+        started_at: row.get(12)?,
+        stopped_at: row.get(13)?,
+        last_cycle_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+fn autonomy_cycle_from_row(row: &rusqlite::Row<'_>) -> Result<AutonomyCycle> {
+    Ok(AutonomyCycle {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        trigger_kind: row.get(2)?,
+        status: row.get(3)?,
+        scheduled_count: row.get(4)?,
+        review_count: row.get(5)?,
+        retry_count: row.get(6)?,
+        integration_count: row.get(7)?,
+        outcome: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+fn autonomy_event_from_row(row: &rusqlite::Row<'_>) -> Result<AutonomyEvent> {
+    Ok(AutonomyEvent {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        cycle_id: row.get(2)?,
+        kind: row.get(3)?,
+        message: row.get(4)?,
+        task_id: row.get(5)?,
+        run_id: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn default_project_autonomy(connection: &Connection, project_id: &str) -> Result<ProjectAutonomy> {
+    let updated_at = connection.query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))?;
+    Ok(ProjectAutonomy {
+        project_id: project_id.to_owned(),
+        status: "stopped".into(),
+        planning_proposal_id: None,
+        reviewer_agent_id: None,
+        auto_schedule: true,
+        auto_review: true,
+        auto_integrate: true,
+        max_tasks_per_cycle: 2,
+        max_auto_retries: 1,
+        pause_on_failure: true,
+        pause_on_needs_input: true,
+        pause_reason: None,
+        started_at: None,
+        stopped_at: None,
+        last_cycle_at: None,
+        updated_at,
+    })
+}
+
+fn autonomy_update_from_record(record: &ProjectAutonomy) -> ProjectAutonomyUpdate {
+    ProjectAutonomyUpdate {
+        planning_proposal_id: record.planning_proposal_id.clone(),
+        reviewer_agent_id: record.reviewer_agent_id.clone(),
+        auto_schedule: record.auto_schedule,
+        auto_review: record.auto_review,
+        auto_integrate: record.auto_integrate,
+        max_tasks_per_cycle: record.max_tasks_per_cycle,
+        max_auto_retries: record.max_auto_retries,
+        pause_on_failure: record.pause_on_failure,
+        pause_on_needs_input: record.pause_on_needs_input,
+    }
+}
+
+fn validate_autonomy_limits(update: &ProjectAutonomyUpdate) -> Result<()> {
+    if !(1..=20).contains(&update.max_tasks_per_cycle)
+        || !(0..=3).contains(&update.max_auto_retries)
+        || !(update.auto_schedule || update.auto_review || update.auto_integrate)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn loaded_autonomy_task_pause_reason(autonomy: &ProjectAutonomy, task: Task) -> Option<String> {
+    autonomy_needs_input_reason(autonomy, &task)
+        .or_else(|| autonomy_blocked_task_reason(&task))
+        .or_else(|| autonomy_unassigned_task_reason(autonomy, &task))
+}
+
+fn autonomy_needs_input_reason(autonomy: &ProjectAutonomy, task: &Task) -> Option<String> {
+    (autonomy.pause_on_needs_input && task.status == TaskStatus::NeedsInput)
+        .then(|| format!("{} needs human input.", task.title))
+}
+
+fn autonomy_blocked_task_reason(task: &Task) -> Option<String> {
+    (task.status == TaskStatus::Blocked && !task.readiness_blocked).then(|| {
+        task.blocked_reason
+            .clone()
+            .unwrap_or_else(|| format!("{} is blocked.", task.title))
+    })
+}
+
+fn autonomy_unassigned_task_reason(autonomy: &ProjectAutonomy, task: &Task) -> Option<String> {
+    (autonomy.auto_schedule && task.status == TaskStatus::Ready && task.assigned_agent_id.is_none())
+        .then(|| format!("Assign an implementation agent to {}.", task.title))
+}
+
+fn validate_autonomy_plan_and_reviewer(
+    connection: &Connection,
+    project_id: &str,
+    update: &ProjectAutonomyUpdate,
+) -> Result<()> {
+    let proposal_id = update
+        .planning_proposal_id
+        .as_deref()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let proposal = connection
+        .query_row(
+            "SELECT project_id, status, task_ids FROM planning_proposals WHERE id = ?1",
+            [proposal_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((proposal_project_id, status, task_ids)) = proposal else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    if proposal_project_id != project_id
+        || status != PlanningProposalStatus::Approved.as_str()
+        || decode_string_list(task_ids)?.is_empty()
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if update.auto_review {
+        let reviewer_id = update
+            .reviewer_agent_id
+            .as_deref()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let provider = connection
+            .query_row(
+                "SELECT provider FROM agents WHERE id = ?1",
+                [reviewer_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if provider.as_deref() != Some("codex") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
+
+fn autonomy_task_counts(database: &Database, task_ids: &[String]) -> Result<TaskProgressCounts> {
+    let mut counts = TaskProgressCounts::default();
+    for task_id in task_ids {
+        let Some(task) = database.get_task(task_id)? else {
+            continue;
+        };
+        counts.total += 1;
+        record_task_progress_count(&mut counts, task.status.as_str(), 1);
+    }
+    Ok(counts)
+}
+
 fn project_cost_control_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectCostControl> {
     Ok(ProjectCostControl {
         project_id: row.get(0)?,
@@ -6364,16 +7251,19 @@ fn migrate(connection: &Connection) -> Result<()> {
 mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus,
-        CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus, ModelPricingUpdate,
-        NewAgent, NewAgentReview, NewArchitectureDecision, NewCollaborationEntry, NewEpic,
-        NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
-        NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, PlanningEpic,
-        PlanningMaterializationIds, PlanningMilestone, PlanningPlan, PlanningProposalStatus,
-        PlanningTask, ProjectCostControlUpdate, ProjectDeletion, ProjectHealthStatus, RevertStatus,
-        RunStatus, RunUsageUpdate, TaskPriority, TaskStatus, TaskUpdate, ValidationStage,
-        ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
+        AutonomyCycleCompletion, CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus,
+        ModelPricingUpdate, NewAgent, NewAgentReview, NewArchitectureDecision,
+        NewCollaborationEntry, NewEpic, NewMilestone, NewPlanningProposal, NewProject,
+        NewProjectBlocker, NewRemoteWorker, NewRun, NewSchedulerDecision, NewTask,
+        NewTaskInputRequest, NewValidationCommand, PlanningEpic, PlanningMaterializationIds,
+        PlanningMilestone, PlanningPlan, PlanningProposalStatus, PlanningTask,
+        ProjectAutonomyUpdate, ProjectCostControlUpdate, ProjectDeletion, ProjectHealthStatus,
+        RevertStatus, RunStatus, RunUsageUpdate, TaskPriority, TaskStatus, TaskUpdate,
+        ValidationStage, ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus,
+        WorkerToolCapability,
     };
     use std::{
+        collections::HashSet,
         fs,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -7150,6 +8040,10 @@ mod tests {
                 .status,
             IntegrationStatus::Queued
         );
+        assert!(reopened
+            .claim_next_integration_for_tasks("project-1", &HashSet::new())
+            .expect("out-of-scope integration is ignored")
+            .is_none());
         let claimed = reopened
             .claim_next_integration("project-1")
             .expect("integration queue claims")
@@ -8431,6 +9325,304 @@ mod tests {
         assert_eq!(ui.dependency_ids, ["task-core"]);
         assert_eq!(ui.milestone_id.as_deref(), Some("milestone-oauth"));
         assert_eq!(ui.epic_id.as_deref(), Some("epic-oauth"));
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn autonomous_project_mode_is_plan_scoped_audited_and_paused_after_restart() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-auto".into(),
+                name: "Autonomous project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "workspace-auto".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/autonomous-project".into(),
+            })
+            .expect("project saves");
+        for (id, name, role) in [
+            ("reviewer", "Architect", "reviewer"),
+            ("implementer", "Implementer", "engineer"),
+        ] {
+            database
+                .create_agent(NewAgent {
+                    id: id.into(),
+                    name: name.into(),
+                    provider: "codex".into(),
+                    role: role.into(),
+                    model: None,
+                    system_prompt: None,
+                    skills: Vec::new(),
+                    max_concurrent_tasks: 1,
+                })
+                .expect("agent saves");
+        }
+        database
+            .start_planning_proposal(NewPlanningProposal {
+                id: "approved-plan".into(),
+                project_id: "project-auto".into(),
+                agent_id: "reviewer".into(),
+                goal: "Ship the approved outcome".into(),
+            })
+            .expect("proposal starts");
+        let plan = PlanningPlan {
+            summary: "A bounded implementation plan.".into(),
+            milestone: None,
+            epic: None,
+            tasks: vec![PlanningTask {
+                key: "implementation".into(),
+                title: "Implement approved work".into(),
+                description: None,
+                acceptance_criteria: vec!["The outcome is validated.".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
+                dependency_keys: Vec::new(),
+                priority: "high".into(),
+            }],
+        };
+        database
+            .finish_planning_proposal(
+                "approved-plan",
+                PlanningProposalStatus::Proposed,
+                Some(&plan),
+                None,
+            )
+            .expect("proposal finishes");
+        database
+            .approve_planning_proposal(
+                "approved-plan",
+                PlanningMaterializationIds {
+                    milestone_id: None,
+                    epic_id: None,
+                    task_ids: vec!["approved-task".into()],
+                },
+            )
+            .expect("proposal approval succeeds");
+
+        let defaults = database
+            .project_autonomy("project-auto")
+            .expect("defaults load");
+        assert_eq!(defaults.status, "stopped");
+        assert!(database
+            .update_project_autonomy(
+                "project-auto",
+                ProjectAutonomyUpdate {
+                    planning_proposal_id: Some("unknown-plan".into()),
+                    reviewer_agent_id: Some("reviewer".into()),
+                    auto_schedule: true,
+                    auto_review: true,
+                    auto_integrate: true,
+                    max_tasks_per_cycle: 2,
+                    max_auto_retries: 1,
+                    pause_on_failure: true,
+                    pause_on_needs_input: true,
+                },
+            )
+            .is_err());
+        database
+            .update_project_autonomy(
+                "project-auto",
+                ProjectAutonomyUpdate {
+                    planning_proposal_id: Some("approved-plan".into()),
+                    reviewer_agent_id: Some("reviewer".into()),
+                    auto_schedule: true,
+                    auto_review: true,
+                    auto_integrate: true,
+                    max_tasks_per_cycle: 2,
+                    max_auto_retries: 1,
+                    pause_on_failure: true,
+                    pause_on_needs_input: true,
+                },
+            )
+            .expect("safety policy saves");
+        database
+            .move_task("approved-task", TaskStatus::Ready, 0)
+            .expect("approved task becomes Ready");
+        let configured = database
+            .project_autonomy("project-auto")
+            .expect("configuration loads");
+        assert!(database
+            .autonomy_pause_reason(&configured, &["approved-task".into()])
+            .expect("safety gates evaluate")
+            .expect("unassigned Ready work pauses")
+            .contains("Assign an implementation agent"));
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET assigned_agent_id = 'implementer' WHERE id = 'approved-task'",
+                [],
+            )
+            .expect("implementation agent assigns");
+        assert!(database
+            .autonomy_pause_reason(&configured, &["approved-task".into()])
+            .expect("safe task evaluates")
+            .is_none());
+        database
+            .start_project_autonomy("project-auto")
+            .expect("autonomy starts");
+        assert_eq!(
+            database
+                .list_running_autonomy_projects()
+                .expect("running projects load"),
+            ["project-auto"]
+        );
+        let snapshot = database
+            .project_autonomy_snapshot("project-auto")
+            .expect("snapshot loads");
+        assert_eq!(snapshot.goal.as_deref(), Some("Ship the approved outcome"));
+        assert_eq!(snapshot.task_ids, ["approved-task"]);
+        assert_eq!(snapshot.counts.total, 1);
+        assert!(!database
+            .autonomy_scope_complete(&snapshot.task_ids)
+            .expect("unfinished scope evaluates"));
+
+        database
+            .assign_task_worktree(
+                "approved-task",
+                "task/approved-task",
+                "C:/work/.orchestr-worktrees/project-auto/approved-task",
+            )
+            .expect("worktree assigns");
+        database
+            .start_run(NewRun {
+                id: "failed-run".into(),
+                task_id: "approved-task".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect("run starts");
+        database
+            .finish_run(
+                "failed-run",
+                RunStatus::Failed,
+                Some(1),
+                Some("test failed"),
+            )
+            .expect("run failure persists");
+        let retry = database
+            .autonomy_retry_candidate(&snapshot.task_ids, 1)
+            .expect("retry eligibility evaluates")
+            .expect("failed run can retry");
+        assert_eq!(retry.run_id, "failed-run");
+        assert!(database
+            .autonomy_retry_candidate(&snapshot.task_ids, 0)
+            .expect("disabled retry evaluates")
+            .is_none());
+        assert!(database
+            .autonomy_failure_reason(&snapshot.task_ids, 0)
+            .expect("retry exhaustion evaluates")
+            .expect("failure requires attention")
+            .contains("retry limit"));
+
+        database
+            .move_task("approved-task", TaskStatus::Review, 0)
+            .expect("task enters review");
+        database
+            .start_agent_review(NewAgentReview {
+                id: "failed-review".into(),
+                task_id: "approved-task".into(),
+                agent_id: "reviewer".into(),
+            })
+            .expect("architect review starts");
+        database
+            .finish_agent_review(
+                "failed-review",
+                AgentReviewStatus::Failed,
+                None,
+                None,
+                Some("review process failed"),
+            )
+            .expect("review failure saves");
+        assert_eq!(
+            database
+                .autonomy_review_candidates(&snapshot.task_ids, 1, 2)
+                .expect("review retries evaluate"),
+            ["approved-task"]
+        );
+        assert!(database
+            .autonomy_review_failure_reason(&snapshot.task_ids, 0)
+            .expect("review exhaustion evaluates")
+            .expect("review requires attention")
+            .contains("retry limit"));
+
+        database
+            .begin_autonomy_cycle("cycle-complete", "project-auto", "user")
+            .expect("cycle starts")
+            .expect("cycle is eligible");
+        assert!(database
+            .begin_autonomy_cycle("cycle-overlap", "project-auto", "timer")
+            .expect("overlap is evaluated")
+            .is_none());
+        database
+            .record_autonomy_event(
+                "project-auto",
+                Some("cycle-complete"),
+                "task.scheduled",
+                "Ready task queued through the normal scheduler.",
+                Some("approved-task"),
+                None,
+            )
+            .expect("action is audited");
+        database
+            .finish_autonomy_cycle(
+                "cycle-complete",
+                AutonomyCycleCompletion {
+                    status: "completed",
+                    scheduled_count: 1,
+                    review_count: 0,
+                    retry_count: 0,
+                    integration_count: 0,
+                    outcome: "One task scheduled.",
+                },
+            )
+            .expect("cycle finishes");
+        assert_eq!(
+            database
+                .list_autonomy_cycles("project-auto", 10)
+                .expect("cycles load")[0]
+                .scheduled_count,
+            1
+        );
+        assert!(database
+            .list_autonomy_events("project-auto", 20)
+            .expect("audit loads")
+            .iter()
+            .any(|event| event.task_id.as_deref() == Some("approved-task")));
+
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET status = 'done' WHERE id = 'approved-task'",
+                [],
+            )
+            .expect("scope is marked integrated for completion check");
+        assert!(database
+            .autonomy_scope_complete(&snapshot.task_ids)
+            .expect("completed scope evaluates"));
+
+        database
+            .begin_autonomy_cycle("cycle-interrupted", "project-auto", "timer")
+            .expect("second cycle starts");
+        assert_eq!(
+            database
+                .recover_interrupted_autonomy()
+                .expect("restart recovery succeeds"),
+            1
+        );
+        let recovered = database
+            .project_autonomy("project-auto")
+            .expect("recovered autonomy loads");
+        assert_eq!(recovered.status, "paused");
+        assert!(recovered
+            .pause_reason
+            .expect("pause reason exists")
+            .contains("restarted"));
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");

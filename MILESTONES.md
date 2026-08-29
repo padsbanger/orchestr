@@ -1174,6 +1174,17 @@ Users can identify bottlenecks, unreliable agents, excessive cost, or slow proje
 
 # M28 — Autonomous Project Mode
 
+### Delivered
+
+- persisted, project-scoped autonomy policy bound to a human-approved planning proposal
+- configurable scheduling, read-only architect review, integration, per-cycle work, and bounded retry controls
+- sustained local control cycles that reuse readiness, dependency, WIP, worker, budget, review, integration, and project-health gates
+- explicit Start, Resume, Step, Pause, and Stop controls with safe restart recovery
+- durable cycle and task/run action audit trails with approved-plan progress
+- conflict, retry-exhaustion, broken-health, project-blocker, missing-agent, and Needs Input escalation
+- scoped integration that cannot silently merge work outside the approved plan
+- focused persistence and desktop service tests plus CRAP, typecheck, test, and production-build gates
+
 ### Goal
 
 Allow a project goal to move through planning, implementation, integration, and completion with limited supervision.
@@ -1299,18 +1310,18 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 ---
 
-## v1.0 — Autonomous Orchestration
+## v1.0 — Autonomous Orchestration — Complete
 
-- M28 Autonomous Project Mode
+- M28 Autonomous Project Mode — Complete
 
 ---
 
-# Immediate Implementation Sequence
+# Next Implementation Sequence
 
-Continue from the completed M27 state:
+The currently defined roadmap is complete:
 
 ```text
-1. Implement M28 autonomy incrementally around the existing readiness, review, integration, health, budget, and human-input gates
+1. Define and approve the next milestone before implementation
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

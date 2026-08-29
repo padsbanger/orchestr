@@ -46,7 +46,7 @@ export function listIntegrationAttempts(projectId: string): Promise<IntegrationA
 }
 
 export function integrateNextTask(projectId: string): Promise<IntegrationExecution> {
-  return invoke<IntegrationExecution>("integrate_next_task", { projectId });
+  return invoke<IntegrationExecution>("integrate_next_task", { projectId, allowedTaskIds: null });
 }
 
 export function retryIntegrationAttempt(attemptId: string): Promise<Task> {

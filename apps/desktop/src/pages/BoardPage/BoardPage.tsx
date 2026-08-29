@@ -1,7 +1,7 @@
 import { closestCorners, DndContext, DragEndEvent, DragOverlay, KeyboardSensor, pointerWithin, PointerSensor, useSensor, useSensors, useDroppable } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Activity, ArrowLeft, BookOpenCheck, Bot, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, MessagesSquare, MoreHorizontal, Pencil, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
+import { Activity, ArrowLeft, BookOpenCheck, Bot, ChartNoAxesCombined, Gauge, GitBranch, GitMerge, GripVertical, MessagesSquare, MoreHorizontal, Pencil, PlayCircle, Plus, SearchCode, ShieldAlert, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { RepositoryInspector } from "../../components/RepositoryInspector/RepositoryInspector";
@@ -957,6 +957,7 @@ export function BoardPage() {
               {isProjectToolsOpen && <div className="project-tools-menu" id="project-tools-menu" role="menu">
                 <Link role="menuitem" to={`/projects/${project.id}/progress`} onClick={() => setIsProjectToolsOpen(false)}><ChartNoAxesCombined size={15} /> Progress</Link>
                 <Link role="menuitem" to={`/projects/${project.id}/metrics`} onClick={() => setIsProjectToolsOpen(false)}><Activity size={15} /> Metrics & cost</Link>
+                <Link role="menuitem" to={`/projects/${project.id}/autonomy`} onClick={() => setIsProjectToolsOpen(false)}><PlayCircle size={15} /> Autonomy</Link>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("planning")}><Sparkles size={15} /> Plan <span>{proposedPlanCount}</span></button>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("collaboration")}><MessagesSquare size={15} /> Collaborate <span>{openCollaborationCount}</span></button>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{acceptedDecisionCount}</span></button>
