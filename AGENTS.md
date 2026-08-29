@@ -40,10 +40,11 @@ Completed milestones:
 - M23 — Capability-Aware Scheduler
 - M24 — Planning Agent
 - M25 — Agent Collaboration
+- M27 — Metrics + Cost Control
 
 Immediate next milestone:
 
-**M26 — Remote Git Hosting**
+**M28 — Autonomous Project Mode**
 
 Do not skip integration correctness in favor of more agents or more automation.
 
@@ -1283,17 +1284,13 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current next milestone:
 
-**M26 — Remote Git Hosting**
+**M28 — Autonomous Project Mode**
 
 Do not prioritize:
 
-- autonomous project mode
 - cloud sync
 
 before accepted work can reliably land on a healthy integration branch.
-
-With auditable agent collaboration complete, prioritize local-first remote Git
-hosting without weakening integration correctness or project health.
 
 ---
 

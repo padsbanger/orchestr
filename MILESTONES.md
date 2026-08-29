@@ -1123,39 +1123,6 @@ Agents can coordinate without hidden peer-to-peer conversation.
 
 ---
 
-# M26 — Remote Git Hosting
-
-### Goal
-
-Integrate with hosted Git providers.
-
-Start with GitHub.
-
-### Scope
-
-- clone
-- remotes
-- push task branch
-- issues
-- issue -> task
-- PR creation
-- checks/comments
-- merge workflow
-
-### Integration modes
-
-Later support:
-
-- local integration
-- PR-based integration
-- hybrid integration
-
-### Definition of done
-
-An Orchestr task can participate in a normal hosted Git workflow without abandoning local-first behavior.
-
----
-
 # M27 — Metrics + Cost Control
 
 ### Goal
@@ -1191,6 +1158,17 @@ Operational activity is not project progress.
 ### Definition of done
 
 Users can identify bottlenecks, unreliable agents, excessive cost, or slow project flow.
+
+### Delivered
+
+- durable task status-transition history for Ready, active, review, blocked, and Done timing
+- provider-reported input, cached-input, and output token usage captured per run
+- auditable project/model pricing with exact-model and provider fallback rates
+- monthly project budgets with warning thresholds and an optional domain-enforced hard stop
+- operational reliability, retry, duration, token, provider/model, cost, and worker-utilization metrics
+- flow lead-time, queue-time, blocked-time, conflict, validation-failure, and Done-throughput metrics
+- project metrics and cost-control dashboard with 7, 30, and 90 day views
+- focused persistence, provider protocol, and desktop service tests
 
 ---
 
@@ -1315,10 +1293,9 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 ---
 
-## v0.7 — Hosted Development Workflow
+## v0.7 — Delivery Intelligence
 
-- M26 Remote Git Hosting
-- M27 Metrics + Cost Control
+- M27 Metrics + Cost Control — Complete
 
 ---
 
@@ -1330,10 +1307,10 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 # Immediate Implementation Sequence
 
-Continue from the completed M25 state:
+Continue from the completed M27 state:
 
 ```text
-1. Implement local-first hosted Git clone, remote, push, issue, and pull-request workflows
+1. Implement M28 autonomy incrementally around the existing readiness, review, integration, health, budget, and human-input gates
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

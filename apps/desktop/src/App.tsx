@@ -4,6 +4,7 @@ import { AppShell } from "./components/AppShell/AppShell";
 import { DashboardPage } from "./pages/DashboardPage/DashboardPage";
 import { BoardPage } from "./pages/BoardPage/BoardPage";
 import { ProjectProgressPage } from "./pages/ProjectProgressPage/ProjectProgressPage";
+import { ProjectMetricsPage } from "./pages/ProjectMetricsPage/ProjectMetricsPage";
 import { SettingsPage } from "./pages/SettingsPage/SettingsPage";
 import { WorkersPage } from "./pages/WorkersPage/WorkersPage";
 import { AgentsPage } from "./pages/AgentsPage/AgentsPage";
@@ -42,6 +43,7 @@ export function App() {
       <Routes>
         <Route path="/projects" element={<DashboardPage />} />
         <Route path="/projects/:projectId/progress" element={<ProjectProgressPage />} />
+        <Route path="/projects/:projectId/metrics" element={<ProjectMetricsPage />} />
         <Route path="/projects/:projectId" element={<BoardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/workers" element={<WorkersPage />} />

@@ -10,16 +10,17 @@ use std::{
 use orchestr_db::{
     Agent, AgentReview, AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecision,
     ArchitectureDecisionStatus, CollaborationEntry, CollaborationKind, Database, Epic,
-    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, NewAgent,
-    NewAgentReview, NewArchitectureDecision, NewCollaborationEntry, NewEpic, NewMilestone,
-    NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewRunEvent,
-    NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, NewValidationEvent,
-    PlanningMaterializationIds, PlanningPlan, PlanningProposal, PlanningProposalStatus, Project,
-    ProjectBlocker, ProjectDeletion, ProjectHealth, ProjectProgress, RemoteWorker, RevertAttempt,
-    RevertStatus, Run, RunEvent, RunOutput, RunStatus, SchedulerDecision, Task, TaskInputRequest,
-    TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand, ValidationStage,
-    ValidationStatus, WorkerManagement, WorkerManagementUpdate, WorkerProviderStatus,
-    WorkerToolCapability, Workspace,
+    FlowLimitUpdate, FlowLimits, FlowState, IntegrationAttempt, Milestone, ModelPricing,
+    ModelPricingUpdate, NewAgent, NewAgentReview, NewArchitectureDecision, NewCollaborationEntry,
+    NewEpic, NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker,
+    NewRun, NewRunEvent, NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand,
+    NewValidationEvent, PlanningMaterializationIds, PlanningPlan, PlanningProposal,
+    PlanningProposalStatus, Project, ProjectBlocker, ProjectCostControl, ProjectCostControlUpdate,
+    ProjectDeletion, ProjectHealth, ProjectMetrics, ProjectProgress, RemoteWorker, RevertAttempt,
+    RevertStatus, Run, RunEvent, RunOutput, RunStatus, RunUsageUpdate, SchedulerDecision, Task,
+    TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand,
+    ValidationStage, ValidationStatus, WorkerManagement, WorkerManagementUpdate,
+    WorkerProviderStatus, WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -137,6 +138,26 @@ struct UpdateAgentInput {
     #[serde(default)]
     skills: Vec<String>,
     max_concurrent_tasks: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProjectCostControlInput {
+    project_id: String,
+    monthly_budget_micros: i64,
+    warning_threshold_percent: i64,
+    block_new_runs: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertModelPricingInput {
+    project_id: String,
+    provider: String,
+    model: String,
+    input_micros_per_million: i64,
+    cached_input_micros_per_million: i64,
+    output_micros_per_million: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5672,8 +5693,19 @@ fn forward_task_output(
         let stream = output.stream;
         let raw_text = output.text;
         let event = CodexProvider::execution_event(&raw_text);
+        let usage = CodexProvider::execution_usage(&raw_text);
         if let Ok(mut database) = database.lock() {
             let _ = database.append_run_output(run_id, output_stream_name(&stream), &raw_text);
+            if let Some(usage) = usage {
+                let _ = database.record_run_usage(
+                    run_id,
+                    RunUsageUpdate {
+                        input_tokens: usage.input_tokens,
+                        cached_input_tokens: usage.cached_input_tokens,
+                        output_tokens: usage.output_tokens,
+                    },
+                );
+            }
             let _ = database.append_run_event(
                 run_id,
                 NewRunEvent {
@@ -6575,6 +6607,77 @@ fn get_project_progress(
 }
 
 #[tauri::command]
+fn get_project_metrics(
+    project_id: String,
+    range_days: i64,
+    state: State<'_, AppState>,
+) -> Result<ProjectMetrics, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .project_metrics(&project_id, range_days)
+        .map_err(|error| format!("Unable to calculate project metrics: {error}"))
+}
+
+#[tauri::command]
+fn update_project_cost_control(
+    input: UpdateProjectCostControlInput,
+    state: State<'_, AppState>,
+) -> Result<ProjectCostControl, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .update_project_cost_control(
+            &input.project_id,
+            ProjectCostControlUpdate {
+                monthly_budget_micros: input.monthly_budget_micros,
+                warning_threshold_percent: input.warning_threshold_percent,
+                block_new_runs: input.block_new_runs,
+            },
+        )
+        .map_err(|error| format!("Unable to update project cost controls: {error}"))
+}
+
+#[tauri::command]
+fn upsert_model_pricing(
+    input: UpsertModelPricingInput,
+    state: State<'_, AppState>,
+) -> Result<ModelPricing, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .upsert_model_pricing(
+            &input.project_id,
+            ModelPricingUpdate {
+                provider: input.provider,
+                model: input.model,
+                input_micros_per_million: input.input_micros_per_million,
+                cached_input_micros_per_million: input.cached_input_micros_per_million,
+                output_micros_per_million: input.output_micros_per_million,
+            },
+        )
+        .map_err(|error| format!("Unable to update model pricing: {error}"))
+}
+
+#[tauri::command]
+fn delete_model_pricing(
+    project_id: String,
+    provider: String,
+    model: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local project store is unavailable.".to_owned())?
+        .delete_model_pricing(&project_id, &provider, &model)
+        .map_err(|error| format!("Unable to remove model pricing: {error}"))
+}
+
+#[tauri::command]
 fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
     let mut database = state
         .database
@@ -7468,6 +7571,10 @@ fn main() {
             create_epic,
             update_epic_status,
             get_project_progress,
+            get_project_metrics,
+            update_project_cost_control,
+            upsert_model_pricing,
+            delete_model_pricing,
             create_task,
             update_task,
             delete_task,

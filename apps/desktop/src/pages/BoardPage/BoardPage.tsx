@@ -956,6 +956,7 @@ export function BoardPage() {
               <button className="secondary-button" type="button" aria-haspopup="menu" aria-expanded={isProjectToolsOpen} aria-controls="project-tools-menu" onClick={() => setIsProjectToolsOpen((open) => !open)}><MoreHorizontal size={16} /> More</button>
               {isProjectToolsOpen && <div className="project-tools-menu" id="project-tools-menu" role="menu">
                 <Link role="menuitem" to={`/projects/${project.id}/progress`} onClick={() => setIsProjectToolsOpen(false)}><ChartNoAxesCombined size={15} /> Progress</Link>
+                <Link role="menuitem" to={`/projects/${project.id}/metrics`} onClick={() => setIsProjectToolsOpen(false)}><Activity size={15} /> Metrics & cost</Link>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("planning")}><Sparkles size={15} /> Plan <span>{proposedPlanCount}</span></button>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("collaboration")}><MessagesSquare size={15} /> Collaborate <span>{openCollaborationCount}</span></button>
                 <button type="button" role="menuitem" onClick={() => openProjectToolPanel("knowledge")}><BookOpenCheck size={15} /> Knowledge <span>{acceptedDecisionCount}</span></button>

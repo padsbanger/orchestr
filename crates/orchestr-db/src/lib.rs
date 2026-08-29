@@ -52,6 +52,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         23,
         include_str!("../migrations/0023_agent_collaboration.sql"),
     ),
+    (
+        24,
+        include_str!("../migrations/0024_metrics_cost_control.sql"),
+    ),
 ];
 
 pub struct Database {
@@ -951,6 +955,130 @@ pub struct MilestoneProgress {
 pub struct ProjectProgress {
     pub counts: TaskProgressCounts,
     pub milestones: Vec<MilestoneProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCostControl {
+    pub project_id: String,
+    pub monthly_budget_micros: i64,
+    pub warning_threshold_percent: i64,
+    pub block_new_runs: bool,
+    pub updated_at: String,
+}
+
+pub struct ProjectCostControlUpdate {
+    pub monthly_budget_micros: i64,
+    pub warning_threshold_percent: i64,
+    pub block_new_runs: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPricing {
+    pub project_id: String,
+    pub provider: String,
+    pub model: String,
+    pub input_micros_per_million: i64,
+    pub cached_input_micros_per_million: i64,
+    pub output_micros_per_million: i64,
+    pub updated_at: String,
+}
+
+pub struct ModelPricingUpdate {
+    pub provider: String,
+    pub model: String,
+    pub input_micros_per_million: i64,
+    pub cached_input_micros_per_million: i64,
+    pub output_micros_per_million: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunUsageUpdate {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationalMetrics {
+    pub run_count: i64,
+    pub completed_runs: i64,
+    pub failed_runs: i64,
+    pub cancelled_runs: i64,
+    pub retry_count: i64,
+    pub success_rate_percent: f64,
+    pub average_duration_seconds: f64,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub estimated_cost_micros: i64,
+    pub unpriced_run_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowMetrics {
+    pub ready_lead_time_seconds: Option<f64>,
+    pub in_progress_seconds: Option<f64>,
+    pub review_queue_seconds: Option<f64>,
+    pub integration_queue_seconds: Option<f64>,
+    pub blocked_seconds: Option<f64>,
+    pub conflict_rate_percent: f64,
+    pub validation_failure_rate_percent: f64,
+    pub milestone_throughput: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMetric {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub provider: String,
+    pub model: String,
+    pub run_count: i64,
+    pub success_rate_percent: f64,
+    pub average_duration_seconds: f64,
+    pub estimated_cost_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerMetric {
+    pub worker_id: String,
+    pub worker_name: String,
+    pub run_count: i64,
+    pub busy_seconds: f64,
+    pub utilization_percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostMetric {
+    pub provider: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub estimated_cost_micros: i64,
+    pub priced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMetrics {
+    pub range_days: i64,
+    pub operational: OperationalMetrics,
+    pub flow: FlowMetrics,
+    pub agents: Vec<AgentMetric>,
+    pub workers: Vec<WorkerMetric>,
+    pub costs: Vec<CostMetric>,
+    pub cost_control: ProjectCostControl,
+    pub pricing: Vec<ModelPricing>,
+    pub current_month_cost_micros: i64,
+    pub budget_utilization_percent: Option<f64>,
+    pub budget_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2326,6 +2454,259 @@ impl Database {
         })
     }
 
+    pub fn project_cost_control(&self, project_id: &str) -> Result<ProjectCostControl> {
+        self.connection
+            .query_row(
+                "SELECT project_id, monthly_budget_micros, warning_threshold_percent,
+                        block_new_runs, updated_at
+                 FROM project_cost_controls WHERE project_id = ?1",
+                [project_id],
+                project_cost_control_from_row,
+            )
+            .optional()?
+            .map_or_else(
+                || {
+                    let updated_at =
+                        self.connection
+                            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))?;
+                    Ok(ProjectCostControl {
+                        project_id: project_id.to_owned(),
+                        monthly_budget_micros: 0,
+                        warning_threshold_percent: 80,
+                        block_new_runs: false,
+                        updated_at,
+                    })
+                },
+                Ok,
+            )
+    }
+
+    pub fn update_project_cost_control(
+        &mut self,
+        project_id: &str,
+        update: ProjectCostControlUpdate,
+    ) -> Result<ProjectCostControl> {
+        if update.monthly_budget_micros < 0
+            || !(1..=100).contains(&update.warning_threshold_percent)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "INSERT INTO project_cost_controls
+                (project_id, monthly_budget_micros, warning_threshold_percent, block_new_runs)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET
+                monthly_budget_micros = excluded.monthly_budget_micros,
+                warning_threshold_percent = excluded.warning_threshold_percent,
+                block_new_runs = excluded.block_new_runs,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                project_id,
+                update.monthly_budget_micros,
+                update.warning_threshold_percent,
+                update.block_new_runs
+            ],
+        )?;
+        self.project_cost_control(project_id)
+    }
+
+    pub fn list_model_pricing(&self, project_id: &str) -> Result<Vec<ModelPricing>> {
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, provider, model, input_micros_per_million,
+                    cached_input_micros_per_million, output_micros_per_million, updated_at
+             FROM provider_model_pricing WHERE project_id = ?1
+             ORDER BY provider, model",
+        )?;
+        let records = statement
+            .query_map([project_id], model_pricing_from_row)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn upsert_model_pricing(
+        &mut self,
+        project_id: &str,
+        update: ModelPricingUpdate,
+    ) -> Result<ModelPricing> {
+        let provider = update.provider.trim().to_ascii_lowercase();
+        let model = update.model.trim();
+        if provider.is_empty()
+            || model.is_empty()
+            || update.input_micros_per_million < 0
+            || update.cached_input_micros_per_million < 0
+            || update.output_micros_per_million < 0
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "INSERT INTO provider_model_pricing
+                (project_id, provider, model, input_micros_per_million,
+                 cached_input_micros_per_million, output_micros_per_million)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(project_id, provider, model) DO UPDATE SET
+                input_micros_per_million = excluded.input_micros_per_million,
+                cached_input_micros_per_million = excluded.cached_input_micros_per_million,
+                output_micros_per_million = excluded.output_micros_per_million,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                project_id,
+                provider,
+                model,
+                update.input_micros_per_million,
+                update.cached_input_micros_per_million,
+                update.output_micros_per_million
+            ],
+        )?;
+        self.reprice_project_usage(project_id)?;
+        self.connection.query_row(
+            "SELECT project_id, provider, model, input_micros_per_million,
+                    cached_input_micros_per_million, output_micros_per_million, updated_at
+             FROM provider_model_pricing
+             WHERE project_id = ?1 AND provider = ?2 AND model = ?3",
+            params![project_id, provider, model],
+            model_pricing_from_row,
+        )
+    }
+
+    pub fn delete_model_pricing(
+        &mut self,
+        project_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<bool> {
+        let deleted = self.connection.execute(
+            "DELETE FROM provider_model_pricing
+             WHERE project_id = ?1 AND provider = ?2 AND model = ?3",
+            params![
+                project_id,
+                provider.trim().to_ascii_lowercase(),
+                model.trim()
+            ],
+        )? > 0;
+        if deleted {
+            self.reprice_project_usage(project_id)?;
+        }
+        Ok(deleted)
+    }
+
+    pub fn record_run_usage(&mut self, run_id: &str, usage: RunUsageUpdate) -> Result<()> {
+        if usage.input_tokens < 0 || usage.cached_input_tokens < 0 || usage.output_tokens < 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let (project_id, provider, model): (String, String, String) = self.connection.query_row(
+            "SELECT tasks.project_id, agents.provider,
+                    COALESCE(NULLIF(TRIM(agents.model), ''), 'default')
+             FROM runs
+             JOIN tasks ON tasks.id = runs.task_id
+             JOIN agents ON agents.id = runs.agent_id
+             WHERE runs.id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let pricing = pricing_for_model(&self.connection, &project_id, &provider, &model)?;
+        let estimated_cost_micros = pricing
+            .as_ref()
+            .map_or(0, |pricing| estimate_cost_micros(usage, pricing));
+        self.connection.execute(
+            "INSERT INTO run_usage
+                (run_id, provider, model, input_tokens, cached_input_tokens, output_tokens,
+                 estimated_cost_micros, priced, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
+             ON CONFLICT(run_id) DO UPDATE SET
+                provider = excluded.provider, model = excluded.model,
+                input_tokens = excluded.input_tokens,
+                cached_input_tokens = excluded.cached_input_tokens,
+                output_tokens = excluded.output_tokens,
+                estimated_cost_micros = excluded.estimated_cost_micros,
+                priced = excluded.priced, recorded_at = CURRENT_TIMESTAMP",
+            params![
+                run_id,
+                provider,
+                model,
+                usage.input_tokens,
+                usage.cached_input_tokens,
+                usage.output_tokens,
+                estimated_cost_micros,
+                pricing.is_some()
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn reprice_project_usage(&mut self, project_id: &str) -> Result<()> {
+        let usage_rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT usage.run_id, usage.provider, usage.model, usage.input_tokens,
+                        usage.cached_input_tokens, usage.output_tokens
+                 FROM run_usage AS usage
+                 JOIN runs ON runs.id = usage.run_id
+                 JOIN tasks ON tasks.id = runs.task_id
+                 WHERE tasks.project_id = ?1",
+            )?;
+            let records = statement
+                .query_map([project_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        RunUsageUpdate {
+                            input_tokens: row.get(3)?,
+                            cached_input_tokens: row.get(4)?,
+                            output_tokens: row.get(5)?,
+                        },
+                    ))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            records
+        };
+        for (run_id, provider, model, usage) in usage_rows {
+            let pricing = pricing_for_model(&self.connection, project_id, &provider, &model)?;
+            let cost = pricing
+                .as_ref()
+                .map_or(0, |pricing| estimate_cost_micros(usage, pricing));
+            self.connection.execute(
+                "UPDATE run_usage SET estimated_cost_micros = ?1, priced = ?2 WHERE run_id = ?3",
+                params![cost, pricing.is_some(), run_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn project_cost_guard(&self, project_id: &str) -> Result<Option<String>> {
+        project_cost_guard_in_connection(&self.connection, project_id)
+    }
+
+    pub fn project_metrics(&self, project_id: &str, range_days: i64) -> Result<ProjectMetrics> {
+        let range_days = range_days.clamp(1, 365);
+        let window = format!("-{range_days} days");
+        let operational = operational_metrics(&self.connection, project_id, &window)?;
+        let flow = flow_metrics(&self.connection, project_id, &window)?;
+        let agents = agent_metrics(&self.connection, project_id, &window)?;
+        let workers = worker_metrics(&self.connection, project_id, &window, range_days)?;
+        let costs = cost_metrics(&self.connection, project_id, &window)?;
+        let cost_control = self.project_cost_control(project_id)?;
+        let pricing = self.list_model_pricing(project_id)?;
+        let current_month_cost_micros = current_month_cost(&self.connection, project_id)?;
+        let budget_utilization_percent = budget_utilization(
+            current_month_cost_micros,
+            cost_control.monthly_budget_micros,
+        );
+        let budget_status = budget_status(&cost_control, current_month_cost_micros).to_owned();
+        Ok(ProjectMetrics {
+            range_days,
+            operational,
+            flow,
+            agents,
+            workers,
+            costs,
+            cost_control,
+            pricing,
+            current_month_cost_micros,
+            budget_utilization_percent,
+            budget_status,
+        })
+    }
+
     pub fn create_task(&mut self, new_task: NewTask) -> Result<Task> {
         self.validate_task_dependencies(
             &new_task.id,
@@ -2711,6 +3092,9 @@ impl Database {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if let Some(reason) = task_blocked_reason(&transaction, &new_run.task_id, &project_id)? {
+            return Err(rusqlite::Error::InvalidParameterName(reason));
+        }
+        if let Some(reason) = project_cost_guard_in_connection(&transaction, &project_id)? {
             return Err(rusqlite::Error::InvalidParameterName(reason));
         }
 
@@ -5381,8 +5765,11 @@ fn flow_blocked_reason_for_connection(
         )
         .optional()?;
     let global_blocker = active_global_blocker_reason(connection, project_id)?;
+    let cost_guard = project_cost_guard_in_connection(connection, project_id)?;
     let reason = if global_blocker.is_some() {
         global_blocker
+    } else if cost_guard.is_some() {
+        cost_guard
     } else if health.as_deref() == Some("broken") {
         Some("The integration branch is broken; automatic starts are paused.".into())
     } else if review >= limits.review_limit {
@@ -5571,6 +5958,381 @@ fn set_positions(transaction: &rusqlite::Transaction<'_>, ids: &[String]) -> Res
     Ok(())
 }
 
+fn project_cost_control_from_row(row: &rusqlite::Row<'_>) -> Result<ProjectCostControl> {
+    Ok(ProjectCostControl {
+        project_id: row.get(0)?,
+        monthly_budget_micros: row.get(1)?,
+        warning_threshold_percent: row.get(2)?,
+        block_new_runs: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+fn model_pricing_from_row(row: &rusqlite::Row<'_>) -> Result<ModelPricing> {
+    Ok(ModelPricing {
+        project_id: row.get(0)?,
+        provider: row.get(1)?,
+        model: row.get(2)?,
+        input_micros_per_million: row.get(3)?,
+        cached_input_micros_per_million: row.get(4)?,
+        output_micros_per_million: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn pricing_for_model(
+    connection: &Connection,
+    project_id: &str,
+    provider: &str,
+    model: &str,
+) -> Result<Option<ModelPricing>> {
+    connection
+        .query_row(
+            "SELECT project_id, provider, model, input_micros_per_million,
+                    cached_input_micros_per_million, output_micros_per_million, updated_at
+             FROM provider_model_pricing
+             WHERE project_id = ?1 AND provider = ?2 AND model IN (?3, '*')
+             ORDER BY CASE WHEN model = ?3 THEN 0 ELSE 1 END LIMIT 1",
+            params![project_id, provider.trim().to_ascii_lowercase(), model],
+            model_pricing_from_row,
+        )
+        .optional()
+}
+
+fn estimate_cost_micros(usage: RunUsageUpdate, pricing: &ModelPricing) -> i64 {
+    let uncached_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    let input = uncached_input_tokens.saturating_mul(pricing.input_micros_per_million);
+    let cached = usage
+        .cached_input_tokens
+        .saturating_mul(pricing.cached_input_micros_per_million);
+    let output = usage
+        .output_tokens
+        .saturating_mul(pricing.output_micros_per_million);
+    input
+        .saturating_add(cached)
+        .saturating_add(output)
+        .saturating_add(999_999)
+        / 1_000_000
+}
+
+fn current_month_cost(connection: &Connection, project_id: &str) -> Result<i64> {
+    connection.query_row(
+        "SELECT COALESCE(SUM(usage.estimated_cost_micros), 0)
+         FROM run_usage AS usage
+         JOIN runs ON runs.id = usage.run_id
+         JOIN tasks ON tasks.id = runs.task_id
+         WHERE tasks.project_id = ?1
+           AND usage.recorded_at >= datetime('now', 'start of month')",
+        [project_id],
+        |row| row.get(0),
+    )
+}
+
+fn budget_utilization(cost_micros: i64, budget_micros: i64) -> Option<f64> {
+    (budget_micros > 0).then(|| cost_micros as f64 * 100.0 / budget_micros as f64)
+}
+
+fn budget_status(control: &ProjectCostControl, current_cost_micros: i64) -> &'static str {
+    if control.monthly_budget_micros == 0 {
+        return "unconfigured";
+    }
+    let utilization = current_cost_micros as f64 * 100.0 / control.monthly_budget_micros as f64;
+    if utilization >= 100.0 {
+        "exceeded"
+    } else if utilization >= control.warning_threshold_percent as f64 {
+        "warning"
+    } else {
+        "within_budget"
+    }
+}
+
+fn project_cost_guard_in_connection(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<String>> {
+    let control = connection
+        .query_row(
+            "SELECT project_id, monthly_budget_micros, warning_threshold_percent,
+                    block_new_runs, updated_at
+             FROM project_cost_controls WHERE project_id = ?1",
+            [project_id],
+            project_cost_control_from_row,
+        )
+        .optional()?;
+    let Some(control) =
+        control.filter(|control| control.block_new_runs && control.monthly_budget_micros > 0)
+    else {
+        return Ok(None);
+    };
+    let current_cost = current_month_cost(connection, project_id)?;
+    Ok((current_cost >= control.monthly_budget_micros).then(|| {
+        "The project monthly cost budget is exhausted; new agent runs are paused.".to_owned()
+    }))
+}
+
+fn percentage(numerator: i64, denominator: i64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 * 100.0 / denominator as f64
+    }
+}
+
+fn operational_metrics(
+    connection: &Connection,
+    project_id: &str,
+    window: &str,
+) -> Result<OperationalMetrics> {
+    let mut metrics = connection.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN runs.status = 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.status = 'failed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.status = 'cancelled' THEN 1 ELSE 0 END), 0),
+                COALESCE(AVG(CASE WHEN runs.completed_at IS NOT NULL
+                    THEN MAX(0, (julianday(runs.completed_at) - julianday(runs.started_at)) * 86400.0)
+                    END), 0.0),
+                COALESCE(SUM(usage.input_tokens), 0),
+                COALESCE(SUM(usage.cached_input_tokens), 0),
+                COALESCE(SUM(usage.output_tokens), 0),
+                COALESCE(SUM(usage.estimated_cost_micros), 0),
+                COALESCE(SUM(CASE WHEN usage.run_id IS NOT NULL AND usage.priced = 0 THEN 1 ELSE 0 END), 0)
+         FROM runs
+         JOIN tasks ON tasks.id = runs.task_id
+         LEFT JOIN run_usage AS usage ON usage.run_id = runs.id
+         WHERE tasks.project_id = ?1
+           AND COALESCE(runs.queued_at, runs.started_at) >= datetime('now', ?2)",
+        params![project_id, window],
+        |row| {
+            Ok(OperationalMetrics {
+                run_count: row.get(0)?,
+                completed_runs: row.get(1)?,
+                failed_runs: row.get(2)?,
+                cancelled_runs: row.get(3)?,
+                retry_count: 0,
+                success_rate_percent: 0.0,
+                average_duration_seconds: row.get(4)?,
+                input_tokens: row.get(5)?,
+                cached_input_tokens: row.get(6)?,
+                output_tokens: row.get(7)?,
+                estimated_cost_micros: row.get(8)?,
+                unpriced_run_count: row.get(9)?,
+            })
+        },
+    )?;
+    metrics.retry_count = connection.query_row(
+        "SELECT COUNT(*) FROM run_recoveries AS recoveries
+         JOIN tasks ON tasks.id = recoveries.task_id
+         WHERE tasks.project_id = ?1 AND recoveries.created_at >= datetime('now', ?2)
+           AND recoveries.action IN ('resume', 'restart_clean', 'reassign')",
+        params![project_id, window],
+        |row| row.get(0),
+    )?;
+    metrics.success_rate_percent = percentage(
+        metrics.completed_runs,
+        metrics.completed_runs + metrics.failed_runs + metrics.cancelled_runs,
+    );
+    Ok(metrics)
+}
+
+fn average_status_duration(
+    connection: &Connection,
+    project_id: &str,
+    status: &str,
+    window: &str,
+) -> Result<Option<f64>> {
+    connection.query_row(
+        "SELECT AVG(MAX(0, (julianday(COALESCE(
+                    (SELECT MIN(next.changed_at) FROM task_status_history AS next
+                     WHERE next.task_id = history.task_id
+                       AND (next.changed_at > history.changed_at
+                            OR (next.changed_at = history.changed_at AND next.id > history.id))),
+                    CURRENT_TIMESTAMP)) - julianday(history.changed_at)) * 86400.0))
+         FROM task_status_history AS history
+         JOIN tasks ON tasks.id = history.task_id
+         WHERE tasks.project_id = ?1 AND history.to_status = ?2
+           AND history.changed_at >= datetime('now', ?3)",
+        params![project_id, status, window],
+        |row| row.get(0),
+    )
+}
+
+fn flow_metrics(connection: &Connection, project_id: &str, window: &str) -> Result<FlowMetrics> {
+    let ready_lead_time_seconds = connection.query_row(
+        "SELECT AVG(MAX(0, (julianday(history.changed_at) - julianday(tasks.created_at)) * 86400.0))
+         FROM task_status_history AS history
+         JOIN tasks ON tasks.id = history.task_id
+         WHERE tasks.project_id = ?1 AND history.to_status = 'ready'
+           AND history.changed_at >= datetime('now', ?2)",
+        params![project_id, window],
+        |row| row.get(0),
+    )?;
+    let integration_queue_seconds = connection.query_row(
+        "SELECT AVG(MAX(0, (julianday(COALESCE(integration_attempts.started_at, CURRENT_TIMESTAMP))
+                    - julianday(integration_attempts.created_at)) * 86400.0))
+         FROM integration_attempts
+         JOIN tasks ON tasks.id = integration_attempts.task_id
+         WHERE tasks.project_id = ?1 AND integration_attempts.created_at >= datetime('now', ?2)",
+        params![project_id, window],
+        |row| row.get(0),
+    )?;
+    let (integration_count, conflict_count): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN integration_attempts.status = 'conflict' THEN 1 ELSE 0 END), 0)
+         FROM integration_attempts
+         JOIN tasks ON tasks.id = integration_attempts.task_id
+         WHERE tasks.project_id = ?1 AND integration_attempts.created_at >= datetime('now', ?2)",
+        params![project_id, window],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (validation_count, validation_failures): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+         FROM validation_attempts
+         WHERE project_id = ?1 AND started_at >= datetime('now', ?2)
+           AND status IN ('passed', 'failed')",
+        params![project_id, window],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let milestone_throughput = connection.query_row(
+        "SELECT COUNT(*) FROM task_status_history AS history
+         JOIN tasks ON tasks.id = history.task_id
+         WHERE tasks.project_id = ?1 AND history.to_status = 'done'
+           AND history.changed_at >= datetime('now', ?2)",
+        params![project_id, window],
+        |row| row.get(0),
+    )?;
+    Ok(FlowMetrics {
+        ready_lead_time_seconds,
+        in_progress_seconds: average_status_duration(
+            connection,
+            project_id,
+            "in_progress",
+            window,
+        )?,
+        review_queue_seconds: average_status_duration(connection, project_id, "review", window)?,
+        integration_queue_seconds,
+        blocked_seconds: average_status_duration(connection, project_id, "blocked", window)?,
+        conflict_rate_percent: percentage(conflict_count, integration_count),
+        validation_failure_rate_percent: percentage(validation_failures, validation_count),
+        milestone_throughput,
+    })
+}
+
+fn agent_metrics(
+    connection: &Connection,
+    project_id: &str,
+    window: &str,
+) -> Result<Vec<AgentMetric>> {
+    let mut statement = connection.prepare(
+        "SELECT agents.id, agents.name, agents.provider,
+                COALESCE(NULLIF(TRIM(agents.model), ''), 'default'),
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN runs.status = 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN runs.status IN ('completed', 'failed', 'cancelled') THEN 1 ELSE 0 END), 0),
+                COALESCE(AVG(CASE WHEN runs.completed_at IS NOT NULL
+                    THEN MAX(0, (julianday(runs.completed_at) - julianday(runs.started_at)) * 86400.0)
+                    END), 0.0),
+                COALESCE(SUM(usage.estimated_cost_micros), 0)
+         FROM runs
+         JOIN tasks ON tasks.id = runs.task_id
+         JOIN agents ON agents.id = runs.agent_id
+         LEFT JOIN run_usage AS usage ON usage.run_id = runs.id
+         WHERE tasks.project_id = ?1
+           AND COALESCE(runs.queued_at, runs.started_at) >= datetime('now', ?2)
+         GROUP BY agents.id, agents.name, agents.provider, agents.model
+         ORDER BY COUNT(*) DESC, agents.name",
+    )?;
+    let records = statement
+        .query_map(params![project_id, window], |row| {
+            let completed: i64 = row.get(5)?;
+            let terminal: i64 = row.get(6)?;
+            Ok(AgentMetric {
+                agent_id: row.get(0)?,
+                agent_name: row.get(1)?,
+                provider: row.get(2)?,
+                model: row.get(3)?,
+                run_count: row.get(4)?,
+                success_rate_percent: percentage(completed, terminal),
+                average_duration_seconds: row.get(7)?,
+                estimated_cost_micros: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn worker_metrics(
+    connection: &Connection,
+    project_id: &str,
+    window: &str,
+    range_days: i64,
+) -> Result<Vec<WorkerMetric>> {
+    let mut statement = connection.prepare(
+        "SELECT runs.worker_id,
+                CASE WHEN runs.worker_id = 'local' THEN 'Local worker'
+                     ELSE COALESCE((SELECT name FROM remote_workers WHERE id = runs.worker_id), runs.worker_id) END,
+                COUNT(*),
+                COALESCE(SUM(MAX(0, (julianday(MIN(COALESCE(runs.completed_at, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP))
+                    - julianday(MAX(runs.started_at, datetime('now', ?2)))) * 86400.0)), 0.0),
+                COALESCE((SELECT max_concurrent_runs FROM worker_flow_limits WHERE worker_id = runs.worker_id), 4)
+         FROM runs
+         JOIN tasks ON tasks.id = runs.task_id
+         WHERE tasks.project_id = ?1 AND runs.status <> 'queued'
+           AND runs.started_at <= CURRENT_TIMESTAMP
+           AND COALESCE(runs.completed_at, CURRENT_TIMESTAMP) >= datetime('now', ?2)
+         GROUP BY runs.worker_id
+         ORDER BY COUNT(*) DESC, runs.worker_id",
+    )?;
+    let records = statement
+        .query_map(params![project_id, window], |row| {
+            let busy_seconds: f64 = row.get(3)?;
+            let capacity: i64 = row.get(4)?;
+            let available_seconds = range_days as f64 * 86_400.0 * capacity.max(1) as f64;
+            Ok(WorkerMetric {
+                worker_id: row.get(0)?,
+                worker_name: row.get(1)?,
+                run_count: row.get(2)?,
+                busy_seconds,
+                utilization_percent: (busy_seconds * 100.0 / available_seconds).clamp(0.0, 100.0),
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn cost_metrics(
+    connection: &Connection,
+    project_id: &str,
+    window: &str,
+) -> Result<Vec<CostMetric>> {
+    let mut statement = connection.prepare(
+        "SELECT usage.provider, usage.model,
+                COALESCE(SUM(usage.input_tokens), 0),
+                COALESCE(SUM(usage.cached_input_tokens), 0),
+                COALESCE(SUM(usage.output_tokens), 0),
+                COALESCE(SUM(usage.estimated_cost_micros), 0),
+                MIN(usage.priced)
+         FROM run_usage AS usage
+         JOIN runs ON runs.id = usage.run_id
+         JOIN tasks ON tasks.id = runs.task_id
+         WHERE tasks.project_id = ?1 AND usage.recorded_at >= datetime('now', ?2)
+         GROUP BY usage.provider, usage.model
+         ORDER BY SUM(usage.estimated_cost_micros) DESC, usage.provider, usage.model",
+    )?;
+    let records = statement
+        .query_map(params![project_id, window], |row| {
+            Ok(CostMetric {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                input_tokens: row.get(2)?,
+                cached_input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                estimated_cost_micros: row.get(5)?,
+                priced: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(records)
+}
+
 fn migrate(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -5602,14 +6364,14 @@ fn migrate(connection: &Connection) -> Result<()> {
 mod tests {
     use super::{
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus,
-        CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus, NewAgent, NewAgentReview,
-        NewArchitectureDecision, NewCollaborationEntry, NewEpic, NewMilestone, NewPlanningProposal,
-        NewProject, NewProjectBlocker, NewRemoteWorker, NewRun, NewSchedulerDecision, NewTask,
-        NewTaskInputRequest, NewValidationCommand, PlanningEpic, PlanningMaterializationIds,
-        PlanningMilestone, PlanningPlan, PlanningProposalStatus, PlanningTask, ProjectDeletion,
-        ProjectHealthStatus, RevertStatus, RunStatus, TaskPriority, TaskStatus, TaskUpdate,
-        ValidationStage, ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus,
-        WorkerToolCapability,
+        CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus, ModelPricingUpdate,
+        NewAgent, NewAgentReview, NewArchitectureDecision, NewCollaborationEntry, NewEpic,
+        NewMilestone, NewPlanningProposal, NewProject, NewProjectBlocker, NewRemoteWorker, NewRun,
+        NewSchedulerDecision, NewTask, NewTaskInputRequest, NewValidationCommand, PlanningEpic,
+        PlanningMaterializationIds, PlanningMilestone, PlanningPlan, PlanningProposalStatus,
+        PlanningTask, ProjectCostControlUpdate, ProjectDeletion, ProjectHealthStatus, RevertStatus,
+        RunStatus, RunUsageUpdate, TaskPriority, TaskStatus, TaskUpdate, ValidationStage,
+        ValidationStatus, WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability,
     };
     use std::{
         fs,
@@ -7796,5 +8558,155 @@ mod tests {
         );
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn metrics_capture_usage_flow_and_enforce_the_project_budget() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "metrics-project".into(),
+                name: "Metrics project".into(),
+                description: None,
+                default_branch: "main".into(),
+                workspace_id: "metrics-workspace".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/metrics-project".into(),
+            })
+            .expect("project saves");
+        database
+            .create_agent(NewAgent {
+                id: "metrics-agent".into(),
+                name: "Metrics agent".into(),
+                provider: "codex".into(),
+                role: "implementation".into(),
+                model: Some("gpt-test".into()),
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+            })
+            .expect("agent saves");
+        database
+            .upsert_model_pricing(
+                "metrics-project",
+                ModelPricingUpdate {
+                    provider: "codex".into(),
+                    model: "gpt-test".into(),
+                    input_micros_per_million: 1_000_000,
+                    cached_input_micros_per_million: 2_000_000,
+                    output_micros_per_million: 3_000_000,
+                },
+            )
+            .expect("pricing saves");
+        create_metrics_task(&mut database, "metrics-task-1");
+        database
+            .move_task("metrics-task-1", TaskStatus::Ready, 0)
+            .expect("task moves");
+        database
+            .start_run(NewRun {
+                id: "metrics-run-1".into(),
+                task_id: "metrics-task-1".into(),
+                agent_id: "metrics-agent".into(),
+                worker_id: "local".into(),
+            })
+            .expect("run starts");
+        database
+            .record_run_usage(
+                "metrics-run-1",
+                RunUsageUpdate {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 100,
+                    output_tokens: 500,
+                },
+            )
+            .expect("usage saves");
+        database
+            .finish_run("metrics-run-1", RunStatus::Completed, Some(0), None)
+            .expect("run finishes");
+
+        let metrics = database
+            .project_metrics("metrics-project", 30)
+            .expect("metrics load");
+        assert_eq!(metrics.operational.run_count, 1);
+        assert_eq!(metrics.operational.completed_runs, 1);
+        assert_eq!(metrics.operational.estimated_cost_micros, 2_600);
+        assert_eq!(metrics.operational.unpriced_run_count, 0);
+        assert_eq!(metrics.costs[0].model, "gpt-test");
+        assert_eq!(metrics.flow.milestone_throughput, 0);
+        assert!(metrics.flow.ready_lead_time_seconds.is_some());
+        assert!(metrics.flow.in_progress_seconds.is_some());
+        assert_eq!(metrics.agents[0].success_rate_percent, 100.0);
+
+        assert!(database
+            .delete_model_pricing("metrics-project", "codex", "gpt-test")
+            .expect("pricing deletes"));
+        let unpriced = database
+            .project_metrics("metrics-project", 30)
+            .expect("unpriced metrics load");
+        assert!(!unpriced.costs[0].priced);
+        assert_eq!(unpriced.operational.estimated_cost_micros, 0);
+        database
+            .upsert_model_pricing(
+                "metrics-project",
+                ModelPricingUpdate {
+                    provider: "codex".into(),
+                    model: "gpt-test".into(),
+                    input_micros_per_million: 1_000_000,
+                    cached_input_micros_per_million: 2_000_000,
+                    output_micros_per_million: 3_000_000,
+                },
+            )
+            .expect("pricing restores");
+
+        database
+            .update_project_cost_control(
+                "metrics-project",
+                ProjectCostControlUpdate {
+                    monthly_budget_micros: 2_600,
+                    warning_threshold_percent: 80,
+                    block_new_runs: true,
+                },
+            )
+            .expect("budget saves");
+        assert!(database
+            .project_cost_guard("metrics-project")
+            .expect("guard evaluates")
+            .is_some());
+        create_metrics_task(&mut database, "metrics-task-2");
+        database
+            .move_task("metrics-task-2", TaskStatus::Ready, 0)
+            .expect("task moves");
+        assert!(database
+            .enqueue_run(NewRun {
+                id: "metrics-run-2".into(),
+                task_id: "metrics-task-2".into(),
+                agent_id: "metrics-agent".into(),
+                worker_id: "local".into(),
+            })
+            .is_err());
+
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    fn create_metrics_task(database: &mut Database, id: &str) {
+        database
+            .create_task(NewTask {
+                id: id.into(),
+                project_id: "metrics-project".into(),
+                title: id.into(),
+                description: None,
+                acceptance_criteria: vec!["Metrics verified".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("metrics-agent".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("task saves");
     }
 }

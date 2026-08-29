@@ -110,6 +110,13 @@ pub struct ExecutionEvent {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionUsage {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+}
+
 pub struct CodexProvider;
 
 impl CodexProvider {
@@ -155,6 +162,25 @@ impl CodexProvider {
             None => event_record("command.output", line),
         }
     }
+
+    /// Reads the cumulative usage attached to Codex's completed turn. Pricing
+    /// remains a project concern because provider prices can change over time.
+    pub fn execution_usage(line: &str) -> Option<ExecutionUsage> {
+        let event = serde_json::from_str::<Value>(line).ok()?;
+        if event.get("type").and_then(Value::as_str) != Some("turn.completed") {
+            return None;
+        }
+        let usage = event.get("usage")?;
+        Some(ExecutionUsage {
+            input_tokens: token_count(usage, "input_tokens")?,
+            cached_input_tokens: token_count(usage, "cached_input_tokens").unwrap_or(0),
+            output_tokens: token_count(usage, "output_tokens")?,
+        })
+    }
+}
+
+fn token_count(usage: &Value, key: &str) -> Option<i64> {
+    usage.get(key)?.as_i64().filter(|count| *count >= 0)
 }
 
 fn event_record(kind: &str, message: &str) -> ExecutionEvent {
@@ -508,6 +534,26 @@ mod tests {
                 r#"{"type":"item.completed","item":{"type":"agent_message","text":"Implemented the task."}}"#,
             ),
             "Implemented the task."
+        );
+    }
+
+    #[test]
+    fn extracts_usage_only_from_completed_turns() {
+        assert_eq!(
+            CodexProvider::execution_usage(
+                r#"{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":350}}"#,
+            ),
+            Some(super::ExecutionUsage {
+                input_tokens: 1200,
+                cached_input_tokens: 200,
+                output_tokens: 350,
+            })
+        );
+        assert_eq!(
+            CodexProvider::execution_usage(
+                r#"{"type":"turn.started","usage":{"input_tokens":1200,"output_tokens":350}}"#,
+            ),
+            None
         );
     }
 }
