@@ -9,7 +9,7 @@
     "check": "tsc -b --pretty false",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "crap": "node scripts/normalize-coverage-paths.mjs && crap4ts --coverage coverage/coverage-final.normalized.json --include src/services/agentReviews.ts src/services/autonomy.ts src/services/collaboration.ts src/services/confirmations.ts src/services/flow.ts src/services/integrations.ts src/services/interruptions.ts src/services/knowledge.ts src/services/metrics.ts src/services/planning.ts src/services/runs.ts src/services/workers.ts --lenient",
+    "crap": "node scripts/normalize-coverage-paths.mjs && crap4ts --coverage coverage/coverage-final.normalized.json --include src/services/agentReviews.ts src/services/autonomy.ts src/services/collaboration.ts src/services/confirmations.ts src/services/flow.ts src/services/integrations.ts src/services/interruptions.ts src/services/knowledge.ts src/services/metrics.ts src/services/planning.ts src/services/runs.ts src/services/workers.ts src/services/workflow.ts src/components/TaskDetailPanel/TaskDetailPanel.tsx src/components/WorkflowCockpit/WorkflowCockpit.tsx src/pages/BoardPage/BoardPage.tsx src/pages/BoardPage/BoardPageModel.ts src/pages/BoardPage/BoardPageView.tsx --lenient",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -25,11 +25,14 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.6",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.8",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.1.0",
     "@vitest/coverage-v8": "^4.1.11",
+    "jsdom": "^30.0.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"

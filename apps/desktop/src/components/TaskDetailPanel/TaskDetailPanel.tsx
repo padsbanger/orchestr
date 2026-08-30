@@ -1,6 +1,6 @@
 import { BookOpenCheck, Bot, CheckCircle2, CheckSquare, CircleAlert, Code2, Download, FileCode2, FolderOpen, GitBranch, LoaderCircle, MessageSquareText, Pencil, Play, RotateCcw, Square, Terminal, X } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { Agent } from "../../services/agents";
 import { exportTaskRunLog, type RunEvent, type TaskRun } from "../../services/runs";
 import type { Task } from "../../services/tasks";
@@ -8,10 +8,14 @@ import type { TaskReview } from "../../services/reviews";
 import type { AgentReview } from "../../services/agentReviews";
 import type { TaskInputRequest } from "../../services/interruptions";
 import type { ArchitectureDecision } from "../../services/knowledge";
+import type { IntegrationAttempt, RevertAttempt } from "../../services/integrations";
+import type { ValidationAttempt } from "../../services/quality";
+import type { WorkflowTaskView } from "../../services/workflow";
 import "./TaskDetailPanel.css";
 
-type TaskDetailPanelProps = {
+export type TaskDetailPanelProps = {
   task: Task;
+  workflowView: WorkflowTaskView;
   assignedAgent?: Agent;
   recoveryAgents: Agent[];
   reviewerAgents: Agent[];
@@ -30,6 +34,10 @@ type TaskDetailPanelProps = {
   reviewError?: string;
   isReviewLoading: boolean;
   isReviewActionPending: boolean;
+  integrationAttempts?: IntegrationAttempt[];
+  revertAttempts?: RevertAttempt[];
+  validationAttempts?: ValidationAttempt[];
+  onTabChange?: (tab: DetailTab) => void;
   onClose: () => void;
   onEdit: (task: Task) => void;
   onStartRun: () => void;
@@ -45,30 +53,43 @@ type TaskDetailPanelProps = {
   onStartAgentReview: (agentId: string) => void;
 };
 
-export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerAgents, agentReviews, inputRequests, architectureDecisions, isAgentReviewStarting, runs, isStartingRun, runRecoveryAction, inputAction, cancellingRunId, isCleaningWorktree, isOpeningWorktree, review, reviewError, isReviewLoading, isReviewActionPending, onClose, onEdit, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onRequestInput, onAnswerInput, onCleanupWorktree, onOpenWorktree, onApproveReview, onRequestChanges, onStartAgentReview }: TaskDetailPanelProps) {
-  const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
-  const activeAgentReview = agentReviews.find((review) => review.status === "running");
-  const latestRun = activeRun ?? runs[0];
+const DETAIL_TABS = [
+  { id: "work", label: "Work" },
+  { id: "activity", label: "Activity" },
+  { id: "review", label: "Review & Land" },
+] as const;
+
+export type DetailTab = (typeof DETAIL_TABS)[number]["id"];
+
+export function TaskDetailPanel(props: TaskDetailPanelProps) {
+  const { task, workflowView, agentReviews, runs, onTabChange, onClose, onEdit } = props;
+  const hasLiveActivity = runs.some((run) => run.status === "queued" || run.status === "running")
+    || agentReviews.some((review) => review.status === "running");
   const [now, setNow] = useState(() => Date.now());
-  const [reviewerId, setReviewerId] = useState("");
-  const [recoveryAgentId, setRecoveryAgentId] = useState("");
+  const [activeTab, setActiveTab] = useState<DetailTab>(() => defaultDetailTab(workflowView.stage));
+  const tabGroupId = useId();
+  const tabRefs = useRef<Record<DetailTab, HTMLButtonElement | null>>({ work: null, activity: null, review: null });
 
   useEffect(() => {
-    if (!activeRun && !activeAgentReview) return undefined;
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    const interval = window.setInterval(() => setNow(Date.now()), hasLiveActivity ? 1_000 : 60_000);
     return () => window.clearInterval(interval);
-  }, [activeAgentReview, activeRun]);
+  }, [hasLiveActivity]);
 
   useEffect(() => {
-    if (!reviewerAgents.some((agent) => agent.id === reviewerId)) setReviewerId(reviewerAgents[0]?.id ?? "");
-  }, [reviewerAgents, reviewerId]);
+    setActiveTab(defaultDetailTab(workflowView.stage));
+  }, [task.id, workflowView.stage]);
 
-  useEffect(() => {
-    const alternative = recoveryAgents.find((agent) => agent.id !== latestRun?.agentId);
-    if (!recoveryAgents.some((agent) => agent.id === recoveryAgentId && agent.id !== latestRun?.agentId)) setRecoveryAgentId(alternative?.id ?? "");
-  }, [latestRun?.agentId, recoveryAgentId, recoveryAgents]);
+  useEffect(() => { onTabChange?.(activeTab); }, [activeTab, onTabChange]);
 
-  const canStart = Boolean(assignedAgent) && task.status === "ready" && !activeRun;
+  const phase = workflowPhaseSummary(workflowView);
+  const selectTabFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, currentTab: DetailTab) => {
+    const nextTab = detailTabForKey(currentTab, event.key);
+    if (!nextTab) return;
+    event.preventDefault();
+    setActiveTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
+
   return (
     <aside className="board-inspector-panel task-detail-panel" aria-label={`Task details for ${task.title}`}>
       <header className="task-detail-header">
@@ -78,67 +99,257 @@ export function TaskDetailPanel({ task, assignedAgent, recoveryAgents, reviewerA
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close task details"><X size={16} /></button>
         </div>
       </header>
-      <div className="task-detail-content">
-        <TaskSection title="Context">
-          <p className="task-detail-copy">{task.description || "No additional context has been recorded."}</p>
-        </TaskSection>
-        <TaskSection title="Acceptance criteria" icon={<CheckSquare size={14} />} count={task.acceptanceCriteria.length}>
-          {task.acceptanceCriteria.length === 0 ? <p className="task-detail-empty">No acceptance criteria recorded.</p> : <ul className="criteria-list">{task.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}
-        </TaskSection>
-        <TaskSection title="Implementation notes" icon={<Code2 size={14} />}>
-          <p className="task-detail-copy">{task.implementationNotes || "No implementation notes recorded."}</p>
-        </TaskSection>
-        <TaskSection title="Relevant paths / context" icon={<FileCode2 size={14} />} count={task.relevantPaths.length}>
-          {task.relevantPaths.length === 0 ? <p className="task-detail-empty">No relevant paths recorded.</p> : <ul className="token-list">{task.relevantPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>}
-        </TaskSection>
-        <TaskSection title="Architecture context" icon={<BookOpenCheck size={14} />} count={architectureDecisions.length}>
-          {architectureDecisions.length === 0 ? <p className="task-detail-empty">No accepted managed ADRs apply. Repository instructions and architecture docs still apply.</p> : <div className="task-architecture-context">{architectureDecisions.map((item) => <article key={item.id}><header><code>ADR-{String(item.decisionNumber).padStart(3, "0")}</code><strong>{item.title}</strong></header><p>{item.decision}</p>{item.consequences && <small>{item.consequences}</small>}</article>)}</div>}
-          <p className="task-detail-hint">This is the managed decision context injected into implementation and architect-review runs.</p>
-        </TaskSection>
-        <TaskSection title="Dependencies" icon={<GitBranch size={14} />} count={task.dependencyIds.length}>
-          {task.dependencyIds.length === 0 ? <p className="task-detail-empty">No task dependencies recorded.</p> : <><ul className="token-list">{task.dependencyIds.map((dependency) => <li key={dependency}><code>{dependency}</code></li>)}</ul><p className="task-detail-hint">Dependencies must be Done before this task can run.</p></>}
-        </TaskSection>
-        <TaskSection title="Worker capabilities" icon={<Terminal size={14} />} count={task.requiredCapabilities.length}>
-          {task.requiredCapabilities.length === 0 ? <p className="task-detail-empty">Any provider-ready project worker may execute this task.</p> : <><ul className="token-list">{task.requiredCapabilities.map((capability) => <li key={capability}><code>{capability}</code></li>)}</ul><p className="task-detail-hint">The scheduler matches these against tools, labels, OS, and architecture.</p></>}
-        </TaskSection>
-        <TaskSection title="Priority"><p className="task-detail-copy"><span className={`task-priority ${task.priority}`}>{task.priority}</span></p></TaskSection>
-        {task.status === "blocked" && <TaskSection title="Blocked"><p className="task-blocked-reason">{task.blockedReason || "This task is waiting for workflow requirements."}</p></TaskSection>}
-        <TaskSection title="Assigned agent" icon={<Bot size={14} />}>
-          {assignedAgent ? <p className="task-detail-copy"><strong>{assignedAgent.name}</strong><br />{assignedAgent.role}{assignedAgent.model ? ` / ${assignedAgent.model}` : ""}</p> : <p className="task-detail-empty">No agent assigned.</p>}
-        </TaskSection>
-        {(task.status === "in_progress" || task.status === "needs_input" || inputRequests.length > 0) && <InputRequestSection task={task} requests={inputRequests} latestRun={latestRun} activeRun={activeRun} inputAction={inputAction} onRequest={onRequestInput} onAnswer={onAnswerInput} />}
-        {(task.branch || task.worktreePath) && <TaskSection title="Isolation" icon={<GitBranch size={14} />}>
-          {task.branch && <p className="task-detail-copy"><span className="task-detail-label">Branch</span><code>{task.branch}</code></p>}
-          {task.worktreePath ? <><p className="task-detail-copy"><span className="task-detail-label">Worktree</span><code className="task-worktree-path">{task.worktreePath}</code></p><div className="task-worktree-actions"><button className="secondary-button" type="button" disabled={isOpeningWorktree} onClick={onOpenWorktree}><FolderOpen size={14} /> {isOpeningWorktree ? "Opening..." : "Open folder"}</button><button className="secondary-button" type="button" disabled={Boolean(activeRun) || isCleaningWorktree} onClick={onCleanupWorktree}>{isCleaningWorktree ? "Removing..." : "Remove worktree"}</button></div><p className="task-detail-hint">Open the isolated checkout to inspect the agent's files. Removing it retains the task branch for review.</p></> : <p className="task-detail-hint">The task branch is retained; its isolated checkout has been removed.</p>}
-        </TaskSection>}
-        {(task.status === "review" || agentReviews.length > 0) && <TaskSection title="Architect review" icon={<Bot size={14} />} count={agentReviews.length || undefined}>
-          {agentReviews.length > 0 && <ArchitectReviewHistory reviews={agentReviews} agents={reviewerAgents} now={now} cancellingRunId={cancellingRunId} onCancel={onCancelRun} />}
-          {task.status === "review" && (reviewerAgents.length === 0 ? <p className="task-detail-hint">Create a separate Codex agent to run an architect review. The implementation agent cannot review its own task.</p> : <div className="agent-review-controls"><select value={reviewerId} onChange={(event) => setReviewerId(event.target.value)}>{reviewerAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!reviewerId || isAgentReviewStarting || Boolean(activeAgentReview)} onClick={() => onStartAgentReview(reviewerId)}>{isAgentReviewStarting ? "Starting architect..." : activeAgentReview ? "Architect reviewing..." : agentReviews.length > 0 ? "Run another review" : "Run architect review"}</button></div>)}
-          {task.status === "review" && <p className="task-detail-hint">The architect inspects the branch in read-only mode. Its decision is persisted here even after the task moves to Approved or back to In Progress.</p>}
-        </TaskSection>}
-        {task.status === "review" && <TaskSection title="Branch review" icon={<GitBranch size={14} />}>
-          {isReviewLoading ? <p className="task-detail-empty">Loading task branch changes...</p> : reviewError ? <p className="task-run-error">{reviewError}</p> : review && <><p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><div className="review-actions"><button className="primary-button" type="button" disabled={isReviewActionPending || Boolean(activeAgentReview)} onClick={onApproveReview}>Approve for integration</button><button className="secondary-button" type="button" disabled={isReviewActionPending || Boolean(activeAgentReview)} onClick={onRequestChanges}>Request changes</button></div><p className="task-detail-hint">Approval queues a serialized squash merge; it does not mark the task Done.</p><h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}<h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}</>}
-        </TaskSection>}
-        <TaskSection title="Execution" icon={<Terminal size={14} />}>
-          <div className="task-run-actions">
-            <button className="primary-button" type="button" disabled={!canStart || isStartingRun} onClick={onStartRun}><Play size={15} /> {isStartingRun ? "Queuing..." : "Queue with Codex"}</button>
-            {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : activeRun.status === "queued" ? "Remove from queue" : "Cancel"}</button>}
+      <div className="task-detail-body">
+        <section className={`task-phase-summary ${task.status}`} aria-label="Current task phase" aria-live="polite">
+          <div className="task-phase-summary-row">
+            <span className={`task-phase-status ${task.status}`}>{statusLabel(task.status)}</span>
+            <span className="task-phase-stage">{phase.stage}</span>
+            <time dateTime={workflowView.statusChangedAt} title={`Entered this state: ${dateTime(workflowView.statusChangedAt)}`}>In state {relativeAge(workflowView.statusChangedAt, now)}</time>
           </div>
-          {!assignedAgent ? <p className="task-detail-hint">Assign a Codex agent before starting this task.</p> : task.status === "blocked" ? <p className="task-detail-hint">Resolve the blocked requirement before starting this task.</p> : activeRun?.status === "queued" ? <p className="task-detail-hint">Waiting for worker, agent, and downstream WIP capacity.</p> : task.status !== "ready" && !activeRun ? <p className="task-detail-hint">Only Ready tasks can be queued. Successful runs are sent to Review for human approval.</p> : <p className="task-detail-hint">Codex runs in an isolated task worktree. Successful runs move the task to Review.</p>}
-          {latestRun && task.status === "in_progress" && (latestRun.status === "failed" || latestRun.status === "cancelled") && <div className="run-recovery-panel">
-            <div className="run-recovery-heading"><CircleAlert size={15} /><div><strong>Run needs recovery</strong><p>The branch, worktree, output, and timeline remain available.</p></div></div>
-            <div className="run-recovery-actions">
-              <button className="primary-button" type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "resume")}><RotateCcw size={14} /> {runRecoveryAction === "resume" ? "Resuming..." : "Resume worktree"}</button>
-              <button className="secondary-button" type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "restart_clean")}>{runRecoveryAction === "restart_clean" ? "Restarting..." : "Restart clean"}</button>
-            </div>
-            {recoveryAgents.some((agent) => agent.id !== latestRun.agentId) && <div className="run-recovery-reassign"><select value={recoveryAgentId} onChange={(event) => setRecoveryAgentId(event.target.value)}>{recoveryAgents.filter((agent) => agent.id !== latestRun.agentId).map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!recoveryAgentId || Boolean(runRecoveryAction)} onClick={() => onRecoverRun(latestRun.id, "resume", recoveryAgentId)}>{runRecoveryAction?.startsWith("reassign:") ? "Reassigning..." : "Retry with agent"}</button></div>}
-            <div className="run-recovery-secondary"><button type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onResolveRunFailure(latestRun.id, "escalate")}>Escalate as blocked</button><button type="button" disabled={Boolean(runRecoveryAction)} onClick={() => onResolveRunFailure(latestRun.id, "abandon")}>Abandon recovery</button></div>
-          </div>}
-          {latestRun ? <RunSummary run={latestRun} now={now} /> : <p className="task-detail-empty">No runs recorded for this task.</p>}
-        </TaskSection>
+          <div className="task-phase-guidance">
+            <span className={`task-phase-actor ${phase.actorKind}`}><span aria-hidden="true" />{phase.actor}</span>
+            <p><strong>Next</strong>{phase.nextAction}</p>
+          </div>
+        </section>
+        <div className="task-detail-tabs" role="tablist" aria-label="Task detail sections">
+          {DETAIL_TABS.map((tab) => <button
+            key={tab.id}
+            ref={(node) => { tabRefs.current[tab.id] = node; }}
+            id={`${tabGroupId}-${tab.id}-tab`}
+            role="tab"
+            type="button"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`${tabGroupId}-${tab.id}-panel`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(event) => selectTabFromKeyboard(event, tab.id)}
+          >{tab.label}</button>)}
+        </div>
+        <div
+          className="task-detail-content"
+          id={`${tabGroupId}-work-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabGroupId}-work-tab`}
+          hidden={activeTab !== "work"}
+          tabIndex={0}
+        >
+          <WorkTab {...props} />
+        </div>
+        <div
+          className="task-detail-content"
+          id={`${tabGroupId}-activity-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabGroupId}-activity-tab`}
+          hidden={activeTab !== "activity"}
+          tabIndex={0}
+        >
+          <ActivityTab {...props} now={now} />
+        </div>
+        <div
+          className="task-detail-content"
+          id={`${tabGroupId}-review-panel`}
+          role="tabpanel"
+          aria-labelledby={`${tabGroupId}-review-tab`}
+          hidden={activeTab !== "review"}
+          tabIndex={0}
+        >
+          <ReviewLandTab {...props} now={now} />
+        </div>
       </div>
     </aside>
   );
+}
+
+function WorkTab({ task, workflowView, assignedAgent, architectureDecisions, runs, isCleaningWorktree, isOpeningWorktree, onCleanupWorktree, onOpenWorktree }: TaskDetailPanelProps) {
+  const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
+  return <>
+    <TaskSection title="Context"><p className="task-detail-copy">{task.description || "No additional context has been recorded."}</p></TaskSection>
+    <ReadinessSection task={task} workflowView={workflowView} />
+    <TaskSection title="Acceptance criteria" icon={<CheckSquare size={14} />} count={task.acceptanceCriteria.length}>
+      {task.acceptanceCriteria.length === 0 ? <p className="task-detail-empty">No acceptance criteria recorded.</p> : <ul className="criteria-list">{task.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}
+    </TaskSection>
+    <TaskSection title="Implementation notes" icon={<Code2 size={14} />}><p className="task-detail-copy">{task.implementationNotes || "No implementation notes recorded."}</p></TaskSection>
+    <TaskSection title="Relevant paths / context" icon={<FileCode2 size={14} />} count={task.relevantPaths.length}>
+      {task.relevantPaths.length === 0 ? <p className="task-detail-empty">No relevant paths recorded.</p> : <ul className="token-list">{task.relevantPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>}
+    </TaskSection>
+    <ArchitectureContext decisions={architectureDecisions} />
+    <TaskSection title="Dependencies" icon={<GitBranch size={14} />} count={task.dependencyIds.length}>
+      {task.dependencyIds.length === 0 ? <p className="task-detail-empty">No task dependencies recorded.</p> : <><ul className="token-list">{task.dependencyIds.map((dependency) => <li key={dependency}><code>{dependency}</code></li>)}</ul><p className="task-detail-hint">Dependencies must be Done before this task can run.</p></>}
+    </TaskSection>
+    <TaskSection title="Worker capabilities" icon={<Terminal size={14} />} count={task.requiredCapabilities.length}>
+      {task.requiredCapabilities.length === 0 ? <p className="task-detail-empty">Any provider-ready project worker may execute this task.</p> : <><ul className="token-list">{task.requiredCapabilities.map((capability) => <li key={capability}><code>{capability}</code></li>)}</ul><p className="task-detail-hint">The scheduler matches these against tools, labels, OS, and architecture.</p></>}
+    </TaskSection>
+    <TaskSection title="Priority"><p className="task-detail-copy"><span className={`task-priority ${task.priority}`}>{task.priority}</span></p></TaskSection>
+    {task.status === "blocked" && <TaskSection title="Blocked"><p className="task-blocked-reason">{task.blockedReason || "This task is waiting for workflow requirements."}</p></TaskSection>}
+    <TaskSection title="Assigned agent" icon={<Bot size={14} />}>
+      {assignedAgent ? <p className="task-detail-copy"><strong>{assignedAgent.name}</strong><br />{assignedAgent.role}{assignedAgent.model ? ` / ${assignedAgent.model}` : ""}</p> : <p className="task-detail-empty">No agent assigned.</p>}
+    </TaskSection>
+    <IsolationSection task={task} hasActiveRun={Boolean(activeRun)} isCleaning={isCleaningWorktree} isOpening={isOpeningWorktree} onCleanup={onCleanupWorktree} onOpen={onOpenWorktree} />
+  </>;
+}
+
+function ReadinessSection({ task, workflowView }: { task: Task; workflowView: WorkflowTaskView }) {
+  const readiness = workflowView.readiness;
+  if (!readiness) return null;
+  const summary = readiness.reason ?? (readiness.ready ? "All current readiness requirements are satisfied." : "Complete the remaining workflow requirements.");
+  return <TaskSection title="Readiness" icon={<CheckCircle2 size={14} />}>
+    <div className={`task-readiness-summary ${readiness.ready ? "ready" : "waiting"}`}><strong>{readiness.ready ? "Ready for scheduling" : "Waiting"}</strong><span>{summary}</span></div>
+    <ul className="task-readiness-checklist"><li className={task.acceptanceCriteria.length > 0 ? "complete" : "incomplete"}>{task.acceptanceCriteria.length > 0 ? "Acceptance criteria recorded" : "Acceptance criteria required"}</li><li className={readiness.ready ? "complete" : "incomplete"}>Readiness service: {readiness.ready ? "eligible" : "not eligible"}</li></ul>
+  </TaskSection>;
+}
+
+function ArchitectureContext({ decisions }: { decisions: ArchitectureDecision[] }) {
+  return <TaskSection title="Architecture context" icon={<BookOpenCheck size={14} />} count={decisions.length}>
+    {decisions.length === 0 ? <p className="task-detail-empty">No accepted managed ADRs apply. Repository instructions and architecture docs still apply.</p> : <div className="task-architecture-context">{decisions.map((item) => <article key={item.id}><header><code>ADR-{String(item.decisionNumber).padStart(3, "0")}</code><strong>{item.title}</strong></header><p>{item.decision}</p>{item.consequences && <small>{item.consequences}</small>}</article>)}</div>}
+    <p className="task-detail-hint">This is the managed decision context injected into implementation and architect-review runs.</p>
+  </TaskSection>;
+}
+
+function IsolationSection({ task, hasActiveRun, isCleaning, isOpening, onCleanup, onOpen }: { task: Task; hasActiveRun: boolean; isCleaning: boolean; isOpening: boolean; onCleanup: () => void; onOpen: () => void }) {
+  if (!task.branch && !task.worktreePath) return null;
+  return <TaskSection title="Isolation" icon={<GitBranch size={14} />}>
+    {task.branch && <p className="task-detail-copy"><span className="task-detail-label">Branch</span><code>{task.branch}</code></p>}
+    {task.worktreePath ? <><p className="task-detail-copy"><span className="task-detail-label">Worktree</span><code className="task-worktree-path">{task.worktreePath}</code></p><div className="task-worktree-actions"><button className="secondary-button" type="button" disabled={isOpening} onClick={onOpen}><FolderOpen size={14} /> {isOpening ? "Opening..." : "Open folder"}</button><button className="secondary-button" type="button" disabled={hasActiveRun || isCleaning} onClick={onCleanup}>{isCleaning ? "Removing..." : "Remove worktree"}</button></div><p className="task-detail-hint">Open the isolated checkout to inspect the agent's files. Removing it retains the task branch for review.</p></> : <p className="task-detail-hint">The task branch is retained; its isolated checkout has been removed.</p>}
+  </TaskSection>;
+}
+
+function ActivityTab({ task, assignedAgent, recoveryAgents, inputRequests, runs, isStartingRun, runRecoveryAction, inputAction, cancellingRunId, onStartRun, onCancelRun, onRecoverRun, onResolveRunFailure, onRequestInput, onAnswerInput, now }: TaskDetailPanelProps & { now: number }) {
+  const activeRun = runs.find((run) => run.status === "queued" || run.status === "running");
+  const latestRun = activeRun ?? runs[0];
+  const canStart = Boolean(assignedAgent) && task.status === "ready" && !activeRun;
+  const showInput = task.status === "in_progress" || task.status === "needs_input" || inputRequests.length > 0;
+  return <>
+    {showInput && <InputRequestSection task={task} requests={inputRequests} latestRun={latestRun} activeRun={activeRun} inputAction={inputAction} onRequest={onRequestInput} onAnswer={onAnswerInput} />}
+    <TaskSection title="Execution" icon={<Terminal size={14} />}>
+      <div className="task-run-actions">
+        <button className="primary-button" type="button" disabled={!canStart || isStartingRun} onClick={onStartRun}><Play size={15} /> {isStartingRun ? "Queuing..." : "Queue with Codex"}</button>
+        {activeRun && <button className="secondary-button" type="button" disabled={cancellingRunId === activeRun.id} onClick={() => onCancelRun(activeRun.id)}><Square size={14} /> {cancellingRunId === activeRun.id ? "Cancelling..." : activeRun.status === "queued" ? "Remove from queue" : "Cancel"}</button>}
+      </div>
+      <p className="task-detail-hint">{executionHint(task, assignedAgent, activeRun)}</p>
+      {isRecoverableRun(task, latestRun) && <RunRecoveryPanel run={latestRun} agents={recoveryAgents} action={runRecoveryAction} onRecover={onRecoverRun} onResolve={onResolveRunFailure} />}
+      {latestRun ? <RunSummary run={latestRun} now={now} /> : <p className="task-detail-empty">No runs recorded for this task.</p>}
+    </TaskSection>
+  </>;
+}
+
+function executionHint(task: Task, assignedAgent: Agent | undefined, activeRun: TaskRun | undefined): string {
+  if (!assignedAgent) return "Assign a Codex agent before starting this task.";
+  if (task.status === "blocked") return "Resolve the blocked requirement before starting this task.";
+  if (activeRun?.status === "queued") return "Waiting for worker, agent, and downstream WIP capacity.";
+  if (task.status !== "ready" && !activeRun) return "Only Ready tasks can be queued. Successful runs are sent to Review for human approval.";
+  return "Codex runs in an isolated task worktree. Successful runs move the task to Review.";
+}
+
+function isRecoverableRun(task: Task, run: TaskRun | undefined): run is TaskRun {
+  return task.status === "in_progress" && Boolean(run && (run.status === "failed" || run.status === "cancelled"));
+}
+
+function RunRecoveryPanel({ run, agents, action, onRecover, onResolve }: { run: TaskRun; agents: Agent[]; action?: string; onRecover: TaskDetailPanelProps["onRecoverRun"]; onResolve: TaskDetailPanelProps["onResolveRunFailure"] }) {
+  const alternatives = agents.filter((agent) => agent.id !== run.agentId);
+  const [agentId, setAgentId] = useState(alternatives[0]?.id ?? "");
+  useEffect(() => {
+    if (!alternatives.some((agent) => agent.id === agentId)) setAgentId(alternatives[0]?.id ?? "");
+  }, [agentId, alternatives]);
+  return <div className="run-recovery-panel">
+    <div className="run-recovery-heading"><CircleAlert size={15} /><div><strong>Run needs recovery</strong><p>The branch, worktree, output, and timeline remain available.</p></div></div>
+    <div className="run-recovery-actions"><button className="primary-button" type="button" disabled={Boolean(action)} onClick={() => onRecover(run.id, "resume")}><RotateCcw size={14} /> {action === "resume" ? "Resuming..." : "Resume worktree"}</button><button className="secondary-button" type="button" disabled={Boolean(action)} onClick={() => onRecover(run.id, "restart_clean")}>{action === "restart_clean" ? "Restarting..." : "Restart clean"}</button></div>
+    {alternatives.length > 0 && <div className="run-recovery-reassign"><select value={agentId} onChange={(event) => setAgentId(event.target.value)}>{alternatives.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!agentId || Boolean(action)} onClick={() => onRecover(run.id, "resume", agentId)}>{action?.startsWith("reassign:") ? "Reassigning..." : "Retry with agent"}</button></div>}
+    <div className="run-recovery-secondary"><button type="button" disabled={Boolean(action)} onClick={() => onResolve(run.id, "escalate")}>Escalate as blocked</button><button type="button" disabled={Boolean(action)} onClick={() => onResolve(run.id, "abandon")}>Abandon recovery</button></div>
+  </div>;
+}
+
+function ReviewLandTab({ task, reviewerAgents, agentReviews, isAgentReviewStarting, cancellingRunId, review, reviewError, isReviewLoading, isReviewActionPending, integrationAttempts = [], revertAttempts = [], validationAttempts = [], onCancelRun, onApproveReview, onRequestChanges, onStartAgentReview, now }: TaskDetailPanelProps & { now: number }) {
+  const activeReview = agentReviews.find((item) => item.status === "running");
+  const [reviewerId, setReviewerId] = useState(reviewerAgents[0]?.id ?? "");
+  useEffect(() => {
+    if (!reviewerAgents.some((agent) => agent.id === reviewerId)) setReviewerId(reviewerAgents[0]?.id ?? "");
+  }, [reviewerAgents, reviewerId]);
+  return <>
+    <ArchitectReviewSection task={task} agents={reviewerAgents} reviews={agentReviews} activeReview={activeReview} reviewerId={reviewerId} isStarting={isAgentReviewStarting} cancellingRunId={cancellingRunId} now={now} onReviewerChange={setReviewerId} onCancel={onCancelRun} onStart={onStartAgentReview} />
+    {task.status === "review" ? <BranchReview review={review} error={reviewError} isLoading={isReviewLoading} isPending={isReviewActionPending} hasActiveAgentReview={Boolean(activeReview)} onApprove={onApproveReview} onRequestChanges={onRequestChanges} /> : <TaskSection title="Landing status" icon={<GitBranch size={14} />}><p className="task-detail-copy">{landingStatusGuidance(task)}</p></TaskSection>}
+    <DeliveryEvidence task={task} integrations={integrationAttempts} reverts={revertAttempts} validations={validationAttempts} />
+  </>;
+}
+
+function ArchitectReviewSection({ task, agents, reviews, activeReview, reviewerId, isStarting, cancellingRunId, now, onReviewerChange, onCancel, onStart }: { task: Task; agents: Agent[]; reviews: AgentReview[]; activeReview?: AgentReview; reviewerId: string; isStarting: boolean; cancellingRunId?: string; now: number; onReviewerChange: (id: string) => void; onCancel: (runId: string) => void; onStart: (agentId: string) => void }) {
+  if (task.status !== "review" && reviews.length === 0) return null;
+  return <TaskSection title="Architect review" icon={<Bot size={14} />} count={reviews.length || undefined}>
+    {reviews.length > 0 && <ArchitectReviewHistory reviews={reviews} agents={agents} now={now} cancellingRunId={cancellingRunId} onCancel={onCancel} />}
+    {task.status === "review" && (agents.length === 0 ? <p className="task-detail-hint">Create a separate Codex agent to run an architect review. The implementation agent cannot review its own task.</p> : <div className="agent-review-controls"><select value={reviewerId} onChange={(event) => onReviewerChange(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} / {agent.role}</option>)}</select><button className="secondary-button" type="button" disabled={!reviewerId || isStarting || Boolean(activeReview)} onClick={() => onStart(reviewerId)}>{isStarting ? "Starting architect..." : activeReview ? "Architect reviewing..." : reviews.length > 0 ? "Run another review" : "Run architect review"}</button></div>)}
+    {task.status === "review" && <p className="task-detail-hint">The architect inspects the branch in read-only mode. Its decision is persisted here even after the task moves to Approved or back to In Progress.</p>}
+  </TaskSection>;
+}
+
+function BranchReview({ review, error, isLoading, isPending, hasActiveAgentReview, onApprove, onRequestChanges }: { review?: TaskReview; error?: string; isLoading: boolean; isPending: boolean; hasActiveAgentReview: boolean; onApprove: () => void; onRequestChanges: () => void }) {
+  if (isLoading) return <TaskSection title="Branch review" icon={<GitBranch size={14} />}><p className="task-detail-empty">Loading task branch changes...</p></TaskSection>;
+  if (error) return <TaskSection title="Branch review" icon={<GitBranch size={14} />}><p className="task-run-error">{error}</p></TaskSection>;
+  if (!review) return <TaskSection title="Branch review" icon={<GitBranch size={14} />}><p className="task-detail-empty">No branch review is available.</p></TaskSection>;
+  return <TaskSection title="Branch review" icon={<GitBranch size={14} />}>
+    <p className="task-detail-hint">{review.branch} compared with {review.baseBranch}</p><div className="review-actions"><button className="primary-button" type="button" disabled={isPending || hasActiveAgentReview} onClick={onApprove}>Approve for integration</button><button className="secondary-button" type="button" disabled={isPending || hasActiveAgentReview} onClick={onRequestChanges}>Request changes</button></div><p className="task-detail-hint">Approval queues a serialized squash merge; it does not mark the task Done.</p>
+    <h4>Commits <span>{review.commits.length}</span></h4>{review.commits.length === 0 ? <p className="task-detail-empty">No commits on the task branch yet.</p> : <ul className="review-commit-list">{review.commits.map((commit) => <li key={commit.hash}><code>{commit.shortHash}</code><span>{commit.subject}</span></li>)}</ul>}
+    <h4>Diff</h4>{review.diff ? <pre className="review-diff">{review.diff}</pre> : <p className="task-detail-empty">No tracked changes are available yet.</p>}{review.changedFiles.length > 0 && <p className="task-detail-hint">Uncommitted files: {review.changedFiles.map((file) => file.path).join(", ")}</p>}
+  </TaskSection>;
+}
+
+function defaultDetailTab(workflowStage: WorkflowTaskView["stage"]): DetailTab {
+  if (workflowStage === "verify" || workflowStage === "done") return "review";
+  return workflowStage === "build" ? "activity" : "work";
+}
+
+function detailTabForKey(currentTab: DetailTab, key: string): DetailTab | undefined {
+  const currentIndex = DETAIL_TABS.findIndex((tab) => tab.id === currentTab);
+  if (key === "ArrowRight") return DETAIL_TABS[(currentIndex + 1) % DETAIL_TABS.length].id;
+  if (key === "ArrowLeft") return DETAIL_TABS[(currentIndex - 1 + DETAIL_TABS.length) % DETAIL_TABS.length].id;
+  if (key === "Home") return DETAIL_TABS[0].id;
+  if (key === "End") return DETAIL_TABS[DETAIL_TABS.length - 1].id;
+  return undefined;
+}
+
+function workflowPhaseSummary(view: WorkflowTaskView) {
+  const stage = { queue: "Queue", build: "Build", verify: "Verify & Land", done: "Done" }[view.stage];
+  const actor = view.currentActor?.label ?? "Unassigned";
+  const actorKind = view.currentActor?.kind ?? "system";
+  const nextAction = view.nextAction.reason ? `${view.nextAction.label}: ${view.nextAction.reason}` : view.nextAction.label;
+  return { stage, actor, actorKind, nextAction };
+}
+
+function DeliveryEvidence({ task, integrations, reverts, validations }: { task: Task; integrations: IntegrationAttempt[]; reverts: RevertAttempt[]; validations: ValidationAttempt[] }) {
+  const taskIntegrations = integrations.filter((attempt) => attempt.taskId === task.id);
+  const taskReverts = reverts.filter((attempt) => attempt.originalTaskId === task.id);
+  const taskValidations = validations.filter((attempt) => attempt.taskId === task.id);
+  const evidenceCount = taskIntegrations.length + taskReverts.length + taskValidations.length;
+  return <TaskSection title="Delivery evidence" icon={<CheckCircle2 size={14} />} count={evidenceCount}>
+    {evidenceCount === 0 ? <p className="task-detail-empty">No validation, integration, cleanup, or revert attempts recorded for this task.</p> : <div className="delivery-evidence-list">
+      {taskValidations.map((attempt) => <article key={attempt.id}><header><strong>{attempt.stage} validation</strong><span className={`run-status ${attempt.status}`}>{attempt.status}</span></header><small>{dateTime(attempt.completedAt ?? attempt.startedAt)}</small>{attempt.error && <p>{attempt.error}</p>}</article>)}
+      {taskIntegrations.map((attempt) => <article key={attempt.id}><header><strong>{attempt.sourceBranch} → {attempt.targetBranch}</strong><span className={`run-status ${attempt.status}`}>{attempt.status}</span></header><small>{dateTime(attempt.completedAt ?? attempt.startedAt ?? attempt.createdAt)}</small>{attempt.mergeCommit && <code>{attempt.mergeCommit}</code>}{attempt.status === "merged" && <p className={attempt.error ? "evidence-error" : "evidence-success"}>{attempt.error ? `Cleanup needs recovery: ${attempt.error}` : "Integration and cleanup completed."}</p>}{attempt.status !== "merged" && attempt.error && <p className="evidence-error">{attempt.error}</p>}</article>)}
+      {taskReverts.map((attempt) => <article key={attempt.id}><header><strong>Revert</strong><span className={`run-status ${attempt.status}`}>{attempt.status.replace("_", " ")}</span></header><small>{dateTime(attempt.completedAt ?? attempt.startedAt)}</small>{attempt.revertCommit && <code>{attempt.revertCommit}</code>}{attempt.error && <p className="evidence-error">{attempt.error}</p>}</article>)}
+    </div>}
+  </TaskSection>;
+}
+
+function landingStatusGuidance(task: Task) {
+  switch (task.status) {
+    case "approved": return "Approved and waiting in the serialized integration queue.";
+    case "integrating": return "Updating and validating the task against the latest integration branch.";
+    case "done": return "Accepted changes are integrated and the integration branch is healthy.";
+    case "blocked": return task.blockedReason || "Landing is blocked. Resolve the recorded conflict or validation failure before retrying.";
+    default: return "Review and integration evidence will appear after implementation validation succeeds.";
+  }
+}
+
+function statusLabel(status: Task["status"]) {
+  return status.replaceAll("_", " ");
+}
+
+function relativeAge(value: string, now: number) {
+  const elapsed = Math.max(0, now - timestamp(value));
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function InputRequestSection({ task, requests, latestRun, activeRun, inputAction, onRequest, onAnswer }: { task: Task; requests: TaskInputRequest[]; latestRun?: TaskRun; activeRun?: TaskRun; inputAction?: "request" | "answer"; onRequest: (question: string, runId?: string) => void; onAnswer: (requestId: string, answer: string) => void }) {
@@ -280,18 +491,22 @@ function eventLabel(kind: string) {
   return labels[kind] ?? kind.replaceAll(".", " · ");
 }
 
+const COMMAND_ACTIVITY_RULES = [
+  { pattern: /\b(git status|git diff|git log|git show|git branch)\b/, label: "repository inspection" },
+  { pattern: /\b(rg|find|fd|ls|dir|cat|type|get-content|select-string)\b/, label: "file inspection" },
+  { pattern: /\bgit (add|commit|restore|checkout|rebase|merge)\b/, label: "Git update" },
+  { pattern: /\b(npm|pnpm|yarn|bun)\b/, label: "JavaScript task" },
+  { pattern: /\bcargo\b/, label: "Rust task" },
+  { pattern: /\b(pytest|python)\b/, label: "Python task" },
+  { pattern: /\b(gradle|mvn|java)\b/, label: "JVM task" },
+  { pattern: /\b(write|set-content|out-file|copy-item|move-item|mkdir|new-item)\b/, label: "file update" },
+] as const;
+
 function commandActivity(command: string, kind: string) {
-  const normalized = command.toLowerCase();
   const action = kind.startsWith("validation") ? "Checking" : kind === "command.started" ? "Running" : "Finished";
-  if (/\b(git status|git diff|git log|git show|git branch)\b/.test(normalized)) return `${action} repository inspection`;
-  if (/\b(rg|find|fd|ls|dir|cat|type|get-content|select-string)\b/.test(normalized)) return `${action} file inspection`;
-  if (/\bgit (add|commit|restore|checkout|rebase|merge)\b/.test(normalized)) return `${action} Git update`;
-  if (/\b(npm|pnpm|yarn|bun)\b/.test(normalized)) return `${action} JavaScript task`;
-  if (/\bcargo\b/.test(normalized)) return `${action} Rust task`;
-  if (/\b(pytest|python)\b/.test(normalized)) return `${action} Python task`;
-  if (/\b(gradle|mvn|java)\b/.test(normalized)) return `${action} JVM task`;
-  if (/\b(write|set-content|out-file|copy-item|move-item|mkdir|new-item)\b/.test(normalized)) return `${action} file update`;
-  return `${action} command`;
+  const normalized = command.toLowerCase();
+  const rule = COMMAND_ACTIVITY_RULES.find(({ pattern }) => pattern.test(normalized));
+  return `${action} ${rule?.label ?? "command"}`;
 }
 
 function timestamp(value: string) { return Date.parse(value.endsWith("Z") ? value : `${value}Z`); }

@@ -18,11 +18,11 @@ use orchestr_db::{
     NewTaskInputRequest, NewValidationCommand, NewValidationEvent, PlanningMaterializationIds,
     PlanningPlan, PlanningProposal, PlanningProposalStatus, Project, ProjectAutonomySnapshot,
     ProjectAutonomyUpdate, ProjectBlocker, ProjectCostControl, ProjectCostControlUpdate,
-    ProjectDeletion, ProjectHealth, ProjectMetrics, ProjectProgress, RemoteWorker, RevertAttempt,
-    RevertStatus, Run, RunEvent, RunOutput, RunStatus, RunUsageUpdate, SchedulerDecision, Task,
-    TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate, ValidationAttempt, ValidationCommand,
-    ValidationStage, ValidationStatus, WorkerManagement, WorkerManagementUpdate,
-    WorkerProviderStatus, WorkerToolCapability, Workspace,
+    ProjectDeletion, ProjectHealth, ProjectMetrics, ProjectProgress, ProjectWorkflowSnapshot,
+    RemoteWorker, RevertAttempt, RevertStatus, Run, RunEvent, RunOutput, RunStatus, RunUsageUpdate,
+    SchedulerDecision, Task, TaskInputRequest, TaskPriority, TaskStatus, TaskUpdate,
+    ValidationAttempt, ValidationCommand, ValidationStage, ValidationStatus, WorkerManagement,
+    WorkerManagementUpdate, WorkerProviderStatus, WorkerToolCapability, Workspace,
 };
 use orchestr_git::{GitService, IntegrationPreparation, IntegrationResult, RepositoryDetails};
 use orchestr_provider::{
@@ -209,6 +209,142 @@ struct WorkerRunEvent {
     raw_text: Option<String>,
     command: Option<String>,
     exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowChangedEvent {
+    project_id: String,
+    reason: String,
+    task_id: Option<String>,
+}
+
+fn emit_workflow_changed(app: &AppHandle, project_id: &str, reason: &str, task_id: Option<&str>) {
+    let _ = app.emit(
+        "workflow://changed",
+        WorkflowChangedEvent {
+            project_id: project_id.to_owned(),
+            reason: reason.to_owned(),
+            task_id: task_id.map(str::to_owned),
+        },
+    );
+}
+
+fn emit_task_workflow_changed(
+    app: &AppHandle,
+    database: &Arc<Mutex<Database>>,
+    task_id: &str,
+    reason: &str,
+) {
+    let project_id = database
+        .lock()
+        .ok()
+        .and_then(|database| database.get_task(task_id).ok().flatten())
+        .map(|task| task.project_id);
+    if let Some(project_id) = project_id {
+        emit_workflow_changed(app, &project_id, reason, Some(task_id));
+    }
+}
+
+fn emit_all_workflows_changed(app: &AppHandle, database: &Arc<Mutex<Database>>, reason: &str) {
+    let project_ids = database
+        .lock()
+        .ok()
+        .and_then(|database| database.list_projects().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|project| project.id)
+        .collect::<Vec<_>>();
+    for project_id in project_ids {
+        emit_workflow_changed(app, &project_id, reason, None);
+    }
+}
+
+struct WorkflowChangedGuard {
+    app: AppHandle,
+    project_id: String,
+    reason: &'static str,
+}
+
+impl WorkflowChangedGuard {
+    fn new(app: AppHandle, project_id: String, reason: &'static str) -> Self {
+        Self {
+            app,
+            project_id,
+            reason,
+        }
+    }
+}
+
+impl Drop for WorkflowChangedGuard {
+    fn drop(&mut self) {
+        emit_workflow_changed(&self.app, &self.project_id, self.reason, None);
+    }
+}
+
+struct WorkflowProjectChangeBatch {
+    app: AppHandle,
+    reason: &'static str,
+    project_ids: HashSet<String>,
+}
+
+impl WorkflowProjectChangeBatch {
+    fn new(app: AppHandle, reason: &'static str) -> Self {
+        Self {
+            app,
+            reason,
+            project_ids: HashSet::new(),
+        }
+    }
+
+    fn record(&mut self, project_id: &str) {
+        self.project_ids.insert(project_id.to_owned());
+    }
+}
+
+impl Drop for WorkflowProjectChangeBatch {
+    fn drop(&mut self) {
+        for project_id in &self.project_ids {
+            emit_workflow_changed(&self.app, project_id, self.reason, None);
+        }
+    }
+}
+
+fn emit_task_response_changed(
+    app: &AppHandle,
+    result: &Result<TaskResponse, String>,
+    reason: &str,
+) {
+    if let Ok(task) = result {
+        emit_workflow_changed(app, &task.project_id, reason, Some(&task.id));
+    }
+}
+
+fn emit_answer_response_changed(
+    app: &AppHandle,
+    result: &Result<AnswerTaskInputResponse, String>,
+    reason: &str,
+) {
+    if let Ok(response) = result {
+        emit_workflow_changed(
+            app,
+            &response.task.project_id,
+            reason,
+            Some(&response.task.id),
+        );
+    }
+}
+
+fn emit_unit_workflow_changed(
+    app: &AppHandle,
+    result: &Result<(), String>,
+    project_id: &str,
+    reason: &str,
+    task_id: Option<&str>,
+) {
+    if result.is_ok() {
+        emit_workflow_changed(app, project_id, reason, task_id);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1505,11 +1641,12 @@ fn update_worker_management(
     let management = save_worker_management(&state, input)?;
     if !management.maintenance {
         let _ = dispatch_queued_task_runs(
-            app,
+            app.clone(),
             Arc::clone(&state.database),
             Arc::clone(&state.local_worker_runs),
         );
     }
+    emit_all_workflows_changed(&app, &state.database, "worker.updated");
     Ok(management.into())
 }
 
@@ -1590,11 +1727,14 @@ fn list_remote_workers(state: State<'_, AppState>) -> Result<Vec<RemoteWorkerRes
 #[tauri::command]
 fn register_remote_worker(
     input: RegisterRemoteWorkerInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RemoteWorkerResponse, String> {
     let (client, ca_certificate_pem) = remote_registration_client(&input)?;
     let handshake = authenticated_remote_worker(&client)?;
-    persist_remote_worker(&state, input, ca_certificate_pem, handshake)
+    let result = persist_remote_worker(&state, input, ca_certificate_pem, handshake);
+    emit_all_workflows_changed(&app, &state.database, "worker.registered");
+    result
 }
 
 fn remote_registration_client(
@@ -1624,10 +1764,13 @@ fn authenticated_remote_worker(
 #[tauri::command]
 fn refresh_remote_worker(
     worker_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RemoteWorkerResponse, String> {
-    required_remote_worker(&state, &worker_id)
-        .and_then(|worker| refresh_remote_worker_record(&state, &worker))
+    let result = required_remote_worker(&state, &worker_id)
+        .and_then(|worker| refresh_remote_worker_record(&state, &worker));
+    emit_all_workflows_changed(&app, &state.database, "worker.refreshed");
+    result
 }
 
 fn refresh_remote_worker_record(
@@ -1664,13 +1807,21 @@ fn refresh_remote_handshake(
 }
 
 #[tauri::command]
-fn delete_remote_worker(worker_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut database = state
-        .database
-        .lock()
-        .map_err(|_| "The local worker registry is unavailable.".to_owned())?;
-    ensure_remote_worker_removable(&database, &worker_id)?;
-    remove_remote_worker_record(&mut database, &worker_id)
+fn delete_remote_worker(
+    worker_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let result = {
+        let mut database = state
+            .database
+            .lock()
+            .map_err(|_| "The local worker registry is unavailable.".to_owned())?;
+        ensure_remote_worker_removable(&database, &worker_id)?;
+        remove_remote_worker_record(&mut database, &worker_id)
+    };
+    emit_all_workflows_changed(&app, &state.database, "worker.deleted");
+    result
 }
 
 fn ensure_remote_worker_removable(database: &Database, worker_id: &str) -> Result<(), String> {
@@ -1994,15 +2145,37 @@ fn cancel_local_worker_run(run_id: String, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-fn cancel_queued_task_run(run_id: String, state: State<'_, AppState>) -> Result<(), String> {
+fn cancel_queued_task_run(
+    run_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let task_id = queued_task_run_task_id(&state, &run_id)?;
+    cancel_queued_task_run_record(&state, &run_id)?;
+    emit_task_workflow_changed(&app, &state.database, &task_id, "run.cancelled");
+    Ok(())
+}
+
+fn queued_task_run_task_id(state: &AppState, run_id: &str) -> Result<String, String> {
     state
         .database
         .lock()
         .map_err(|_| "The local run store is unavailable.".to_owned())?
-        .cancel_queued_run(&run_id)
+        .get_run(run_id)
+        .map_err(|error| format!("Unable to load the queued task: {error}"))?
+        .map(|run| run.task_id)
+        .ok_or_else(|| "The queued task no longer exists.".to_owned())
+}
+
+fn cancel_queued_task_run_record(state: &AppState, run_id: &str) -> Result<(), String> {
+    state
+        .database
+        .lock()
+        .map_err(|_| "The local run store is unavailable.".to_owned())?
+        .cancel_queued_run(run_id)
         .map_err(|error| format!("Unable to cancel the queued task: {error}"))?
         .then_some(())
-        .ok_or_else(|| "The task run is no longer queued.".into())
+        .ok_or_else(|| "The task run is no longer queued.".to_owned())
 }
 
 #[tauri::command]
@@ -2024,7 +2197,14 @@ fn recover_task_run(
 ) -> Result<StartedTaskRunResponse, String> {
     let prepared = prepare_run_recovery(&input, &state)?;
     let queued = queue_prepared_run_recovery(&input, &state, prepared)?;
-    dispatch_and_reload_recovery(app, &state, queued)
+    let response = dispatch_and_reload_recovery(app.clone(), &state, queued)?;
+    emit_workflow_changed(
+        &app,
+        &response.task.project_id,
+        "run.recovery_queued",
+        Some(&response.task.id),
+    );
+    Ok(response)
 }
 
 struct PreparedRunRecovery {
@@ -2152,7 +2332,7 @@ fn dispatch_and_reload_recovery(
     queued: (String, Run, Task),
 ) -> Result<StartedTaskRunResponse, String> {
     dispatch_queued_task_runs(
-        app,
+        app.clone(),
         Arc::clone(&state.database),
         Arc::clone(&state.local_worker_runs),
     )?;
@@ -2260,9 +2440,10 @@ fn reset_failed_task_branch(task: &Task, workspace_path: &str) -> Result<(), Str
 #[tauri::command]
 fn resolve_failed_run(
     input: ResolveFailedRunInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskResponse, String> {
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local run store is unavailable.".to_owned())?
@@ -2276,7 +2457,9 @@ fn resolve_failed_run(
             "Only failed or cancelled In Progress runs can be abandoned or escalated.".to_owned()
         })?
         .map(Into::into)
-        .ok_or_else(|| "The failed run no longer exists.".into())
+        .ok_or_else(|| "The failed run no longer exists.".to_owned());
+    emit_task_response_changed(&app, &result, "run.failure_resolved");
+    result
 }
 
 fn load_flow_state(database: &Database, project_id: &str) -> Result<FlowStateResponse, String> {
@@ -2338,6 +2521,7 @@ fn update_flow_limits(
     state: State<'_, AppState>,
 ) -> Result<FlowStateResponse, String> {
     save_flow_limit_update(&state.database, &input)?;
+    emit_workflow_changed(&app, &input.project_id, "flow.limits_updated", None);
     let _ = dispatch_queued_task_runs(
         app,
         Arc::clone(&state.database),
@@ -2726,12 +2910,13 @@ fn start_prepared_planning_run(
         prepared.request,
     )?;
     monitor_planning_worker(
-        app,
+        app.clone(),
         Arc::clone(&state.database),
         Arc::clone(&state.local_worker_runs),
         proposal_id,
         run,
     );
+    emit_workflow_changed(&app, &persisted.project_id, "planning.started", None);
     Ok(persisted.into())
 }
 
@@ -2797,6 +2982,14 @@ fn monitor_planning_worker(
             .and_then(|mut runs| runs.remove(&proposal_id))
             .is_some_and(|run| run.cancel_requested);
         finish_planning_worker(&database, &proposal_id, result, cancelled);
+        let project_id = database
+            .lock()
+            .ok()
+            .and_then(|database| database.get_planning_proposal(&proposal_id).ok().flatten())
+            .map(|proposal| proposal.project_id);
+        if let Some(project_id) = project_id {
+            emit_workflow_changed(&app, &project_id, "planning.completed", None);
+        }
         let _ = app.emit("planning://event", proposal_id);
     });
 }
@@ -2892,11 +3085,14 @@ fn finish_successful_planning_worker(database: &mut Database, proposal_id: &str)
 #[tauri::command]
 fn approve_planning_proposal(
     proposal_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PlanningProposalResponse, String> {
     let proposal = load_planning_proposal_for_approval(&state.database, &proposal_id)?;
     let materialization = planning_materialization(&proposal)?;
-    persist_planning_approval(&state.database, &proposal_id, materialization)
+    let proposal = persist_planning_approval(&state.database, &proposal_id, materialization)?;
+    emit_workflow_changed(&app, &proposal.project_id, "planning.approved", None);
+    Ok(proposal)
 }
 
 fn load_planning_proposal_for_approval(
@@ -2951,16 +3147,19 @@ fn persist_planning_approval(
 #[tauri::command]
 fn reject_planning_proposal(
     proposal_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PlanningProposalResponse, String> {
-    state
+    let proposal: PlanningProposalResponse = state
         .database
         .lock()
         .map_err(|_| "The local planning store is unavailable.".to_owned())?
         .reject_planning_proposal(&proposal_id)
         .map_err(|error| format!("Unable to reject the planning proposal: {error}"))?
         .map(Into::into)
-        .ok_or_else(|| "Only a pending planning proposal can be rejected.".into())
+        .ok_or_else(|| "Only a pending planning proposal can be rejected.".to_owned())?;
+    emit_workflow_changed(&app, &proposal.project_id, "planning.rejected", None);
+    Ok(proposal)
 }
 
 #[tauri::command]
@@ -3111,6 +3310,7 @@ fn start_agent_review(
     let database = Arc::clone(&state.database);
     let event_review_id = review_id.clone();
     let task_id = task.id.clone();
+    emit_workflow_changed(&app, &task.project_id, "review.started", Some(&task.id));
     thread::spawn(move || {
         for output in run.output {
             if let Ok(mut database) = database.lock() {
@@ -3196,6 +3396,7 @@ fn start_agent_review(
             ),
         }
         let _ = app.emit("agent-review://event", event_review_id);
+        emit_task_workflow_changed(&app, &database, &task_id, "review.completed");
         let _ = dispatch_queued_task_runs(app, database, active_runs);
     });
     Ok(persisted_review.into())
@@ -3264,7 +3465,8 @@ fn approve_task_review(
         .approve_task_review(&task_id, &Uuid::new_v4().to_string())
         .map_err(|_| "Only Review tasks with an isolated branch can be approved.".to_owned())?
         .map(Into::into)
-        .ok_or_else(|| "The task no longer exists.".into());
+        .ok_or_else(|| "The task no longer exists.".to_owned());
+    emit_task_response_changed(&app, &result, "review.approved");
     let _ = dispatch_queued_task_runs(
         app,
         Arc::clone(&state.database),
@@ -3276,16 +3478,19 @@ fn approve_task_review(
 #[tauri::command]
 fn request_task_changes(
     task_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskResponse, String> {
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
         .request_task_changes(&task_id)
         .map_err(|_| "Only tasks in Review can be returned for changes.".to_owned())?
         .map(Into::into)
-        .ok_or_else(|| "The task no longer exists.".into())
+        .ok_or_else(|| "The task no longer exists.".to_owned());
+    emit_task_response_changed(&app, &result, "review.changes_requested");
+    result
 }
 
 #[tauri::command]
@@ -3305,26 +3510,37 @@ fn list_integration_attempts(
 #[tauri::command]
 fn retry_integration_attempt(
     attempt_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskResponse, String> {
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
         .retry_integration(&attempt_id, &Uuid::new_v4().to_string())
         .map_err(|_| "Only failed or conflicted integrations can be retried.".to_owned())?
         .map(Into::into)
-        .ok_or_else(|| "The integration attempt no longer exists.".into())
+        .ok_or_else(|| "The integration attempt no longer exists.".to_owned());
+    emit_task_response_changed(&app, &result, "integration.retried");
+    result
 }
 
 #[tauri::command]
 fn retry_integration_cleanup(
     attempt_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<IntegrationAttemptResponse, String> {
     let attempt = integration_attempt(&state, &attempt_id)?;
     let (task, workspace_path) = retry_cleanup_context(&state, &attempt)?;
-    execute_cleanup_retry(&state, &attempt, &task, &workspace_path)
+    let response = execute_cleanup_retry(&state, &attempt, &task, &workspace_path)?;
+    emit_workflow_changed(
+        &app,
+        &task.project_id,
+        "integration.cleanup_retried",
+        Some(&task.id),
+    );
+    Ok(response)
 }
 
 fn retry_cleanup_context(
@@ -4057,6 +4273,7 @@ fn run_validation(
             .record_project_validation(project_id, &attempt_id, status, failure.as_deref(), false)
             .map_err(|error| format!("Unable to update project health: {error}"))?;
     }
+    emit_workflow_changed(app, project_id, "validation.finished", task_id);
     let _ = app.emit(
         "validation://event",
         ValidationRunEvent {
@@ -4119,6 +4336,8 @@ fn integrate_next_task(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<IntegrationExecutionResponse, String> {
+    let _workflow_changed =
+        WorkflowChangedGuard::new(app.clone(), project_id.clone(), "integration.updated");
     let allowed_task_ids = allowed_task_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let health = state
         .database
@@ -4569,7 +4788,7 @@ fn start_task_run(
         })
         .map_err(|error| format!("Unable to queue the task run: {error}"))?;
     dispatch_queued_task_runs(
-        app,
+        app.clone(),
         Arc::clone(&state.database),
         Arc::clone(&state.local_worker_runs),
     )?;
@@ -4577,7 +4796,7 @@ fn start_task_run(
         .database
         .lock()
         .map_err(|_| "The local run store is unavailable.".to_owned())?;
-    Ok(StartedTaskRunResponse {
+    let response = StartedTaskRunResponse {
         run: database
             .get_run(&run_id)
             .map_err(|error| format!("Unable to reload the queued run: {error}"))?
@@ -4588,7 +4807,15 @@ fn start_task_run(
             .map_err(|error| format!("Unable to reload the queued task: {error}"))?
             .unwrap_or(queued_task)
             .into(),
-    })
+    };
+    drop(database);
+    emit_workflow_changed(
+        &app,
+        &response.task.project_id,
+        "run.queued",
+        Some(&response.task.id),
+    );
+    Ok(response)
 }
 
 #[derive(Debug, Clone)]
@@ -4696,6 +4923,92 @@ fn scheduler_workers(
         });
     }
     Ok(workers)
+}
+
+fn live_workflow_scheduler_reasons(
+    database: &Database,
+    project_id: &str,
+    local_profile: orchestr_worker::WorkerProfile,
+    local_providers: Vec<WorkerProviderStatus>,
+) -> Result<HashMap<String, String>, String> {
+    let queued_task_ids = database
+        .list_queued_runs(project_id)
+        .map_err(|error| format!("Unable to load queued workflow activity: {error}"))?
+        .into_iter()
+        .map(|run| run.task_id)
+        .collect::<HashSet<_>>();
+    let tasks = database
+        .list_tasks(project_id)
+        .map_err(|error| format!("Unable to load workflow readiness: {error}"))?;
+    let workers = scheduler_workers(database, project_id, local_profile, local_providers)?;
+    let flow = database
+        .flow_state(project_id, LOCAL_WORKER_ID)
+        .map_err(|error| format!("Unable to load workflow capacity: {error}"))?;
+    let project_slots = (flow.limits.in_progress_limit - flow.in_progress - flow.queued).max(0);
+    let mut reasons = HashMap::new();
+    for task in tasks.into_iter().filter(|task| {
+        task.status == TaskStatus::Ready && !queued_task_ids.contains(task.id.as_str())
+    }) {
+        if let Some(reason) = live_ready_task_reason(database, &workers, &task, project_slots)? {
+            reasons.insert(task.id, reason);
+        }
+    }
+    Ok(reasons)
+}
+
+fn live_ready_task_reason(
+    database: &Database,
+    workers: &[SchedulerWorker],
+    task: &Task,
+    project_slots: i64,
+) -> Result<Option<String>, String> {
+    let Some(agent_id) = task.assigned_agent_id.as_deref() else {
+        return Ok(Some(
+            "Assign an agent before this Ready task can be scheduled.".into(),
+        ));
+    };
+    let Some(agent) = database
+        .get_agent(agent_id)
+        .map_err(|error| format!("Unable to load workflow agent readiness: {error}"))?
+    else {
+        return Ok(Some("The assigned agent no longer exists.".into()));
+    };
+    if let Some(reason) = task_execution_eligibility_reason(workers, task, &agent) {
+        return Ok(Some(reason));
+    }
+    if project_slots == 0 {
+        return Ok(Some(
+            "Project In Progress capacity is reserved or exhausted.".into(),
+        ));
+    }
+    let active = database
+        .active_run_count_for_agent(agent_id)
+        .map_err(|error| format!("Unable to load workflow agent capacity: {error}"))?;
+    if active >= agent.max_concurrent_tasks {
+        return Ok(Some(
+            "The assigned agent is at its concurrency limit.".into(),
+        ));
+    }
+    let available = workers.iter().any(|worker| {
+        worker.available_slots > 0
+            && worker.blocked_reason.is_none()
+            && worker_can_execute(worker, task, &agent.provider)
+    });
+    Ok((!available).then(|| scheduling_worker_reason(workers, task, &agent.provider)))
+}
+
+fn task_execution_eligibility_reason(
+    workers: &[SchedulerWorker],
+    task: &Task,
+    agent: &Agent,
+) -> Option<String> {
+    if agent.provider != "codex" {
+        return Some("This agent provider does not support task execution yet.".into());
+    }
+    (!workers
+        .iter()
+        .any(|worker| worker_can_execute(worker, task, &agent.provider)))
+    .then(|| worker_mismatch_reason(workers, task, &agent.provider))
 }
 
 fn worker_capabilities<'a>(
@@ -4825,6 +5138,7 @@ fn schedule_ready_tasks(
         Arc::clone(&state.database),
         Arc::clone(&state.local_worker_runs),
     )?;
+    emit_workflow_changed(&app, &project_id, "scheduler.updated", None);
     let _ = app.emit("scheduler://changed", project_id);
     Ok(schedule_project_response(scheduled, skipped))
 }
@@ -5049,10 +5363,12 @@ fn dispatch_queued_task_runs(
     database: Arc<Mutex<Database>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveLocalRun>>>,
 ) -> Result<(), String> {
+    let mut workflow_changes = WorkflowProjectChangeBatch::new(app.clone(), "run.claimed");
     loop {
         let Some((run, task)) = claim_queued_task_run(&database)? else {
             return Ok(());
         };
+        workflow_changes.record(&task.project_id);
         dispatch_claimed_task_run(
             run,
             task,
@@ -5208,8 +5524,15 @@ fn record_task_launch_failure(
     run_id: String,
     error: String,
 ) {
-    if let Ok(mut store) = database.lock() {
-        let _ = store.finish_run(&run_id, RunStatus::Failed, None, Some(&error));
+    let task = database.lock().ok().and_then(|mut store| {
+        store
+            .finish_run(&run_id, RunStatus::Failed, None, Some(&error))
+            .ok()
+            .flatten()
+            .map(|(_, task)| task)
+    });
+    if let Some(task) = task {
+        emit_workflow_changed(app, &task.project_id, "run.launch_failed", Some(&task.id));
     }
     let _ = app.emit(
         "worker://run-event",
@@ -5726,6 +6049,7 @@ fn monitor_task_worker(
         &prepared.worktree_path,
     );
     finish_task_worker(&database, &run_id, &prepared, &outcome);
+    emit_workflow_changed(&app, &project_id, "run.finished", Some(&task_id));
     emit_task_worker_outcome(&app, &run_id, outcome);
     let _ = dispatch_queued_task_runs(app, database, active_runs);
 }
@@ -6158,10 +6482,11 @@ fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentResponse>, String>
 #[tauri::command]
 fn create_agent(
     input: CreateAgentInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentResponse, String> {
     let agent = validate_agent_input(input)?;
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local agent store is unavailable.".to_owned())?
@@ -6176,12 +6501,15 @@ fn create_agent(
             max_concurrent_tasks: agent.max_concurrent_tasks,
         })
         .map(Into::into)
-        .map_err(|error| format!("Unable to create agent: {error}"))
+        .map_err(|error| format!("Unable to create agent: {error}"));
+    emit_all_workflows_changed(&app, &state.database, "agent.created");
+    result
 }
 
 #[tauri::command]
 fn update_agent(
     input: UpdateAgentInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentResponse, String> {
     let id = input.id.clone();
@@ -6194,7 +6522,7 @@ fn update_agent(
         skills: input.skills,
         max_concurrent_tasks: input.max_concurrent_tasks,
     })?;
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local agent store is unavailable.".to_owned())?
@@ -6212,19 +6540,23 @@ fn update_agent(
         )
         .map_err(|error| format!("Unable to update agent: {error}"))?
         .map(Into::into)
-        .ok_or_else(|| "The agent no longer exists.".into())
+        .ok_or_else(|| "The agent no longer exists.".to_owned());
+    emit_all_workflows_changed(&app, &state.database, "agent.updated");
+    result
 }
 
 #[tauri::command]
-fn delete_agent(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    state
+fn delete_agent(id: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local agent store is unavailable.".to_owned())?
         .delete_agent(&id)
         .map_err(|error| format!("Unable to delete agent: {error}"))?
         .then_some(())
-        .ok_or_else(|| "The agent no longer exists.".into())
+        .ok_or_else(|| "The agent no longer exists.".to_owned());
+    emit_all_workflows_changed(&app, &state.database, "agent.deleted");
+    result
 }
 
 #[tauri::command]
@@ -6236,6 +6568,24 @@ fn list_tasks(project_id: String, state: State<'_, AppState>) -> Result<Vec<Task
         .list_tasks(&project_id)
         .map(|tasks| tasks.into_iter().map(Into::into).collect())
         .map_err(|error| format!("Unable to load tasks: {error}"))
+}
+
+#[tauri::command]
+fn get_project_workflow_snapshot(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectWorkflowSnapshot, String> {
+    let local_profile = LocalWorker::profile();
+    let local_providers = local_provider_statuses();
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "The local workflow store is unavailable.".to_owned())?;
+    let scheduler_reasons =
+        live_workflow_scheduler_reasons(&database, &project_id, local_profile, local_providers)?;
+    database
+        .get_project_workflow_snapshot_with_scheduler_reasons(&project_id, scheduler_reasons)
+        .map_err(|error| format!("Unable to load the project workflow: {error}"))
 }
 
 #[tauri::command]
@@ -6255,13 +6605,15 @@ fn list_task_input_requests(
 #[tauri::command]
 fn request_task_input(
     input: RequestTaskInputInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskInputRequestResponse, String> {
     if input.question.trim().is_empty() {
         return Err("Describe the decision or information the task needs.".into());
     }
     pause_active_run_for_input(&state, input.run_id.as_deref())?;
-    state
+    let task_id = input.task_id.clone();
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local task store is unavailable.".to_owned())?
@@ -6274,7 +6626,9 @@ fn request_task_input(
         .map(Into::into)
         .map_err(|_| {
             "Only an In Progress task without another open question can request input.".to_owned()
-        })
+        });
+    emit_task_workflow_changed(&app, &state.database, &task_id, "input.requested");
+    result
 }
 
 fn pause_active_run_for_input(state: &AppState, run_id: Option<&str>) -> Result<(), String> {
@@ -6298,12 +6652,13 @@ fn pause_active_run_for_input(state: &AppState, run_id: Option<&str>) -> Result<
 #[tauri::command]
 fn answer_task_input(
     input: AnswerTaskInputInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AnswerTaskInputResponse, String> {
     if input.answer.trim().is_empty() {
         return Err("Provide an answer before resuming the task.".into());
     }
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local task store is unavailable.".to_owned())?
@@ -6315,7 +6670,9 @@ fn answer_task_input(
             request: request.into(),
             task: task.into(),
         })
-        .ok_or_else(|| "The input request is no longer open.".to_owned())
+        .ok_or_else(|| "The input request is no longer open.".to_owned());
+    emit_answer_response_changed(&app, &result, "input.answered");
+    result
 }
 
 #[tauri::command]
@@ -6335,10 +6692,11 @@ fn list_project_blockers(
 #[tauri::command]
 fn create_project_blocker(
     input: CreateProjectBlockerInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectBlockerResponse, String> {
     let description = input.description.filter(|value| !value.trim().is_empty());
-    state
+    let blocker: ProjectBlockerResponse = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
@@ -6354,7 +6712,14 @@ fn create_project_blocker(
         .map_err(|_| {
             "A blocker needs a title and either all tasks or at least one valid affected task."
                 .to_owned()
-        })
+        })?;
+    emit_workflow_changed(
+        &app,
+        &blocker.project_id,
+        "blocker.created",
+        blocker.affected_task_ids.first().map(String::as_str),
+    );
+    Ok(blocker)
 }
 
 #[tauri::command]
@@ -6364,7 +6729,8 @@ fn resolve_project_blocker(
     state: State<'_, AppState>,
 ) -> Result<ProjectBlockerResponse, String> {
     let blocker = resolve_project_blocker_record(&state, &blocker_id)?;
-    resume_project_after_blocker(&state, app)?;
+    resume_project_after_blocker(&state, app.clone())?;
+    emit_workflow_changed(&app, &blocker.project_id, "blocker.resolved", None);
     Ok(blocker.into())
 }
 
@@ -6471,10 +6837,11 @@ fn list_collaboration_entries(
 #[tauri::command]
 fn create_collaboration_entry(
     input: CreateCollaborationEntryInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CollaborationEntryResponse, String> {
     let kind = parse_collaboration_kind(&input.kind)?;
-    state
+    let entry: CollaborationEntryResponse = state
         .database
         .lock()
         .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
@@ -6491,22 +6858,39 @@ fn create_collaboration_entry(
             referenced_task_ids: input.referenced_task_ids,
         })
         .map(Into::into)
-        .map_err(|error| format!("Unable to record collaboration activity: {error}"))
+        .map_err(|error| format!("Unable to record collaboration activity: {error}"))?;
+    emit_workflow_changed(
+        &app,
+        &entry.project_id,
+        "collaboration.created",
+        entry.task_id.as_deref(),
+    );
+    Ok(entry)
 }
 
 #[tauri::command]
 fn resolve_collaboration_entry(
     entry_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CollaborationEntryResponse, String> {
-    state
+    let entry: CollaborationEntryResponse = state
         .database
         .lock()
         .map_err(|_| "The local collaboration store is unavailable.".to_owned())?
         .resolve_collaboration_entry(&entry_id)
         .map_err(|error| format!("Unable to resolve collaboration activity: {error}"))?
         .map(Into::into)
-        .ok_or_else(|| "The collaboration entry is already resolved or no longer exists.".into())
+        .ok_or_else(|| {
+            "The collaboration entry is already resolved or no longer exists.".to_owned()
+        })?;
+    emit_workflow_changed(
+        &app,
+        &entry.project_id,
+        "collaboration.resolved",
+        entry.task_id.as_deref(),
+    );
+    Ok(entry)
 }
 
 fn parse_collaboration_kind(value: &str) -> Result<CollaborationKind, String> {
@@ -6670,9 +7054,10 @@ fn get_project_metrics(
 #[tauri::command]
 fn update_project_cost_control(
     input: UpdateProjectCostControlInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectCostControl, String> {
-    state
+    let cost_control = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
@@ -6684,7 +7069,9 @@ fn update_project_cost_control(
                 block_new_runs: input.block_new_runs,
             },
         )
-        .map_err(|error| format!("Unable to update project cost controls: {error}"))
+        .map_err(|error| format!("Unable to update project cost controls: {error}"))?;
+    emit_workflow_changed(&app, &cost_control.project_id, "cost_control.updated", None);
+    Ok(cost_control)
 }
 
 #[tauri::command]
@@ -6735,6 +7122,7 @@ fn get_project_autonomy(
 #[tauri::command]
 fn update_project_autonomy(
     input: UpdateProjectAutonomyInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectAutonomySnapshot, String> {
     state
@@ -6758,7 +7146,9 @@ fn update_project_autonomy(
         .map_err(|_| {
             "Save an approved plan, a Codex reviewer when auto-review is enabled, and valid cycle limits before enabling autonomy.".to_owned()
         })?;
-    load_project_autonomy(&state, &input.project_id)
+    let snapshot = load_project_autonomy(&state, &input.project_id)?;
+    emit_workflow_changed(&app, &input.project_id, "autonomy.updated", None);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -6775,12 +7165,14 @@ fn start_project_autonomy(
         .map_err(|_| {
             "Autonomy requires a saved, approved plan and valid safety configuration.".to_owned()
         })?;
+    emit_workflow_changed(&app, &project_id, "autonomy.started", None);
     run_project_autonomy_cycle_internal(&project_id, "user", app, &state)
 }
 
 #[tauri::command]
 fn pause_project_autonomy(
     project_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectAutonomySnapshot, String> {
     state
@@ -6792,12 +7184,15 @@ fn pause_project_autonomy(
             "Paused by the user. No new autonomous actions will start.",
         )
         .map_err(|error| format!("Unable to pause project autonomy: {error}"))?;
-    load_project_autonomy(&state, &project_id)
+    let snapshot = load_project_autonomy(&state, &project_id)?;
+    emit_workflow_changed(&app, &project_id, "autonomy.paused", None);
+    Ok(snapshot)
 }
 
 #[tauri::command]
 fn stop_project_autonomy(
     project_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ProjectAutonomySnapshot, String> {
     state
@@ -6806,7 +7201,9 @@ fn stop_project_autonomy(
         .map_err(|_| "The autonomy store is unavailable.".to_owned())?
         .stop_project_autonomy(&project_id)
         .map_err(|error| format!("Unable to stop project autonomy: {error}"))?;
-    load_project_autonomy(&state, &project_id)
+    let snapshot = load_project_autonomy(&state, &project_id)?;
+    emit_workflow_changed(&app, &project_id, "autonomy.stopped", None);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -6882,6 +7279,7 @@ fn complete_autonomy_cycle_and_load(
 ) -> Result<ProjectAutonomySnapshot, String> {
     finish_project_autonomy_cycle(project_id, cycle_id, result, state)?;
     let _ = app.emit("autonomy://changed", project_id.to_owned());
+    emit_workflow_changed(&app, project_id, "autonomy.cycle_completed", None);
     load_project_autonomy(state, project_id)
 }
 
@@ -7564,12 +7962,20 @@ fn persist_autonomy_cycle(
 }
 
 #[tauri::command]
-fn create_task(input: CreateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
-    let mut database = state
-        .database
-        .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?;
-    create_task_record(&mut database, input)
+fn create_task(
+    input: CreateTaskInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    let task = {
+        let mut database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        create_task_record(&mut database, input)?
+    };
+    emit_workflow_changed(&app, &task.project_id, "task.created", Some(&task.id));
+    Ok(task)
 }
 
 fn create_task_record(
@@ -7606,12 +8012,20 @@ fn create_task_record(
 }
 
 #[tauri::command]
-fn update_task(input: UpdateTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
-    let mut database = state
-        .database
-        .lock()
-        .map_err(|_| "The local project store is unavailable.".to_owned())?;
-    update_task_record(&mut database, input)
+fn update_task(
+    input: UpdateTaskInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
+    let task = {
+        let mut database = state
+            .database
+            .lock()
+            .map_err(|_| "The local project store is unavailable.".to_owned())?;
+        update_task_record(&mut database, input)?
+    };
+    emit_workflow_changed(&app, &task.project_id, "task.updated", Some(&task.id));
+    Ok(task)
 }
 
 fn update_task_record(
@@ -7662,7 +8076,7 @@ fn update_task_record(
 }
 
 #[tauri::command]
-fn delete_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+fn delete_task(id: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let mut database = state
         .database
         .lock()
@@ -7677,23 +8091,32 @@ fn delete_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let deleted = database
         .delete_task(&id)
         .map_err(|error| format!("Unable to delete task: {error}"))?;
-    deleted
+    let result = deleted
         .then_some(())
-        .ok_or_else(|| "The task no longer exists.".into())
+        .ok_or_else(|| "The task no longer exists.".to_owned());
+    drop(database);
+    emit_unit_workflow_changed(&app, &result, &task.project_id, "task.deleted", Some(&id));
+    result
 }
 
 #[tauri::command]
-fn move_task(input: MoveTaskInput, state: State<'_, AppState>) -> Result<TaskResponse, String> {
+fn move_task(
+    input: MoveTaskInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TaskResponse, String> {
     let status =
         TaskStatus::parse(&input.status).ok_or_else(|| "Unknown task status.".to_owned())?;
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| "The local project store is unavailable.".to_owned())?
         .move_task(&input.id, status, input.position)
         .map_err(|error| format!("Unable to move task: {error}"))?
         .map(Into::into)
-        .ok_or_else(|| "The task no longer exists.".into())
+        .ok_or_else(|| "The task no longer exists.".to_owned());
+    emit_task_response_changed(&app, &result, "task.moved");
+    result
 }
 
 fn save_project(
@@ -8455,6 +8878,7 @@ fn main() {
             update_agent,
             delete_agent,
             list_tasks,
+            get_project_workflow_snapshot,
             list_task_input_requests,
             request_task_input,
             answer_task_input,
@@ -8498,10 +8922,11 @@ fn main() {
 mod tests {
     use super::{
         build_task_prompt, choose_compatible_worker, create_task_record, format_run_log,
-        load_flow_state, normalize_workspace_path, parse_agent_review_decision,
-        parse_planning_plan, schedule_ready_tasks_in_database, task_collaboration_markers,
-        task_input_question, update_task_record, worker_can_execute, worker_capabilities,
-        worker_mismatch_reason, CreateTaskInput, SchedulerWorker, UpdateTaskInput,
+        live_workflow_scheduler_reasons, load_flow_state, normalize_workspace_path,
+        parse_agent_review_decision, parse_planning_plan, schedule_ready_tasks_in_database,
+        task_collaboration_markers, task_execution_eligibility_reason, task_input_question,
+        update_task_record, worker_can_execute, worker_capabilities, worker_mismatch_reason,
+        CreateTaskInput, SchedulerWorker, UpdateTaskInput,
     };
     use orchestr_db::{
         Agent, AgentReviewDecision, ArchitectureDecision, ArchitectureDecisionStatus, Database,
@@ -8617,6 +9042,44 @@ mod tests {
         assert!(worker_can_execute(&worker, &task, "codex"));
         assert!(!worker.capabilities.contains("docker"));
         assert!(!worker_can_execute(&worker, &task, "claude"));
+    }
+
+    #[test]
+    fn workflow_readiness_rejects_unsupported_providers_and_incompatible_workers() {
+        let task = scheduler_test_task(vec!["java", "gradle"]);
+        let worker = SchedulerWorker {
+            id: "worker-java".into(),
+            name: "Java builder".into(),
+            capabilities: HashSet::from(["java".into()]),
+            ready_providers: HashSet::from(["codex".into()]),
+            available_slots: 1,
+            online: true,
+            maintenance: false,
+            blocked_reason: None,
+        };
+        let unsupported = scheduler_test_agent("claude");
+        assert_eq!(
+            task_execution_eligibility_reason(&[worker.clone()], &task, &unsupported).as_deref(),
+            Some("This agent provider does not support task execution yet.")
+        );
+
+        let codex = scheduler_test_agent("codex");
+        assert!(task_execution_eligibility_reason(&[worker], &task, &codex)
+            .is_some_and(|reason| reason.contains("gradle")));
+        let unauthenticated = SchedulerWorker {
+            id: "worker-unauthenticated".into(),
+            name: "Unauthenticated worker".into(),
+            capabilities: HashSet::from(["java".into(), "gradle".into()]),
+            ready_providers: HashSet::new(),
+            available_slots: 1,
+            online: true,
+            maintenance: false,
+            blocked_reason: None,
+        };
+        assert!(
+            task_execution_eligibility_reason(&[unauthenticated], &task, &codex)
+                .is_some_and(|reason| reason.contains("provider ready"))
+        );
     }
 
     #[test]
@@ -8757,30 +9220,81 @@ mod tests {
                 },
             )
             .expect("flow limits save");
+        database
+            .create_agent(NewAgent {
+                id: "unsupported-agent".into(),
+                name: "Unsupported".into(),
+                provider: "claude".into(),
+                role: "Engineer".into(),
+                model: None,
+                system_prompt: None,
+                skills: Vec::new(),
+                max_concurrent_tasks: 1,
+            })
+            .expect("unsupported agent saves");
+        database
+            .create_task(NewTask {
+                id: "unsupported".into(),
+                project_id: "project-1".into(),
+                title: "Unsupported provider".into(),
+                description: None,
+                acceptance_criteria: vec!["Done".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: vec!["java".into()],
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("unsupported-agent".into()),
+                priority: TaskPriority::Normal,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("unsupported task saves");
+        database
+            .move_task("unsupported", TaskStatus::Ready, usize::MAX)
+            .expect("unsupported task becomes Ready");
+        let local_profile = WorkerProfile {
+            id: "local".into(),
+            name: "Local".into(),
+            os: "windows".into(),
+            architecture: "x64".into(),
+            status: "online".into(),
+            tools: vec![ToolCapability {
+                name: "java".into(),
+                installed: true,
+                version: Some("21".into()),
+            }],
+        };
+        let local_providers = vec![WorkerProviderStatus {
+            id: "codex".into(),
+            name: "Codex".into(),
+            installed: true,
+            version: Some("1".into()),
+            authentication: "authenticated".into(),
+            readiness: "ready".into(),
+            detail: "Ready".into(),
+        }];
+        let live_reasons = live_workflow_scheduler_reasons(
+            &database,
+            "project-1",
+            local_profile.clone(),
+            local_providers.clone(),
+        )
+        .expect("live workflow readiness loads");
+        assert!(live_reasons
+            .get("missing")
+            .is_some_and(|reason| reason.contains("gradle")));
+        assert_eq!(
+            live_reasons.get("unsupported").map(String::as_str),
+            Some("This agent provider does not support task execution yet.")
+        );
+        assert!(database
+            .delete_task("unsupported")
+            .expect("unsupported readiness probe deletes"));
         let (scheduled, skipped) = schedule_ready_tasks_in_database(
             &mut database,
             "project-1",
-            WorkerProfile {
-                id: "local".into(),
-                name: "Local".into(),
-                os: "windows".into(),
-                architecture: "x64".into(),
-                status: "online".into(),
-                tools: vec![ToolCapability {
-                    name: "java".into(),
-                    installed: true,
-                    version: Some("21".into()),
-                }],
-            },
-            vec![WorkerProviderStatus {
-                id: "codex".into(),
-                name: "Codex".into(),
-                installed: true,
-                version: Some("1".into()),
-                authentication: "authenticated".into(),
-                readiness: "ready".into(),
-                detail: "Ready".into(),
-            }],
+            local_profile,
+            local_providers,
             None,
             None,
         )
@@ -8826,6 +9340,21 @@ mod tests {
             epic_id: None,
             status: TaskStatus::Ready,
             position: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn scheduler_test_agent(provider: &str) -> Agent {
+        Agent {
+            id: "agent-1".into(),
+            name: "Test agent".into(),
+            provider: provider.into(),
+            role: "Engineer".into(),
+            model: None,
+            system_prompt: None,
+            skills: Vec::new(),
+            max_concurrent_tasks: 1,
             created_at: String::new(),
             updated_at: String::new(),
         }

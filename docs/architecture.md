@@ -476,6 +476,37 @@ worker/run when applicable, outcome, reason, and timestamp. The Flow inspector
 shows this history beside the durable execution queue, making capability and
 backpressure decisions observable instead of implicit.
 
+## M29 workflow cockpit and transition intelligence
+
+The application layer exposes a `ProjectWorkflowSnapshot` read model through
+`get_project_workflow_snapshot`. It projects the existing nine canonical task
+statuses into Queue, Build, Verify & Land, and Done, recovers a Blocked task's
+last meaningful stage from status history, and derives Attention items, the
+current actor, the next action or waiting reason, and Agent Activity. Existing
+task, run, review, integration, input, blocker, health, planning,
+collaboration, autonomy, agent, and worker records remain authoritative; M29
+adds no schema migration.
+
+Before returning the snapshot, the Tauri application layer reuses the live
+scheduler's provider-authentication, worker-state, capability, and capacity
+checks. Ready cards and Agent Activity therefore explain current execution
+constraints even when no scheduler decision has been persisted yet.
+
+Relevant domain mutations emit `workflow://changed` with the project ID,
+reason, and optional task ID. The React service coalesces those notifications
+before refreshing the compact snapshot. Repository details, logs, diffs,
+validation output, and histories are excluded from the read model and loaded
+only when the applicable phase-aware inspector tab or Project Control opens.
+The default four-stage cockpit and the diagnostic Full Lifecycle view therefore
+render the same domain state rather than maintaining separate workflow truth.
+
+Generic task movement is deliberately narrow: it permits ordering within
+Backlog or Ready and the explicit Backlog/Ready planning transition only.
+Starting execution, requesting or resolving input, review decisions, and
+integration continue through their dedicated application commands. This keeps
+drag-and-drop from bypassing readiness, review, serialized integration, or the
+healthy-branch requirement for Done.
+
 ## Planned extraction points
 
 The Rust workspace introduces crates only when a milestone needs their

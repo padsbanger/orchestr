@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
     coverage: {
       provider: "v8",
       reporter: ["json", "text"],
@@ -15,8 +15,14 @@ export default defineConfig({
         "src/services/integrations.ts",
         "src/services/interruptions.ts",
         "src/services/runs.ts",
+        "src/services/workflow.ts",
+        "src/components/TaskDetailPanel/TaskDetailPanel.tsx",
+        "src/components/WorkflowCockpit/WorkflowCockpit.tsx",
+        "src/pages/BoardPage/BoardPage.tsx",
+        "src/pages/BoardPage/BoardPageModel.ts",
+        "src/pages/BoardPage/BoardPageView.tsx",
       ],
-      exclude: ["src/**/*.test.ts"],
+      exclude: ["src/**/*.test.{ts,tsx}"],
     },
   },
 });

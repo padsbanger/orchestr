@@ -42,6 +42,7 @@ Completed milestones:
 - M25 — Agent Collaboration
 - M27 — Metrics + Cost Control
 - M28 — Autonomous Project Mode
+- M29 — Workflow Cockpit + Transition Intelligence
 
 Roadmap status:
 
@@ -1285,7 +1286,7 @@ baseline only after an intentional, reviewed decision to accept existing debt.
 
 Current roadmap status:
 
-**M28 is complete. The next milestone has not been defined.**
+**M29 is complete. The next milestone has not been defined.**
 
 Do not prioritize:
 

@@ -1242,6 +1242,54 @@ A user can approve a plan and allow Orchestr to make sustained project progress 
 
 ---
 
+# M29 — Workflow Cockpit + Transition Intelligence — Complete
+
+### Goal
+
+Make delivery flow readable at a glance without weakening the canonical task,
+review, integration, or project-health state machines.
+
+### Target experience
+
+```text
+ATTENTION
+   |
+QUEUE -> BUILD -> VERIFY & LAND -> DONE
+            |
+      AGENT ACTIVITY
+```
+
+- four visible delivery stages projected from the nine canonical task statuses
+- actionable human Attention tray instead of exception columns
+- current actor, waiting reason, next action, and time-in-state on every card
+- active and waiting agent rail with idle workers collapsed
+- phase-aware Work, Activity, and Review & Land task inspector
+- Full Lifecycle diagnostic fallback with explicit, domain-owned transitions
+
+### Safety requirements
+
+- Done still requires accepted changes on a healthy configured integration branch
+- roles and agents do not become lifecycle statuses
+- UI drag-and-drop cannot skip execution, review, or integration commands
+- each task has exactly one primary representation in the delivery stages
+- detailed logs, diffs, and validation evidence remain available on demand
+
+### Definition of done
+
+A user can understand where work is, who or what owns it, why it is waiting, and
+the next valid action without horizontally tracing nine workflow columns.
+
+### Delivered
+
+- snapshot-first Queue, Build, Verify & Land, and Done projection over all nine canonical statuses
+- severity-ordered human Attention and live Agent Activity with authoritative waiting reasons
+- phase-aware Work, Activity, and Review & Land inspector with lazy detail loading
+- restricted planning-only drag transitions plus the retained Full Lifecycle diagnostic view
+- responsive four-column, 2×2, and tabbed layouts without page-level horizontal scrolling
+- workflow invalidation events, live scheduler readiness, and regression coverage across UI and Rust
+
+---
+
 # Updated Release Grouping
 
 ## v0.1 — Local Kanban + Git — Complete
@@ -1316,12 +1364,18 @@ This release turns Orchestr from an agent runner into a system that manages proj
 
 ---
 
+## v1.1 — Workflow Clarity — Complete
+
+- M29 Workflow Cockpit + Transition Intelligence — Complete
+
+---
+
 # Next Implementation Sequence
 
-The currently defined roadmap is complete:
+All currently defined milestones are complete. The next implementation step is:
 
 ```text
-1. Define and approve the next milestone before implementation
+1. Define and approve the next milestone
 ```
 
 Do not let later agents casually contradict accepted technical decisions.

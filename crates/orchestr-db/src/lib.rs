@@ -66,6 +66,1141 @@ pub struct Database {
     connection: Connection,
 }
 
+type WorkflowStatusMetadata = HashMap<String, (String, Option<TaskStatus>)>;
+
+fn workflow_status_metadata(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<WorkflowStatusMetadata> {
+    let mut statement = connection.prepare(
+        "SELECT tasks.id,
+                COALESCE(
+                    (SELECT history.changed_at FROM task_status_history AS history
+                     WHERE history.task_id = tasks.id
+                     ORDER BY history.changed_at DESC, history.id DESC LIMIT 1),
+                    tasks.created_at
+                ),
+                (SELECT history.to_status FROM task_status_history AS history
+                 WHERE history.task_id = tasks.id
+                   AND history.to_status NOT IN ('blocked', 'needs_input')
+                 ORDER BY history.changed_at DESC, history.id DESC LIMIT 1)
+         FROM tasks WHERE tasks.project_id = ?1",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            let previous = row
+                .get::<_, Option<String>>(2)?
+                .map(TaskStatus::from_database)
+                .transpose()?;
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, previous),
+            ))
+        })?
+        .collect();
+    records
+}
+
+fn workflow_latest_runs(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowRunSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT runs.id, runs.task_id, runs.agent_id, runs.worker_id, runs.status,
+                COALESCE(runs.queued_at, runs.started_at), runs.error,
+                COALESCE(runs.completed_at, runs.queued_at, runs.started_at),
+                EXISTS(SELECT 1 FROM run_recoveries WHERE source_run_id = runs.id)
+         FROM runs
+         JOIN tasks ON tasks.id = runs.task_id
+         WHERE tasks.project_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM runs AS newer
+               WHERE newer.task_id = runs.task_id
+                 AND newer.rowid > runs.rowid
+           )",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok(WorkflowRunSummary {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                worker_id: row.get(3)?,
+                status: RunStatus::from_database(row.get(4)?)?,
+                started_at: row.get(5)?,
+                error: row.get(6)?,
+                action_at: row.get(7)?,
+                recovery_recorded: row.get(8)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+fn workflow_latest_reviews(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowReviewSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT reviews.id, reviews.task_id, reviews.agent_id, reviews.status,
+                reviews.decision, reviews.error, reviews.started_at
+         FROM agent_reviews AS reviews
+         JOIN tasks ON tasks.id = reviews.task_id
+         WHERE tasks.project_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM agent_reviews AS newer
+               WHERE newer.task_id = reviews.task_id
+                 AND newer.rowid > reviews.rowid
+           )",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok(WorkflowReviewSummary {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                status: AgentReviewStatus::from_database(row.get(3)?)?,
+                decision: row
+                    .get::<_, Option<String>>(4)?
+                    .map(AgentReviewDecision::from_database)
+                    .transpose()?,
+                error: row.get(5)?,
+                started_at: row.get(6)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+fn workflow_latest_integrations(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowIntegrationSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT attempts.id, attempts.task_id, attempts.status, attempts.error,
+                COALESCE(attempts.completed_at, attempts.started_at, attempts.created_at)
+         FROM integration_attempts AS attempts
+         JOIN tasks ON tasks.id = attempts.task_id
+         WHERE tasks.project_id = ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM integration_attempts AS newer
+               WHERE newer.task_id = attempts.task_id
+                 AND newer.rowid > attempts.rowid
+           )",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok(WorkflowIntegrationSummary {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                status: IntegrationStatus::from_database(row.get(2)?)?,
+                error: row.get(3)?,
+                action_at: row.get(4)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+fn workflow_open_inputs(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowInputSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT requests.id, requests.task_id, requests.question, requests.requested_at
+         FROM task_input_requests AS requests
+         JOIN tasks ON tasks.id = requests.task_id
+         WHERE tasks.project_id = ?1 AND requests.status = 'open'
+         ORDER BY requests.requested_at ASC, requests.id ASC",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok(WorkflowInputSummary {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                question: row.get(2)?,
+                requested_at: row.get(3)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+fn workflow_planning_summaries(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowPlanningSummary>> {
+    let mut statement = connection.prepare(
+        "SELECT id, agent_id, goal, status, created_at, updated_at
+         FROM planning_proposals WHERE project_id = ?1
+           AND status IN ('generating', 'proposed', 'failed')
+         ORDER BY created_at DESC, id DESC",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok(WorkflowPlanningSummary {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                goal: row.get(2)?,
+                status: PlanningProposalStatus::from_database(row.get(3)?)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+fn workflow_scheduler_reasons(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<HashMap<String, String>> {
+    let mut statement = connection.prepare(
+        "SELECT decisions.task_id, decisions.reason
+         FROM scheduler_decisions AS decisions
+         WHERE decisions.project_id = ?1 AND decisions.task_id IS NOT NULL
+           AND decisions.outcome IN ('blocked', 'skipped')
+           AND NOT EXISTS (
+               SELECT 1 FROM scheduler_decisions AS newer
+               WHERE newer.project_id = decisions.project_id
+                 AND newer.task_id = decisions.task_id
+                 AND newer.rowid > decisions.rowid
+           )",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect();
+    records
+}
+
+fn workflow_worker_states(connection: &Connection) -> Result<HashMap<String, String>> {
+    let mut states = HashMap::from([("local".to_owned(), "online".to_owned())]);
+    let local_maintenance = connection
+        .query_row(
+            "SELECT maintenance FROM worker_management WHERE worker_id = 'local'",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if local_maintenance {
+        states.insert("local".into(), "maintenance".into());
+    }
+    let mut statement = connection.prepare("SELECT id, status FROM remote_workers")?;
+    for state in statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (worker_id, status) = state?;
+        states.insert(worker_id, status);
+    }
+    Ok(states)
+}
+
+fn workflow_stage(status: TaskStatus, previous: Option<TaskStatus>) -> &'static str {
+    let effective = if status == TaskStatus::Blocked {
+        previous.unwrap_or(TaskStatus::Backlog)
+    } else {
+        status
+    };
+    match effective {
+        TaskStatus::Backlog | TaskStatus::Ready => "queue",
+        TaskStatus::InProgress | TaskStatus::NeedsInput => "build",
+        TaskStatus::Review | TaskStatus::Approved | TaskStatus::Integrating => "verify",
+        TaskStatus::Done => "done",
+        TaskStatus::Blocked => "queue",
+    }
+}
+
+fn workflow_readiness(
+    task: &Task,
+    tasks: &HashMap<String, Task>,
+    blockers: &[ProjectBlocker],
+) -> WorkflowReadiness {
+    let blocker = blockers.iter().find(|blocker| {
+        blocker.status == "active"
+            && (blocker.affects_all_tasks
+                || blocker.affected_task_ids.iter().any(|id| id == &task.id))
+    });
+    let reason = if let Some(blocker) = blocker {
+        Some(format!("Project blocker: {}", blocker.title))
+    } else if task.acceptance_criteria.is_empty() {
+        Some("Add at least one acceptance criterion before starting work.".into())
+    } else {
+        let waiting = task
+            .dependency_ids
+            .iter()
+            .filter_map(|dependency_id| match tasks.get(dependency_id) {
+                Some(dependency) if dependency.status == TaskStatus::Done => None,
+                Some(dependency) => Some(dependency.title.clone()),
+                None => Some(format!("missing dependency {dependency_id}")),
+            })
+            .take(3)
+            .collect::<Vec<_>>();
+        (!waiting.is_empty()).then(|| {
+            format!(
+                "Waiting for completed dependencies: {}.",
+                waiting.join(", ")
+            )
+        })
+    };
+    WorkflowReadiness {
+        ready: reason.is_none(),
+        reason,
+    }
+}
+
+fn workflow_actor(kind: &str, id: Option<&str>, label: impl Into<String>) -> WorkflowActor {
+    WorkflowActor {
+        kind: kind.into(),
+        id: id.map(str::to_owned),
+        label: label.into(),
+    }
+}
+
+fn workflow_action(kind: &str, label: impl Into<String>, reason: Option<String>) -> WorkflowAction {
+    WorkflowAction {
+        kind: kind.into(),
+        label: label.into(),
+        reason,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_task_view(
+    task: &Task,
+    status_metadata: Option<&(String, Option<TaskStatus>)>,
+    tasks: &HashMap<String, Task>,
+    blockers: &[ProjectBlocker],
+    agents: &HashMap<String, Agent>,
+    latest_run: Option<&WorkflowRunSummary>,
+    latest_review: Option<&WorkflowReviewSummary>,
+    latest_integration: Option<&WorkflowIntegrationSummary>,
+    open_input: Option<&WorkflowInputSummary>,
+    scheduler_reason: Option<&String>,
+) -> WorkflowTaskView {
+    let previous_status = status_metadata.and_then(|(_, status)| *status);
+    let stage = workflow_stage(task.status, previous_status).to_owned();
+    let mut readiness = (stage == "queue").then(|| workflow_readiness(task, tasks, blockers));
+    let scheduler_reason = scheduler_reason.filter(|_| {
+        task.status == TaskStatus::Ready && readiness.as_ref().is_some_and(|summary| summary.ready)
+    });
+    if let (Some(readiness), Some(reason)) = (&mut readiness, scheduler_reason) {
+        readiness.ready = false;
+        readiness.reason = Some(reason.clone());
+    }
+    let (current_actor, next_action) = workflow_task_guidance(
+        task,
+        readiness.as_ref(),
+        agents,
+        latest_run,
+        latest_review,
+        latest_integration,
+        open_input,
+        scheduler_reason,
+    );
+    WorkflowTaskView {
+        id: task.id.clone(),
+        project_id: task.project_id.clone(),
+        title: task.title.clone(),
+        priority: task.priority.as_str().into(),
+        status: task.status.as_str().into(),
+        stage,
+        position: task.position,
+        status_changed_at: status_metadata
+            .map(|(changed_at, _)| changed_at.clone())
+            .unwrap_or_else(|| task.updated_at.clone()),
+        current_actor,
+        next_action,
+        readiness,
+        assigned_agent_id: task.assigned_agent_id.clone(),
+        blocked_reason: task.blocked_reason.clone(),
+        milestone_id: task.milestone_id.clone(),
+        epic_id: task.epic_id.clone(),
+        created_at: task.created_at.clone(),
+        updated_at: task.updated_at.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_task_guidance(
+    task: &Task,
+    readiness: Option<&WorkflowReadiness>,
+    agents: &HashMap<String, Agent>,
+    latest_run: Option<&WorkflowRunSummary>,
+    latest_review: Option<&WorkflowReviewSummary>,
+    latest_integration: Option<&WorkflowIntegrationSummary>,
+    open_input: Option<&WorkflowInputSummary>,
+    scheduler_reason: Option<&String>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    match task.status {
+        TaskStatus::Backlog => backlog_guidance(readiness),
+        TaskStatus::Ready => ready_guidance(task, agents, latest_run, scheduler_reason),
+        TaskStatus::InProgress => in_progress_guidance(agents, latest_run),
+        TaskStatus::NeedsInput => (
+            Some(workflow_actor("human", None, "You")),
+            workflow_action(
+                "answer_input",
+                "Answer requested input",
+                open_input.map(|request| request.question.clone()),
+            ),
+        ),
+        TaskStatus::Review => review_guidance(agents, latest_review),
+        TaskStatus::Approved => (
+            Some(workflow_actor("system", None, "Integration queue")),
+            workflow_action(
+                "await_integration",
+                "Waiting to integrate",
+                latest_integration
+                    .and_then(|attempt| attempt.error.clone())
+                    .or_else(|| Some("Queued behind earlier approved work.".into())),
+            ),
+        ),
+        TaskStatus::Integrating => (
+            Some(workflow_actor("system", None, "Integration service")),
+            workflow_action("monitor_integration", "Monitor integration", None),
+        ),
+        TaskStatus::Blocked => blocked_guidance(task, readiness, latest_integration),
+        TaskStatus::Done => (
+            Some(workflow_actor("system", None, "Integrated")),
+            workflow_action("view_result", "View integrated result", None),
+        ),
+    }
+}
+
+fn backlog_guidance(
+    readiness: Option<&WorkflowReadiness>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    let ready = readiness.is_none_or(|summary| summary.ready);
+    let reason = readiness.and_then(|summary| summary.reason.clone());
+    (
+        Some(workflow_actor("human", None, "You")),
+        if ready {
+            workflow_action("mark_ready", "Mark ready", None)
+        } else {
+            workflow_action("complete_specification", "Complete specification", reason)
+        },
+    )
+}
+
+fn ready_guidance(
+    task: &Task,
+    agents: &HashMap<String, Agent>,
+    latest_run: Option<&WorkflowRunSummary>,
+    scheduler_reason: Option<&String>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    if let Some(run) = latest_run.filter(|run| run.status == RunStatus::Queued) {
+        return (
+            Some(agent_actor(agents, &run.agent_id)),
+            workflow_action(
+                "await_worker",
+                "Waiting for worker",
+                scheduler_reason
+                    .cloned()
+                    .or_else(|| Some("Queued for execution capacity.".into())),
+            ),
+        );
+    }
+    if let Some(reason) = scheduler_reason {
+        return (
+            Some(workflow_actor("human", None, "You")),
+            workflow_action(
+                "resolve_scheduling_blocker",
+                "Resolve scheduling blocker",
+                Some(reason.clone()),
+            ),
+        );
+    }
+    match task.assigned_agent_id.as_deref() {
+        Some(agent_id) => (
+            Some(agent_actor(agents, agent_id)),
+            workflow_action(
+                "start_run",
+                "Start assigned work",
+                scheduler_reason.cloned(),
+            ),
+        ),
+        None => (
+            Some(workflow_actor("human", None, "You")),
+            workflow_action(
+                "assign_agent",
+                "Assign an agent",
+                Some("Ready work needs an execution owner.".into()),
+            ),
+        ),
+    }
+}
+
+fn in_progress_guidance(
+    agents: &HashMap<String, Agent>,
+    latest_run: Option<&WorkflowRunSummary>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    match latest_run {
+        Some(run) if run.status == RunStatus::Running => (
+            Some(agent_actor(agents, &run.agent_id)),
+            workflow_action("monitor_run", "Agent is implementing", None),
+        ),
+        Some(run) if matches!(run.status, RunStatus::Failed | RunStatus::Cancelled) => (
+            Some(workflow_actor("human", None, "You")),
+            workflow_action(
+                "recover_run",
+                "Recover agent run",
+                run.error
+                    .clone()
+                    .or_else(|| Some(format!("The latest run {}.", run.status.as_str()))),
+            ),
+        ),
+        _ => (
+            Some(workflow_actor("system", None, "Execution workflow")),
+            workflow_action(
+                "resume_work",
+                "Resume implementation",
+                Some("No active run currently owns this task.".into()),
+            ),
+        ),
+    }
+}
+
+fn review_guidance(
+    agents: &HashMap<String, Agent>,
+    latest_review: Option<&WorkflowReviewSummary>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    if let Some(review) = latest_review.filter(|review| review.status == AgentReviewStatus::Running)
+    {
+        return (
+            Some(agent_actor(agents, &review.agent_id)),
+            workflow_action("monitor_review", "Architect is reviewing", None),
+        );
+    }
+    let reason = latest_review.and_then(|review| {
+        review.error.clone().or_else(|| {
+            review
+                .decision
+                .map(|decision| format!("Architect recommendation: {}.", decision.as_str()))
+        })
+    });
+    (
+        Some(workflow_actor("human", None, "You")),
+        workflow_action("review_task", "Review and decide", reason),
+    )
+}
+
+fn blocked_guidance(
+    task: &Task,
+    readiness: Option<&WorkflowReadiness>,
+    latest_integration: Option<&WorkflowIntegrationSummary>,
+) -> (Option<WorkflowActor>, WorkflowAction) {
+    let integration_conflict = latest_integration
+        .filter(|attempt| attempt.status == IntegrationStatus::Conflict)
+        .and_then(|attempt| attempt.error.clone());
+    let reason = integration_conflict
+        .clone()
+        .or_else(|| task.blocked_reason.clone())
+        .or_else(|| readiness.and_then(|summary| summary.reason.clone()));
+    let (kind, label) = if integration_conflict.is_some() {
+        ("resolve_integration", "Resolve integration conflict")
+    } else if task.readiness_blocked {
+        ("resolve_readiness", "Resolve readiness blocker")
+    } else {
+        ("resolve_blocker", "Resolve blocker")
+    };
+    (
+        Some(workflow_actor("human", None, "You")),
+        workflow_action(kind, label, reason),
+    )
+}
+
+fn agent_actor(agents: &HashMap<String, Agent>, agent_id: &str) -> WorkflowActor {
+    let label = agents
+        .get(agent_id)
+        .map(|agent| agent.name.as_str())
+        .unwrap_or(agent_id);
+    workflow_actor("agent", Some(agent_id), label)
+}
+
+fn workflow_stages(tasks: Vec<WorkflowTaskView>) -> Vec<WorkflowStageView> {
+    let definitions = [
+        ("queue", "Queue"),
+        ("build", "Build"),
+        ("verify", "Verify & Land"),
+        ("done", "Done"),
+    ];
+    definitions
+        .into_iter()
+        .map(|(id, label)| {
+            let mut stage_tasks = tasks
+                .iter()
+                .filter(|task| task.stage == id)
+                .cloned()
+                .collect::<Vec<_>>();
+            stage_tasks.sort_by(|left, right| workflow_task_order(id, left, right));
+            WorkflowStageView {
+                id: id.into(),
+                label: label.into(),
+                total_count: stage_tasks.len(),
+                tasks: stage_tasks,
+            }
+        })
+        .collect()
+}
+
+fn workflow_task_order(
+    stage: &str,
+    left: &WorkflowTaskView,
+    right: &WorkflowTaskView,
+) -> std::cmp::Ordering {
+    if stage == "done" {
+        return right
+            .status_changed_at
+            .cmp(&left.status_changed_at)
+            .then_with(|| left.title.cmp(&right.title));
+    }
+    workflow_status_order(stage, &left.status)
+        .cmp(&workflow_status_order(stage, &right.status))
+        .then_with(|| left.position.cmp(&right.position))
+        .then_with(|| left.title.cmp(&right.title))
+}
+
+fn workflow_status_order(stage: &str, status: &str) -> usize {
+    match (stage, status) {
+        ("queue", "ready") => 0,
+        ("queue", "backlog") => 1,
+        ("build", "needs_input") => 0,
+        ("build", "in_progress") => 1,
+        ("verify", "review") => 0,
+        ("verify", "approved") => 1,
+        ("verify", "integrating") => 2,
+        (_, "blocked") => 3,
+        _ => 2,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_attention(
+    connection: &Connection,
+    project_id: &str,
+    health: &ProjectHealth,
+    tasks: &[Task],
+    blockers: &[ProjectBlocker],
+    runs: &[WorkflowRunSummary],
+    reviews: &[WorkflowReviewSummary],
+    integrations: &[WorkflowIntegrationSummary],
+    inputs: &[WorkflowInputSummary],
+    planning: &[WorkflowPlanningSummary],
+    autonomy: ProjectAutonomy,
+    cost_block: Option<(String, String)>,
+    status_metadata: &WorkflowStatusMetadata,
+) -> Result<Vec<WorkflowAttentionItem>> {
+    let task_by_id = tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task))
+        .collect::<HashMap<_, _>>();
+    let review_by_task = reviews
+        .iter()
+        .map(|review| (review.task_id.as_str(), review))
+        .collect::<HashMap<_, _>>();
+    let mut attention = Vec::new();
+
+    add_input_attention(&mut attention, inputs, &task_by_id);
+    add_review_attention(&mut attention, tasks, &review_by_task, status_metadata);
+    add_run_attention(&mut attention, runs, &task_by_id);
+    add_integration_attention(&mut attention, integrations, &task_by_id);
+    add_project_attention(&mut attention, health, blockers);
+    add_planning_attention(&mut attention, planning);
+    attention.extend(workflow_collaboration_attention(connection, project_id)?);
+    if autonomy.status == "paused" {
+        attention.push(workflow_attention_item(
+            format!("autonomy:{}", autonomy.project_id),
+            "autonomy_paused",
+            "high",
+            "Autonomous project mode is paused".into(),
+            autonomy.pause_reason,
+            None,
+            Some(autonomy.project_id),
+            autonomy.updated_at,
+        ));
+    }
+    if let Some((reason, created_at)) = cost_block {
+        attention.push(workflow_attention_item(
+            format!("cost:{project_id}"),
+            "cost_block",
+            "high",
+            "Cost controls are blocking new runs".into(),
+            Some(reason),
+            None,
+            Some(project_id.into()),
+            created_at,
+        ));
+    }
+
+    attention.sort_by(|left, right| {
+        let left_priority = left
+            .task_id
+            .as_deref()
+            .and_then(|id| task_by_id.get(id).copied())
+            .map_or(2, |task| workflow_priority_rank(task.priority));
+        let right_priority = right
+            .task_id
+            .as_deref()
+            .and_then(|id| task_by_id.get(id).copied())
+            .map_or(2, |task| workflow_priority_rank(task.priority));
+        workflow_severity_rank(&left.severity)
+            .cmp(&workflow_severity_rank(&right.severity))
+            .then_with(|| left_priority.cmp(&right_priority))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(attention)
+}
+
+fn workflow_cost_block(database: &Database, project_id: &str) -> Result<Option<(String, String)>> {
+    let Some(reason) = database.project_cost_guard(project_id)? else {
+        return Ok(None);
+    };
+    let changed_at = database.project_cost_control(project_id)?.updated_at;
+    Ok(Some((reason, changed_at)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_attention_item(
+    id: String,
+    kind: &str,
+    severity: &str,
+    title: String,
+    detail: Option<String>,
+    task_id: Option<String>,
+    entity_id: Option<String>,
+    created_at: String,
+) -> WorkflowAttentionItem {
+    WorkflowAttentionItem {
+        id,
+        kind: kind.into(),
+        severity: severity.into(),
+        title,
+        detail: detail.map(|value| compact_workflow_text(&value)),
+        task_id,
+        entity_id,
+        created_at,
+    }
+}
+
+fn add_input_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    inputs: &[WorkflowInputSummary],
+    tasks: &HashMap<&str, &Task>,
+) {
+    for input in inputs {
+        let Some(task) = tasks.get(input.task_id.as_str()) else {
+            continue;
+        };
+        attention.push(workflow_attention_item(
+            format!("input:{}", input.id),
+            "needs_input",
+            "high",
+            format!("{} needs input", task.title),
+            Some(input.question.clone()),
+            Some(task.id.clone()),
+            Some(input.id.clone()),
+            input.requested_at.clone(),
+        ));
+    }
+}
+
+fn add_review_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    tasks: &[Task],
+    reviews: &HashMap<&str, &WorkflowReviewSummary>,
+    status_metadata: &WorkflowStatusMetadata,
+) {
+    for task in tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Review)
+    {
+        if reviews
+            .get(task.id.as_str())
+            .is_some_and(|review| review.status == AgentReviewStatus::Running)
+        {
+            continue;
+        }
+        let latest_review = reviews.get(task.id.as_str()).copied();
+        let detail = latest_review.and_then(|review| {
+            review.error.clone().or_else(|| {
+                review
+                    .decision
+                    .map(|decision| format!("Architect recommendation: {}.", decision.as_str()))
+            })
+        });
+        let changed_at = status_metadata
+            .get(&task.id)
+            .map(|(changed_at, _)| changed_at.clone())
+            .unwrap_or_else(|| task.updated_at.clone());
+        attention.push(workflow_attention_item(
+            format!("review:{}", task.id),
+            "review_approval",
+            "normal",
+            format!("Review {}", task.title),
+            detail,
+            Some(task.id.clone()),
+            latest_review.map(|review| review.id.clone()),
+            changed_at,
+        ));
+    }
+}
+
+fn add_run_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    runs: &[WorkflowRunSummary],
+    tasks: &HashMap<&str, &Task>,
+) {
+    for run in runs.iter().filter(|run| {
+        matches!(run.status, RunStatus::Failed | RunStatus::Cancelled)
+            && !run.recovery_recorded
+            && tasks
+                .get(run.task_id.as_str())
+                .is_some_and(|task| task.status == TaskStatus::InProgress)
+    }) {
+        let task = tasks[run.task_id.as_str()];
+        attention.push(workflow_attention_item(
+            format!("run:{}", run.id),
+            "run_recovery",
+            "high",
+            format!("Recover {}", task.title),
+            run.error
+                .clone()
+                .or_else(|| Some(format!("The latest run {}.", run.status.as_str()))),
+            Some(task.id.clone()),
+            Some(run.id.clone()),
+            run.action_at.clone(),
+        ));
+    }
+}
+
+fn add_integration_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    integrations: &[WorkflowIntegrationSummary],
+    tasks: &HashMap<&str, &Task>,
+) {
+    for attempt in integrations.iter().filter(|attempt| {
+        matches!(
+            attempt.status,
+            IntegrationStatus::Conflict | IntegrationStatus::Failed
+        ) || (attempt.status == IntegrationStatus::Merged && attempt.error.is_some())
+    }) {
+        let Some(task) = tasks.get(attempt.task_id.as_str()) else {
+            continue;
+        };
+        let title = match attempt.status {
+            IntegrationStatus::Conflict => format!("Resolve conflict in {}", task.title),
+            IntegrationStatus::Failed => format!("Retry integration for {}", task.title),
+            IntegrationStatus::Merged => format!("Finish cleanup for {}", task.title),
+            IntegrationStatus::Queued | IntegrationStatus::Integrating => continue,
+        };
+        attention.push(workflow_attention_item(
+            format!("integration:{}", attempt.id),
+            "integration_recovery",
+            "high",
+            title,
+            attempt.error.clone(),
+            Some(task.id.clone()),
+            Some(attempt.id.clone()),
+            attempt.action_at.clone(),
+        ));
+    }
+}
+
+fn add_project_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    health: &ProjectHealth,
+    blockers: &[ProjectBlocker],
+) {
+    if health.status == ProjectHealthStatus::Broken {
+        attention.push(workflow_attention_item(
+            format!("health:{}", health.project_id),
+            "health_broken",
+            "critical",
+            "Integration branch is broken".into(),
+            health.failing_gate.clone(),
+            None,
+            Some(health.project_id.clone()),
+            health.updated_at.clone(),
+        ));
+    }
+    for blocker in blockers.iter().filter(|blocker| blocker.status == "active") {
+        attention.push(workflow_attention_item(
+            format!("blocker:{}", blocker.id),
+            "project_blocker",
+            "high",
+            blocker.title.clone(),
+            blocker.description.clone(),
+            None,
+            Some(blocker.id.clone()),
+            blocker.created_at.clone(),
+        ));
+    }
+}
+
+fn add_planning_attention(
+    attention: &mut Vec<WorkflowAttentionItem>,
+    planning: &[WorkflowPlanningSummary],
+) {
+    for proposal in planning
+        .iter()
+        .filter(|proposal| proposal.status == PlanningProposalStatus::Proposed)
+    {
+        attention.push(workflow_attention_item(
+            format!("planning:{}", proposal.id),
+            "planning_approval",
+            "normal",
+            "Planning proposal awaits approval".into(),
+            Some(proposal.goal.clone()),
+            None,
+            Some(proposal.id.clone()),
+            proposal.updated_at.clone(),
+        ));
+    }
+}
+
+fn workflow_collaboration_attention(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<WorkflowAttentionItem>> {
+    let mut statement = connection.prepare(
+        "SELECT id, task_id, kind, message, created_at
+         FROM collaboration_entries
+         WHERE project_id = ?1 AND status = 'open' AND kind <> 'comment'
+           AND parent_id IS NULL
+           AND author_type IN ('agent', 'system')
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let records = statement
+        .query_map([project_id], |row| {
+            let id = row.get::<_, String>(0)?;
+            let task_id = row.get::<_, Option<String>>(1)?;
+            let kind = CollaborationKind::from_database(row.get(2)?)?;
+            let (severity, title) = match kind {
+                CollaborationKind::Blocker => ("high", "Agent reported a blocker"),
+                CollaborationKind::Escalation => ("high", "Agent escalated a decision"),
+                CollaborationKind::InterfaceChange => {
+                    ("normal", "Interface change needs coordination")
+                }
+                CollaborationKind::Request => ("normal", "Agent request needs attention"),
+                CollaborationKind::Comment => ("normal", "Collaboration update"),
+            };
+            Ok(workflow_attention_item(
+                format!("collaboration:{id}"),
+                "collaboration",
+                severity,
+                title.into(),
+                Some(row.get(3)?),
+                task_id,
+                Some(id),
+                row.get(4)?,
+            ))
+        })?
+        .collect();
+    records
+}
+
+fn compact_workflow_text(value: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut truncated = compact.chars().take(MAX_CHARS - 1).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+fn workflow_priority_rank(priority: TaskPriority) -> usize {
+    match priority {
+        TaskPriority::Critical => 0,
+        TaskPriority::High => 1,
+        TaskPriority::Normal => 2,
+        TaskPriority::Low => 3,
+    }
+}
+
+fn workflow_severity_rank(severity: &str) -> usize {
+    match severity {
+        "critical" => 0,
+        "high" => 1,
+        _ => 2,
+    }
+}
+
+fn workflow_agent_activity(
+    tasks: &[Task],
+    agents: &[Agent],
+    runs: &[WorkflowRunSummary],
+    reviews: &[WorkflowReviewSummary],
+    planning: &[WorkflowPlanningSummary],
+    worker_states: &HashMap<String, String>,
+    scheduler_reasons: &HashMap<String, String>,
+) -> Vec<WorkflowAgentActivityItem> {
+    let task_by_id = tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task))
+        .collect::<HashMap<_, _>>();
+    let agent_by_id = agents
+        .iter()
+        .map(|agent| (agent.id.as_str(), agent))
+        .collect::<HashMap<_, _>>();
+    let mut activity = Vec::new();
+    let mut owned_task_ids = HashSet::new();
+
+    for run in runs
+        .iter()
+        .filter(|run| matches!(run.status, RunStatus::Queued | RunStatus::Running))
+    {
+        let (Some(task), Some(agent)) = (
+            task_by_id.get(run.task_id.as_str()),
+            agent_by_id.get(run.agent_id.as_str()),
+        ) else {
+            continue;
+        };
+        owned_task_ids.insert(task.id.as_str());
+        let worker_state = worker_states
+            .get(&run.worker_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        let waiting_reason = (run.status == RunStatus::Queued).then(|| {
+            if worker_state != "online" {
+                format!("Worker {} is {worker_state}.", run.worker_id)
+            } else {
+                scheduler_reasons
+                    .get(&task.id)
+                    .cloned()
+                    .unwrap_or_else(|| "Waiting for worker capacity.".into())
+            }
+        });
+        activity.push(WorkflowAgentActivityItem {
+            id: format!("run:{}", run.id),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            role: agent.role.clone(),
+            task_id: Some(task.id.clone()),
+            task_title: Some(task.title.clone()),
+            worker_id: Some(run.worker_id.clone()),
+            worker_state: Some(worker_state),
+            activity_type: "implementation".into(),
+            status: run.status.as_str().into(),
+            started_at: run.started_at.clone(),
+            waiting_reason,
+        });
+    }
+
+    for review in reviews
+        .iter()
+        .filter(|review| review.status == AgentReviewStatus::Running)
+    {
+        let (Some(task), Some(agent)) = (
+            task_by_id.get(review.task_id.as_str()),
+            agent_by_id.get(review.agent_id.as_str()),
+        ) else {
+            continue;
+        };
+        owned_task_ids.insert(task.id.as_str());
+        let worker_state = worker_states
+            .get("local")
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        activity.push(WorkflowAgentActivityItem {
+            id: format!("review:{}", review.id),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            role: agent.role.clone(),
+            task_id: Some(task.id.clone()),
+            task_title: Some(task.title.clone()),
+            worker_id: Some("local".into()),
+            worker_state: Some(worker_state),
+            activity_type: "review".into(),
+            status: "running".into(),
+            started_at: review.started_at.clone(),
+            waiting_reason: None,
+        });
+    }
+
+    for proposal in planning
+        .iter()
+        .filter(|proposal| proposal.status == PlanningProposalStatus::Generating)
+    {
+        let Some(agent) = proposal
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| agent_by_id.get(agent_id))
+        else {
+            continue;
+        };
+        let worker_state = worker_states
+            .get("local")
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        activity.push(WorkflowAgentActivityItem {
+            id: format!("planning:{}", proposal.id),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            role: agent.role.clone(),
+            task_id: None,
+            task_title: Some(proposal.goal.clone()),
+            worker_id: Some("local".into()),
+            worker_state: Some(worker_state),
+            activity_type: "planning".into(),
+            status: "running".into(),
+            started_at: proposal.created_at.clone(),
+            waiting_reason: None,
+        });
+    }
+
+    for task in tasks.iter().filter(|task| {
+        task.status == TaskStatus::Ready
+            && task.assigned_agent_id.is_some()
+            && !owned_task_ids.contains(task.id.as_str())
+    }) {
+        let Some(agent) = task
+            .assigned_agent_id
+            .as_deref()
+            .and_then(|agent_id| agent_by_id.get(agent_id))
+        else {
+            continue;
+        };
+        activity.push(WorkflowAgentActivityItem {
+            id: format!("assigned:{}", task.id),
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            role: agent.role.clone(),
+            task_id: Some(task.id.clone()),
+            task_title: Some(task.title.clone()),
+            worker_id: None,
+            worker_state: None,
+            activity_type: "assigned".into(),
+            status: "waiting".into(),
+            started_at: task.updated_at.clone(),
+            waiting_reason: scheduler_reasons
+                .get(&task.id)
+                .cloned()
+                .or_else(|| Some("Ready to schedule.".into())),
+        });
+    }
+
+    activity.sort_by(|left, right| {
+        workflow_activity_rank(&left.status)
+            .cmp(&workflow_activity_rank(&right.status))
+            .then_with(|| left.started_at.cmp(&right.started_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    activity
+}
+
+fn workflow_activity_rank(status: &str) -> usize {
+    match status {
+        "running" => 0,
+        "queued" => 1,
+        _ => 2,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub id: String,
@@ -748,6 +1883,119 @@ pub struct Task {
     pub updated_at: String,
 }
 
+/// A compact, project-scoped view of delivery progress for the workflow cockpit.
+///
+/// The canonical task status remains the source of truth. `stage` is only a
+/// presentation projection that keeps exceptional states such as Blocked in
+/// their last meaningful delivery stage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorkflowSnapshot {
+    pub project_id: String,
+    pub generated_at: String,
+    pub health: WorkflowProjectHealth,
+    pub stages: Vec<WorkflowStageView>,
+    pub attention: Vec<WorkflowAttentionItem>,
+    pub agent_activity: Vec<WorkflowAgentActivityItem>,
+    pub idle_agent_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProjectHealth {
+    pub project_id: String,
+    pub status: String,
+    pub last_validation_attempt_id: Option<String>,
+    pub last_successful_validation_at: Option<String>,
+    pub last_integration_at: Option<String>,
+    pub failing_gate: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowStageView {
+    pub id: String,
+    pub label: String,
+    pub total_count: usize,
+    pub tasks: Vec<WorkflowTaskView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTaskView {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub priority: String,
+    pub status: String,
+    pub stage: String,
+    pub position: i64,
+    pub status_changed_at: String,
+    pub current_actor: Option<WorkflowActor>,
+    pub next_action: WorkflowAction,
+    pub readiness: Option<WorkflowReadiness>,
+    pub assigned_agent_id: Option<String>,
+    pub blocked_reason: Option<String>,
+    pub milestone_id: Option<String>,
+    pub epic_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowActor {
+    pub kind: String,
+    pub id: Option<String>,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAction {
+    pub kind: String,
+    pub label: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowReadiness {
+    pub ready: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAttentionItem {
+    pub id: String,
+    pub kind: String,
+    pub severity: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub task_id: Option<String>,
+    pub entity_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentActivityItem {
+    pub id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub role: String,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub worker_id: Option<String>,
+    pub worker_state: Option<String>,
+    pub activity_type: String,
+    pub status: String,
+    pub started_at: String,
+    pub waiting_reason: Option<String>,
+}
+
 pub struct NewTask {
     pub id: String,
     pub project_id: String,
@@ -1423,6 +2671,57 @@ pub struct FlowLimitUpdate {
     pub in_progress_limit: i64,
     pub review_limit: i64,
     pub approved_limit: i64,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowRunSummary {
+    id: String,
+    task_id: String,
+    agent_id: String,
+    worker_id: String,
+    status: RunStatus,
+    started_at: String,
+    error: Option<String>,
+    action_at: String,
+    recovery_recorded: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowReviewSummary {
+    id: String,
+    task_id: String,
+    agent_id: String,
+    status: AgentReviewStatus,
+    decision: Option<AgentReviewDecision>,
+    error: Option<String>,
+    started_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowIntegrationSummary {
+    id: String,
+    task_id: String,
+    status: IntegrationStatus,
+    error: Option<String>,
+    action_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowInputSummary {
+    id: String,
+    task_id: String,
+    question: String,
+    requested_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowPlanningSummary {
+    id: String,
+    agent_id: Option<String>,
+    goal: String,
+    status: PlanningProposalStatus,
+    created_at: String,
+    updated_at: String,
 }
 
 impl Database {
@@ -2281,6 +3580,141 @@ impl Database {
             .query_map([project_id], task_from_row)?
             .collect::<Result<Vec<_>>>()?;
         Ok(records)
+    }
+
+    pub fn get_project_workflow_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectWorkflowSnapshot> {
+        let scheduler_reasons = workflow_scheduler_reasons(&self.connection, project_id)?;
+        self.build_project_workflow_snapshot(project_id, scheduler_reasons)
+    }
+
+    pub fn get_project_workflow_snapshot_with_scheduler_reasons(
+        &self,
+        project_id: &str,
+        scheduler_reasons: HashMap<String, String>,
+    ) -> Result<ProjectWorkflowSnapshot> {
+        self.build_project_workflow_snapshot(project_id, scheduler_reasons)
+    }
+
+    fn build_project_workflow_snapshot(
+        &self,
+        project_id: &str,
+        scheduler_reasons: HashMap<String, String>,
+    ) -> Result<ProjectWorkflowSnapshot> {
+        if self.project_by_id(project_id)?.is_none() {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+
+        let generated_at = self
+            .connection
+            .query_row("SELECT CURRENT_TIMESTAMP", [], |row| row.get(0))?;
+        let tasks = self.list_tasks(project_id)?;
+        let health = self.get_project_health(project_id)?;
+        let agents = self.list_agents()?;
+        let blockers = self.list_project_blockers(project_id)?;
+        let status_metadata = workflow_status_metadata(&self.connection, project_id)?;
+        let latest_runs = workflow_latest_runs(&self.connection, project_id)?;
+        let latest_reviews = workflow_latest_reviews(&self.connection, project_id)?;
+        let latest_integrations = workflow_latest_integrations(&self.connection, project_id)?;
+        let open_inputs = workflow_open_inputs(&self.connection, project_id)?;
+        let planning = workflow_planning_summaries(&self.connection, project_id)?;
+        let worker_states = workflow_worker_states(&self.connection)?;
+
+        let agent_by_id = agents
+            .iter()
+            .map(|agent| (agent.id.clone(), agent.clone()))
+            .collect::<HashMap<_, _>>();
+        let task_by_id = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.clone()))
+            .collect::<HashMap<_, _>>();
+        let run_by_task = latest_runs
+            .iter()
+            .map(|run| (run.task_id.clone(), run.clone()))
+            .collect::<HashMap<_, _>>();
+        let review_by_task = latest_reviews
+            .iter()
+            .map(|review| (review.task_id.clone(), review.clone()))
+            .collect::<HashMap<_, _>>();
+        let integration_by_task = latest_integrations
+            .iter()
+            .map(|attempt| (attempt.task_id.clone(), attempt.clone()))
+            .collect::<HashMap<_, _>>();
+        let input_by_task = open_inputs
+            .iter()
+            .map(|request| (request.task_id.clone(), request.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let task_views = tasks
+            .iter()
+            .map(|task| {
+                workflow_task_view(
+                    task,
+                    status_metadata.get(&task.id),
+                    &task_by_id,
+                    &blockers,
+                    &agent_by_id,
+                    run_by_task.get(&task.id),
+                    review_by_task.get(&task.id),
+                    integration_by_task.get(&task.id),
+                    input_by_task.get(&task.id),
+                    scheduler_reasons.get(&task.id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let stages = workflow_stages(task_views);
+        let attention = workflow_attention(
+            &self.connection,
+            project_id,
+            &health,
+            &tasks,
+            &blockers,
+            &latest_runs,
+            &latest_reviews,
+            &latest_integrations,
+            &open_inputs,
+            &planning,
+            self.project_autonomy(project_id)?,
+            workflow_cost_block(self, project_id)?,
+            &status_metadata,
+        )?;
+        let agent_activity = workflow_agent_activity(
+            &tasks,
+            &agents,
+            &latest_runs,
+            &latest_reviews,
+            &planning,
+            &worker_states,
+            &scheduler_reasons,
+        );
+        let active_agent_ids = agent_activity
+            .iter()
+            .map(|activity| activity.agent_id.as_str())
+            .collect::<HashSet<_>>();
+        let idle_agent_count = agents
+            .iter()
+            .filter(|agent| !active_agent_ids.contains(agent.id.as_str()))
+            .count();
+
+        Ok(ProjectWorkflowSnapshot {
+            project_id: project_id.to_owned(),
+            generated_at,
+            health: WorkflowProjectHealth {
+                project_id: health.project_id,
+                status: health.status.as_str().into(),
+                last_validation_attempt_id: health.last_validation_attempt_id,
+                last_successful_validation_at: health.last_successful_validation_at,
+                last_integration_at: health.last_integration_at,
+                failing_gate: health.failing_gate,
+                updated_at: health.updated_at,
+            },
+            stages,
+            attention,
+            agent_activity,
+            idle_agent_count,
+        })
     }
 
     pub fn list_ready_tasks_for_scheduling(&self, project_id: &str) -> Result<Vec<Task>> {
@@ -4294,27 +5728,13 @@ impl Database {
         target_status: TaskStatus,
         target_position: usize,
     ) -> Result<Option<Task>> {
-        if matches!(
-            target_status,
-            TaskStatus::NeedsInput
-                | TaskStatus::Approved
-                | TaskStatus::Integrating
-                | TaskStatus::Blocked
-                | TaskStatus::Done
-        ) {
+        if !matches!(target_status, TaskStatus::Backlog | TaskStatus::Ready) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let Some((project_id, source_status)) = self.task_location(id)? else {
             return Ok(None);
         };
-        if matches!(
-            source_status,
-            TaskStatus::NeedsInput
-                | TaskStatus::Approved
-                | TaskStatus::Integrating
-                | TaskStatus::Blocked
-                | TaskStatus::Done
-        ) {
+        if !matches!(source_status, TaskStatus::Backlog | TaskStatus::Ready) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let transaction = self.connection.transaction()?;
@@ -7250,6 +8670,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
+        move_task_in_transaction, workflow_scheduler_reasons, workflow_severity_rank,
         AgentReviewDecision, AgentReviewStatus, AgentUpdate, ArchitectureDecisionStatus,
         AutonomyCycleCompletion, CollaborationKind, Database, FlowLimitUpdate, IntegrationStatus,
         ModelPricingUpdate, NewAgent, NewAgentReview, NewArchitectureDecision,
@@ -7263,7 +8684,7 @@ mod tests {
         WorkerToolCapability,
     };
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         fs,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -7281,6 +8702,27 @@ mod tests {
             "orchestr-db-{}-{nonce}-{sequence}.sqlite",
             std::process::id(),
         ))
+    }
+
+    fn transition_task_for_test(database: &mut Database, task_id: &str, target_status: TaskStatus) {
+        let task = database
+            .get_task(task_id)
+            .expect("fixture task loads")
+            .expect("fixture task exists");
+        let transaction = database
+            .connection
+            .transaction()
+            .expect("fixture transaction starts");
+        move_task_in_transaction(
+            &transaction,
+            task_id,
+            &task.project_id,
+            task.status,
+            target_status,
+            usize::MAX,
+        )
+        .expect("fixture transition succeeds");
+        transaction.commit().expect("fixture transition commits");
     }
 
     #[test]
@@ -7480,6 +8922,22 @@ mod tests {
                 .status,
             TaskStatus::Ready
         );
+        assert!(database.move_task("task-2", TaskStatus::Review, 0).is_err());
+        assert!(database
+            .move_task("task-1", TaskStatus::InProgress, 0)
+            .is_err());
+        assert!(database
+            .move_task("task-1", TaskStatus::Ready, 0)
+            .expect("Ready tasks can be reordered")
+            .is_some());
+        assert!(database
+            .move_task("task-1", TaskStatus::Backlog, usize::MAX)
+            .expect("Ready tasks can return to Backlog")
+            .is_some());
+        assert!(database
+            .move_task("task-1", TaskStatus::Ready, 0)
+            .expect("Backlog tasks can become Ready")
+            .is_some());
 
         let updated = database
             .update_task(
@@ -7518,6 +8976,10 @@ mod tests {
                 .position,
             0
         );
+        transition_task_for_test(&mut database, "task-1", TaskStatus::InProgress);
+        assert!(database
+            .move_task("task-1", TaskStatus::Backlog, 0)
+            .is_err());
 
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
@@ -7637,6 +9099,559 @@ mod tests {
             conflict.blocked_reason.as_deref(),
             Some("Integration conflict: src/app.ts")
         );
+        drop(database);
+        fs::remove_file(database_path).expect("temporary database removes");
+    }
+
+    #[test]
+    fn workflow_snapshot_projects_every_status_and_recovers_blocked_origin() {
+        let database_path = temporary_database_path();
+        let mut database = Database::open(&database_path).expect("database opens");
+        database
+            .create_project(NewProject {
+                id: "project-workflow".into(),
+                name: "Workflow cockpit".into(),
+                description: None,
+                default_branch: "trunk".into(),
+                workspace_id: "workspace-workflow".into(),
+                worker_id: "local".into(),
+                workspace_path: "C:/work/workflow".into(),
+            })
+            .expect("project saves");
+        for (id, name) in [
+            ("implementer", "Implementer"),
+            ("reviewer", "Reviewer"),
+            ("idle", "Idle agent"),
+        ] {
+            database
+                .create_agent(NewAgent {
+                    id: id.into(),
+                    name: name.into(),
+                    provider: "codex".into(),
+                    role: "Engineer".into(),
+                    model: None,
+                    system_prompt: None,
+                    skills: Vec::new(),
+                    max_concurrent_tasks: 4,
+                })
+                .expect("agent saves");
+        }
+        for (id, status) in [
+            ("backlog", TaskStatus::Backlog),
+            ("ready", TaskStatus::Ready),
+            ("in-progress", TaskStatus::InProgress),
+            ("needs-input", TaskStatus::NeedsInput),
+            ("review", TaskStatus::Review),
+            ("approved", TaskStatus::Approved),
+            ("integrating", TaskStatus::Integrating),
+            ("blocked", TaskStatus::Blocked),
+            ("done", TaskStatus::Done),
+        ] {
+            database
+                .create_task(NewTask {
+                    id: id.into(),
+                    project_id: "project-workflow".into(),
+                    title: format!("Task {id}"),
+                    description: None,
+                    acceptance_criteria: vec!["Observable outcome".into()],
+                    implementation_notes: None,
+                    relevant_paths: Vec::new(),
+                    required_capabilities: Vec::new(),
+                    dependency_ids: Vec::new(),
+                    assigned_agent_id: matches!(
+                        status,
+                        TaskStatus::Ready | TaskStatus::InProgress | TaskStatus::NeedsInput
+                    )
+                    .then(|| "implementer".into()),
+                    priority: if id == "needs-input" {
+                        TaskPriority::Critical
+                    } else {
+                        TaskPriority::Normal
+                    },
+                    milestone_id: None,
+                    epic_id: None,
+                })
+                .expect("task saves");
+            if status != TaskStatus::Backlog {
+                if status == TaskStatus::Blocked {
+                    transition_task_for_test(&mut database, id, TaskStatus::Integrating);
+                }
+                transition_task_for_test(&mut database, id, status);
+            }
+        }
+        database
+            .update_flow_limits(
+                "project-workflow",
+                "local",
+                FlowLimitUpdate {
+                    worker_max_concurrent_runs: 4,
+                    in_progress_limit: 4,
+                    review_limit: 4,
+                    approved_limit: 4,
+                },
+            )
+            .expect("workflow fixture has downstream capacity");
+        database
+            .connection
+            .execute(
+                "UPDATE tasks SET created_at = '2025-01-02 03:04:05', updated_at = '2026-02-03 04:05:06' WHERE id = 'backlog'",
+                [],
+            )
+            .expect("backlog edit timestamps differ from its state age");
+        database
+            .create_task(NewTask {
+                id: "failed-blocked".into(),
+                project_id: "project-workflow".into(),
+                title: "Task failed-blocked".into(),
+                description: None,
+                acceptance_criteria: vec!["Recovery is explicit".into()],
+                implementation_notes: None,
+                relevant_paths: Vec::new(),
+                required_capabilities: Vec::new(),
+                dependency_ids: Vec::new(),
+                assigned_agent_id: Some("implementer".into()),
+                priority: TaskPriority::High,
+                milestone_id: None,
+                epic_id: None,
+            })
+            .expect("recovery task saves");
+        database
+            .move_task("failed-blocked", TaskStatus::Ready, usize::MAX)
+            .expect("recovery task readies");
+        database
+            .start_run(NewRun {
+                id: "failed-blocked-run".into(),
+                task_id: "failed-blocked".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect("recovery run starts");
+        database
+            .finish_run(
+                "failed-blocked-run",
+                RunStatus::Failed,
+                Some(1),
+                Some("worker process exited"),
+            )
+            .expect("recovery run fails");
+        database
+            .request_task_input(NewTaskInputRequest {
+                id: "open-input".into(),
+                task_id: "needs-input".into(),
+                requesting_run_id: None,
+                question: "Which compatibility target should be used?".into(),
+            })
+            .expect_err("only a real in-progress run may request input");
+        transition_task_for_test(&mut database, "needs-input", TaskStatus::InProgress);
+        database
+            .start_run(NewRun {
+                id: "input-run".into(),
+                task_id: "needs-input".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect_err("fixture needs to re-enter Ready before a run can start");
+        transition_task_for_test(&mut database, "needs-input", TaskStatus::Ready);
+        database
+            .start_run(NewRun {
+                id: "input-run".into(),
+                task_id: "needs-input".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect("input run starts");
+        database
+            .request_task_input(NewTaskInputRequest {
+                id: "open-input".into(),
+                task_id: "needs-input".into(),
+                requesting_run_id: Some("input-run".into()),
+                question: "Which compatibility target should be used?".into(),
+            })
+            .expect("input request opens");
+        database
+            .enqueue_run(NewRun {
+                id: "queued-run".into(),
+                task_id: "ready".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect("ready run queues");
+        database
+            .mark_project_health_broken("project-workflow", "integration tests")
+            .expect("health breaks");
+        database
+            .create_project_blocker(NewProjectBlocker {
+                id: "project-blocker".into(),
+                project_id: "project-workflow".into(),
+                title: "Production credentials unavailable".into(),
+                description: None,
+                affects_all_tasks: false,
+                affected_task_ids: vec!["review".into()],
+            })
+            .expect("project blocker saves");
+        database
+            .connection
+            .execute_batch(
+                "UPDATE runs
+                    SET started_at = '2024-05-01 00:00:00',
+                        completed_at = '2024-05-01 00:00:00'
+                    WHERE id = 'failed-blocked-run';
+                 INSERT INTO runs
+                    (id, task_id, agent_id, worker_id, status, started_at, completed_at, exit_code, error)
+                 VALUES
+                    ('a-latest-failed-run', 'failed-blocked', 'implementer', 'local', 'failed',
+                     '2024-05-01 00:00:00', '2024-05-01 00:00:00', 2,
+                     'newer same-second failure');
+                 INSERT INTO scheduler_decisions
+                    (id, project_id, task_id, outcome, reason, created_at)
+                 VALUES
+                    ('z-old-ready-block', 'project-workflow', 'ready', 'blocked',
+                     'Superseded worker mismatch.', '2024-05-02 00:00:00');
+                 INSERT INTO scheduler_decisions
+                    (id, project_id, task_id, outcome, reason, created_at)
+                 VALUES
+                    ('a-new-ready-scheduled', 'project-workflow', 'ready', 'scheduled',
+                     'Task was placed in the execution queue.', '2024-05-02 00:00:00');
+                 INSERT INTO scheduler_decisions
+                    (id, project_id, task_id, outcome, reason, created_at)
+                 VALUES
+                    ('z-old-in-progress-skip', 'project-workflow', 'in-progress', 'skipped',
+                     'Superseded scheduling reason.', '2024-05-03 00:00:00');
+                 INSERT INTO scheduler_decisions
+                    (id, project_id, task_id, outcome, reason, created_at)
+                 VALUES
+                    ('a-new-in-progress-block', 'project-workflow', 'in-progress', 'blocked',
+                     'Latest same-second capacity block.', '2024-05-03 00:00:00');
+                 INSERT INTO integration_attempts
+                    (id, task_id, source_branch, target_branch, status, queue_position, error,
+                     created_at, started_at, completed_at, updated_at)
+                 VALUES
+                    ('z-old-integration', 'approved', 'task/approved', 'trunk', 'failed', 0,
+                     'superseded validation failure', '2024-01-02 00:00:00', '2024-01-02 00:01:00',
+                     '2024-01-02 00:02:00', '2024-01-02 00:02:00');
+                 INSERT INTO integration_attempts
+                    (id, task_id, source_branch, target_branch, status, queue_position, error,
+                     created_at, started_at, completed_at, updated_at)
+                 VALUES
+                    ('a-new-integration', 'approved', 'task/approved', 'trunk', 'failed', 1,
+                     'latest validation failure', '2024-01-02 00:00:00', '2024-01-02 00:01:00',
+                     '2024-01-02 00:02:00', '2024-01-02 00:02:00');
+                 INSERT INTO planning_proposals
+                    (id, project_id, agent_id, goal, status, created_at, updated_at, completed_at)
+                 VALUES
+                    ('proposed-plan', 'project-workflow', 'implementer',
+                     'Plan the next integrated outcome', 'proposed', '2024-02-01 00:00:00',
+                     '2024-02-01 00:01:00', '2024-02-01 00:01:00');
+                 INSERT INTO planning_proposals
+                    (id, project_id, agent_id, goal, status, created_at, updated_at)
+                 VALUES
+                    ('generating-plan', 'project-workflow', 'implementer',
+                     'Generate a follow-up plan', 'generating', '2024-02-02 00:00:00',
+                     '2024-02-02 00:00:00');
+                 INSERT INTO agent_reviews
+                    (id, task_id, agent_id, status, decision, error, started_at, completed_at)
+                 VALUES
+                    ('z-old-review', 'review', 'reviewer', 'completed', 'request_changes',
+                     'superseded review', '2024-02-03 00:00:00', '2024-02-03 00:01:00');
+                 INSERT INTO agent_reviews
+                    (id, task_id, agent_id, status, decision, started_at, completed_at)
+                 VALUES
+                    ('a-new-review', 'review', 'reviewer', 'completed', 'approve',
+                     '2024-02-03 00:00:00', '2024-02-03 00:01:00');
+                 INSERT INTO agent_reviews
+                    (id, task_id, agent_id, status, started_at)
+                 VALUES
+                    ('running-review', 'approved', 'reviewer', 'running',
+                     '2024-02-03 00:00:00');
+                 INSERT INTO project_autonomy
+                    (project_id, status, pause_reason, updated_at)
+                 VALUES
+                    ('project-workflow', 'paused', 'Approval is required', '2024-03-01 00:00:00');
+                 INSERT INTO project_cost_controls
+                    (project_id, monthly_budget_micros, warning_threshold_percent,
+                     block_new_runs, updated_at)
+                 VALUES
+                    ('project-workflow', 1, 80, 1, '2024-01-01 00:00:00');
+                 INSERT INTO run_usage
+                    (run_id, provider, model, estimated_cost_micros, priced)
+                 VALUES
+                    ('failed-blocked-run', 'codex', 'test-model', 2, 1);
+                 UPDATE task_input_requests
+                    SET requested_at = '2024-04-01 00:00:00' WHERE id = 'open-input';
+                 UPDATE project_blockers
+                    SET created_at = '2024-06-01 00:00:00' WHERE id = 'project-blocker';",
+            )
+            .expect("attention fixtures save");
+        database
+            .create_collaboration_entry(NewCollaborationEntry {
+                id: "coordination-request".into(),
+                project_id: "project-workflow".into(),
+                task_id: Some("review".into()),
+                parent_id: None,
+                author_type: "agent".into(),
+                author_agent_id: Some("implementer".into()),
+                author_run_id: None,
+                kind: CollaborationKind::InterfaceChange,
+                message: "Coordinate the public response shape.".into(),
+                referenced_task_ids: Vec::new(),
+            })
+            .expect("collaboration request saves");
+        database
+            .create_collaboration_entry(NewCollaborationEntry {
+                id: "human-note".into(),
+                project_id: "project-workflow".into(),
+                task_id: Some("review".into()),
+                parent_id: None,
+                author_type: "human".into(),
+                author_agent_id: None,
+                author_run_id: None,
+                kind: CollaborationKind::Request,
+                message: "This human-authored request stays in collaboration history.".into(),
+                referenced_task_ids: Vec::new(),
+            })
+            .expect("human collaboration note saves");
+        database
+            .create_collaboration_entry(NewCollaborationEntry {
+                id: "agent-reply".into(),
+                project_id: "project-workflow".into(),
+                task_id: Some("review".into()),
+                parent_id: Some("coordination-request".into()),
+                author_type: "agent".into(),
+                author_agent_id: Some("implementer".into()),
+                author_run_id: None,
+                kind: CollaborationKind::Request,
+                message: "This reply remains attached to its root request.".into(),
+                referenced_task_ids: Vec::new(),
+            })
+            .expect("agent collaboration reply saves");
+
+        let snapshot = database
+            .get_project_workflow_snapshot("project-workflow")
+            .expect("workflow snapshot loads");
+        let scheduler_reasons =
+            workflow_scheduler_reasons(&database.connection, "project-workflow")
+                .expect("workflow scheduler reasons load");
+        assert!(!scheduler_reasons.contains_key("ready"));
+        assert_eq!(
+            scheduler_reasons.get("in-progress").map(String::as_str),
+            Some("Latest same-second capacity block.")
+        );
+        assert_eq!(
+            snapshot
+                .stages
+                .iter()
+                .map(|stage| (stage.id.as_str(), stage.total_count))
+                .collect::<Vec<_>>(),
+            [("queue", 2), ("build", 3), ("verify", 4), ("done", 1)]
+        );
+        let projected = snapshot
+            .stages
+            .iter()
+            .flat_map(|stage| stage.tasks.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(projected.len(), 10);
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|task| task.id == "blocked")
+                .map(|task| task.stage.as_str())
+                .next(),
+            Some("verify")
+        );
+        assert!(projected
+            .iter()
+            .all(|task| !task.status_changed_at.is_empty()));
+        assert_eq!(
+            projected
+                .iter()
+                .find(|task| task.id == "backlog")
+                .expect("backlog projection exists")
+                .status_changed_at,
+            "2025-01-02 03:04:05"
+        );
+        let ready = projected
+            .iter()
+            .find(|task| task.id == "ready")
+            .expect("ready projection exists");
+        assert_eq!(ready.current_actor.as_ref().unwrap().kind, "agent");
+        assert_eq!(ready.next_action.kind, "await_worker");
+        assert_eq!(
+            ready.next_action.reason.as_deref(),
+            Some("Queued for execution capacity.")
+        );
+        let input = projected
+            .iter()
+            .find(|task| task.id == "needs-input")
+            .expect("input projection exists");
+        assert_eq!(input.next_action.kind, "answer_input");
+        assert_eq!(snapshot.attention[0].kind, "health_broken");
+        assert!(snapshot.attention.iter().any(
+            |item| item.kind == "needs_input" && item.task_id.as_deref() == Some("needs-input")
+        ));
+        assert!(snapshot.attention.iter().any(|item| {
+            item.kind == "review_approval"
+                && item.task_id.as_deref() == Some("review")
+                && item.entity_id.as_deref() == Some("a-new-review")
+        }));
+        assert!(!snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("z-old-review")));
+        assert!(snapshot.attention.iter().any(|item| {
+            item.kind == "run_recovery"
+                && item.task_id.as_deref() == Some("failed-blocked")
+                && item.entity_id.as_deref() == Some("a-latest-failed-run")
+        }));
+        assert!(!snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("failed-blocked-run")));
+        assert!(snapshot.attention.iter().any(|item| {
+            item.kind == "integration_recovery"
+                && item.entity_id.as_deref() == Some("a-new-integration")
+        }));
+        assert!(!snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("z-old-integration")));
+        assert!(snapshot
+            .attention
+            .iter()
+            .any(|item| item.kind == "project_blocker"));
+        assert!(snapshot
+            .attention
+            .iter()
+            .any(|item| item.kind == "collaboration"));
+        for kind in [
+            "integration_recovery",
+            "planning_approval",
+            "autonomy_paused",
+            "cost_block",
+        ] {
+            assert!(
+                snapshot.attention.iter().any(|item| item.kind == kind),
+                "{kind} is classified as actionable attention"
+            );
+        }
+        let task_priorities = projected
+            .iter()
+            .map(|task| {
+                let priority = match task.priority.as_str() {
+                    "critical" => 0,
+                    "high" => 1,
+                    "normal" => 2,
+                    _ => 3,
+                };
+                (task.id.as_str(), priority)
+            })
+            .collect::<HashMap<_, _>>();
+        let attention_keys = snapshot
+            .attention
+            .iter()
+            .map(|item| {
+                (
+                    workflow_severity_rank(&item.severity),
+                    item.task_id
+                        .as_deref()
+                        .and_then(|id| task_priorities.get(id).copied())
+                        .unwrap_or(2),
+                    item.created_at.as_str(),
+                    item.id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(attention_keys.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(!snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("human-note")));
+        assert!(!snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("agent-reply")));
+        assert_eq!(snapshot.idle_agent_count, 1);
+        assert!(snapshot.agent_activity.iter().any(|activity| {
+            activity.id == "run:queued-run"
+                && activity.status == "queued"
+                && activity.waiting_reason.as_deref() == Some("Waiting for worker capacity.")
+        }));
+        assert!(snapshot
+            .agent_activity
+            .iter()
+            .any(|activity| { activity.id == "run:input-run" && activity.status == "running" }));
+        for id in ["review:running-review", "planning:generating-plan"] {
+            let activity = snapshot
+                .agent_activity
+                .iter()
+                .find(|activity| activity.id == id)
+                .expect("review and planning work appears in agent activity");
+            assert_eq!(activity.worker_id.as_deref(), Some("local"));
+            assert_eq!(activity.worker_state.as_deref(), Some("online"));
+        }
+        let json = serde_json::to_string(&snapshot).expect("snapshot serializes");
+        assert!(!json.contains("\"output\""));
+        assert!(!json.contains("\"events\""));
+        database
+            .resolve_failed_run(
+                "a-latest-failed-run",
+                "failed-blocked-recovery",
+                "escalate",
+                Some("Human recovery is required"),
+            )
+            .expect("failed run recovery is resolved")
+            .expect("failed task exists");
+        let resolved_snapshot = database
+            .get_project_workflow_snapshot("project-workflow")
+            .expect("resolved workflow snapshot loads");
+        assert!(!resolved_snapshot
+            .attention
+            .iter()
+            .any(|item| item.entity_id.as_deref() == Some("a-latest-failed-run")));
+        database
+            .move_task("backlog", TaskStatus::Ready, usize::MAX)
+            .expect("readiness probe becomes Ready")
+            .expect("readiness probe exists");
+        let constrained_snapshot = database
+            .get_project_workflow_snapshot_with_scheduler_reasons(
+                "project-workflow",
+                HashMap::from([
+                    (
+                        "backlog".into(),
+                        "No project worker provides: android.".into(),
+                    ),
+                    (
+                        "ready".into(),
+                        "No project worker provides: android.".into(),
+                    ),
+                ]),
+            )
+            .expect("live scheduler readiness projects");
+        let constrained_ready = constrained_snapshot
+            .stages
+            .iter()
+            .flat_map(|stage| stage.tasks.iter())
+            .find(|task| task.id == "backlog")
+            .expect("constrained Ready task projects");
+        assert_eq!(
+            constrained_ready.readiness.as_ref(),
+            Some(&super::WorkflowReadiness {
+                ready: false,
+                reason: Some("No project worker provides: android.".into()),
+            })
+        );
+        assert_eq!(
+            constrained_ready.next_action.kind,
+            "resolve_scheduling_blocker"
+        );
+        assert_eq!(
+            constrained_snapshot
+                .agent_activity
+                .iter()
+                .find(|activity| activity.task_id.as_deref() == Some("ready"))
+                .and_then(|activity| activity.waiting_reason.as_deref()),
+            Some("No project worker provides: android.")
+        );
+
         drop(database);
         fs::remove_file(database_path).expect("temporary database removes");
     }
@@ -7874,8 +9889,19 @@ mod tests {
             })
             .expect("task saves");
         database
-            .move_task("task-1", TaskStatus::Review, 0)
-            .expect("task enters review");
+            .move_task("task-1", TaskStatus::Ready, 0)
+            .expect("task becomes ready");
+        database
+            .start_run(NewRun {
+                id: "reviewable-run".into(),
+                task_id: "task-1".into(),
+                agent_id: "implementer".into(),
+                worker_id: "local".into(),
+            })
+            .expect("implementation starts");
+        database
+            .finish_run("reviewable-run", RunStatus::Completed, Some(0), None)
+            .expect("implementation completes");
         assert!(database
             .start_agent_review(NewAgentReview {
                 id: "self-review".into(),
@@ -8022,9 +10048,7 @@ mod tests {
                 .status,
             TaskStatus::InProgress
         );
-        reopened
-            .move_task("task-1", TaskStatus::Review, 0)
-            .expect("task returns to review");
+        transition_task_for_test(&mut reopened, "task-1", TaskStatus::Review);
         assert_eq!(
             reopened
                 .approve_task_review("task-1", "integration-1")
@@ -9521,8 +11545,22 @@ mod tests {
             .contains("retry limit"));
 
         database
-            .move_task("approved-task", TaskStatus::Review, 0)
-            .expect("task enters review");
+            .queue_run_recovery(
+                "failed-run",
+                "review-ready-retry",
+                "review-ready-recovery",
+                "implementer",
+                "resume",
+            )
+            .expect("failed run recovery queues")
+            .expect("failed run exists");
+        database
+            .claim_next_run("local")
+            .expect("recovery claims")
+            .expect("recovery run starts");
+        database
+            .finish_run("review-ready-retry", RunStatus::Completed, Some(0), None)
+            .expect("recovered implementation completes");
         database
             .start_agent_review(NewAgentReview {
                 id: "failed-review".into(),
