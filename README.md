@@ -1,12 +1,23 @@
 # Orchestr
 
 Orchestr is a local-first engineering control room for Git-backed projects,
-Kanban work, and human-supervised AI workers. The current workflow includes
-bounded parallel execution, durable run and integration recovery, and
-traceable Git reverts for integrated regressions. Agents can pause with a
-persisted Needs Input request, while scoped project blockers suppress unsafe
-automatic scheduling until their shared cause is resolved. Accepted ADRs now
-provide durable, task-relevant project knowledge to implementers and reviewers.
+Kanban work, and human-supervised AI workers. Its default Workflow Cockpit
+projects work into four readable stages: Queue, Build, Verify & Land, and Done.
+An Attention tray gathers work that needs a human decision, while the Agent
+Activity rail shows live and queued execution. Cards explain the current actor,
+why work is waiting, and what happens next; a phase-aware inspector reveals the
+relevant work, activity, or review details on demand. The Full Lifecycle view
+remains available for diagnostics.
+
+The cockpit is a focused projection, not a weaker state machine. Orchestr still
+persists the canonical Backlog, Ready, In Progress, Needs Input, Review,
+Approved, Integrating, Blocked, and Done statuses, and Done still requires
+accepted changes on a healthy integration branch. The workflow includes bounded
+parallel execution, durable run and integration recovery, and traceable Git
+reverts for integrated regressions. Agents can pause with a persisted Needs
+Input request, while scoped project blockers suppress unsafe automatic
+scheduling until their shared cause is resolved. Accepted ADRs provide durable,
+task-relevant project knowledge to implementers and reviewers.
 Authenticated TLS remote workers can execute project-assigned tasks on another
 machine while their output and lifecycle remain visible in the same timeline.
 The worker inventory exposes editable names and labels, machine capabilities,
@@ -23,6 +34,26 @@ Agents now coordinate through a persisted project ledger rather than hidden
 peer-to-peer messages. Typed requests, blockers, interface changes, comments,
 escalations, replies, and task references remain visible to humans and are
 injected into relevant later task runs.
+
+## Screenshots
+
+The views below use representative local demo data.
+
+### Delivery workflow
+
+![Orchestr's full task lifecycle with project health, flow capacity, and repository status](docs/screenshots/workflow-board.png)
+
+### Task execution and human supervision
+
+![Task inspector showing execution state, human input controls, and the activity timeline](docs/screenshots/task-inspector.png)
+
+### Integrated project progress
+
+![Milestone progress based on integrated outcomes and integration-branch health](docs/screenshots/project-progress.png)
+
+### Worker inventory
+
+![Local and remote workers with provider readiness, capabilities, and routing metadata](docs/screenshots/worker-inventory.png)
 
 ## M0 development
 
