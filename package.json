@@ -19,7 +19,7 @@
     "apps/*"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
     "crap4ts": "^1.0.1"
